@@ -14,7 +14,7 @@ import { useChatStore } from "@/stores/chat";
 import { useNotificationStore } from "@/stores/notifications";
 import { conversationsApi } from "@/api/conversations";
 import { teamsApi } from "@/api/teams";
-import { renderMarkdown } from "@/utils/markdown";
+import { renderMarkdown, renderMarkdownAsync } from "@/utils/markdown";
 import type { Agent, Knowledge, WsAdapter } from "@/types";
 import type { SendOptions } from "@/components/Composer.vue";
 
@@ -120,6 +120,24 @@ function agentDisplay(id: string): { label: string; icon: string; color: string;
 function md(text: string) {
   return renderMarkdown(text);
 }
+
+// Post-process Mermaid blocks after DOM updates
+watch(() => chat.messages.length, async () => {
+  await nextTick();
+  const blocks = document.querySelectorAll('.md-body pre code.language-mermaid');
+  for (const block of blocks) {
+    const pre = block.parentElement;
+    if (!pre || pre.dataset.mermaidDone) continue;
+    pre.dataset.mermaidDone = '1';
+    const code = block.textContent || '';
+    try {
+      const html = await renderMarkdownAsync(`\`\`\`mermaid\n${code}\n\`\`\``);
+      const wrapper = document.createElement('div');
+      wrapper.innerHTML = html;
+      pre.replaceWith(wrapper.firstElementChild!);
+    } catch { /* leave as code block */ }
+  }
+});
 
 // Profiles available to add to the roundtable (each maps to a unique agent).
 const availableToAdd = computed(() => {

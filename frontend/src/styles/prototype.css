@@ -3190,108 +3190,114 @@ body[data-atmos="cinnabar"] {
     .map-row .cfg-input { font-size: 11px; }
   }
 
-  /* ═════════ Markdown in chat messages ═════════ */
-  .md-body { font-size: 14px; line-height: 1.65; color: inherit; }
+  /* ═════════ Markdown in chat messages (markdown-it) ═════════ */
+  .md-body { font-size: 14px; line-height: 1.65; color: inherit; word-break: break-word; }
   .md-body > :first-child { margin-top: 0; }
   .md-body > :last-child { margin-bottom: 0; }
-  .md-body .md-p { margin: 0 0 10px; }
-  .md-body .md-h { font-family: var(--font-serif); font-weight: 600; color: var(--ink); line-height: 1.25; }
-  .md-body .md-h1 { font-size: 21px; margin: 4px 0 10px; }
-  .md-body .md-h2 { font-size: 18px; margin: 18px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--rule-soft); }
-  .md-body .md-h3 { font-size: 15.5px; margin: 14px 0 6px; }
-  .md-body .md-h4, .md-body .md-h5, .md-body .md-h6 { font-size: 14px; margin: 12px 0 5px; font-family: var(--font-sans); }
+  .md-body p { margin: 0 0 10px; }
+  .md-body h1, .md-body h2, .md-body h3, .md-body h4, .md-body h5, .md-body h6 {
+    font-weight: 600; color: var(--ink); line-height: 1.25;
+  }
+  .md-body h1 { font-size: 21px; margin: 4px 0 10px; }
+  .md-body h2 { font-size: 18px; margin: 18px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--rule-soft); }
+  .md-body h3 { font-size: 15.5px; margin: 14px 0 6px; }
+  .md-body h4, .md-body h5, .md-body h6 { font-size: 14px; margin: 12px 0 5px; }
   .md-body strong { font-weight: 700; color: var(--ink); }
   .md-body em { font-style: italic; }
   .md-body del { color: var(--ink-mute); }
   .md-body a { color: var(--accent-deep); text-decoration: underline; text-underline-offset: 2px; }
   .md-body a:hover { color: var(--accent); }
-  .md-body .md-ul, .md-body .md-ol { margin: 4px 0 12px; padding-left: 22px; }
-  .md-body .md-ul { list-style: none; padding-left: 4px; }
-  .md-body .md-ul > li { position: relative; padding-left: 18px; margin-bottom: 5px; }
-  .md-body .md-ul > li::before {
+  .md-body ul, .md-body ol { margin: 4px 0 12px; padding-left: 22px; }
+  .md-body ul { list-style: none; padding-left: 4px; }
+  .md-body ul > li { position: relative; padding-left: 18px; margin-bottom: 5px; }
+  .md-body ul > li::before {
     content: ''; position: absolute; left: 3px; top: 9px;
     width: 5px; height: 5px; border-radius: 50%;
     background: var(--accent); opacity: 0.85;
   }
-  .md-body .md-ol { padding-left: 22px; }
-  .md-body .md-ol > li { margin-bottom: 5px; }
-  .md-body .md-ol > li::marker { color: var(--accent-deep); font-weight: 600; }
-  .md-body .md-ul li.md-task { padding-left: 0; display: flex; align-items: flex-start; gap: 9px; }
-  .md-body .md-ul li.md-task::before { display: none; }
-  .md-body .md-check {
-    width: 15px; height: 15px; border-radius: 4px; flex-shrink: 0; margin-top: 2px;
-    border: 1.5px solid var(--ink-faint);
-    display: grid; place-items: center;
-    background: transparent;
-  }
-  .md-body .md-check.on { background: var(--ok); border-color: var(--ok); }
-  .md-body .md-check.on::after {
-    content: ''; width: 8px; height: 5px; margin-top: -1px;
-    border-left: 1.6px solid white; border-bottom: 1.6px solid white;
-    transform: rotate(-45deg);
-  }
-  .md-body .md-task > span:last-child { flex: 1; min-width: 0; }
-  .md-body .md-quote {
+  .md-body ol { padding-left: 22px; }
+  .md-body ol > li { margin-bottom: 5px; }
+  .md-body ol > li::marker { color: var(--accent-deep); font-weight: 600; }
+  .md-body blockquote {
     border-left: 3px solid var(--accent);
     padding: 2px 0 2px 13px; margin: 0 0 12px;
     color: var(--ink-soft); font-style: italic;
   }
-  .md-body .md-quote .md-p { margin-bottom: 6px; }
-  .md-body .md-code {
+  .md-body blockquote p { margin-bottom: 6px; }
+  .md-body code {
     font-family: var(--font-mono); font-size: 0.88em;
     background: rgba(29,26,20,0.07); color: var(--accent-deep);
     padding: 1.5px 5px; border-radius: 5px;
   }
-  body.dark .md-body .md-code, body[data-atmos="night"] .md-body .md-code, body[data-atmos="ink"] .md-body .md-code { background: rgba(255,255,255,0.08); }
-  .md-body .md-pre {
+  body.dark .md-body code, body[data-atmos="night"] .md-body code { background: rgba(255,255,255,0.08); }
+  .md-body pre {
     background: #1d1a14; color: #f0ebde;
     border-radius: var(--r-sm); padding: 13px 15px; margin: 4px 0 12px;
     overflow-x: auto;
   }
-  .md-body .md-pre code { font-family: var(--font-mono); font-size: 12.5px; line-height: 1.6; white-space: pre; color: inherit; background: none; padding: 0; }
-  .md-body .md-hr { border: none; border-top: 1px solid var(--rule); margin: 14px 0; }
-  .md-body .md-table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 4px 0 12px; }
-  .md-body .md-table th {
+  .md-body pre code {
+    font-family: var(--font-mono); font-size: 12.5px; line-height: 1.6;
+    white-space: pre; color: inherit; background: none; padding: 0; border-radius: 0;
+  }
+  .md-body hr { border: none; border-top: 1px solid var(--rule); margin: 14px 0; }
+  .md-body table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 4px 0 12px; }
+  .md-body table th {
     text-align: left; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
     color: var(--ink-mute); font-weight: 600; padding: 7px 10px;
     border-bottom: 2px solid var(--ink);
   }
-  .md-body .md-table td { padding: 7px 10px; border-bottom: 1px solid var(--rule-soft); color: var(--ink-soft); }
-  .md-body .md-table tr:last-child td { border-bottom: none; }
+  .md-body table td { padding: 7px 10px; border-bottom: 1px solid var(--rule-soft); color: var(--ink-soft); }
+  .md-body table tr:last-child td { border-bottom: none; }
 
-  /* mermaid flowchart block — always on a light surface for legibility */
-  .md-body .mermaid-wrap {
-    background: #fffdf8;
-    border: 1px solid var(--rule);
-    border-radius: var(--r-sm);
-    margin: 6px 0 12px;
-    overflow: hidden;
+  /* ── Code block wrapper (copy button + language label) ── */
+  .md-body .code-block-wrapper { position: relative; margin: 4px 0 12px; }
+  .md-body .code-lang {
+    position: absolute; top: 0; left: 12px;
+    font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: rgba(240,235,222,0.45); font-weight: 600; font-family: var(--font-mono);
+    padding: 4px 0;
   }
-  body.dark .md-body .mermaid-wrap, body[data-atmos="night"] .md-body .mermaid-wrap, body[data-atmos="ink"] .md-body .mermaid-wrap {
-    border-color: rgba(255,255,255,0.1);
+  .md-body .code-copy-btn {
+    position: absolute; top: 6px; right: 8px;
+    background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 5px; padding: 3px 7px; cursor: pointer;
+    font-size: 13px; line-height: 1; opacity: 0; transition: opacity 0.15s;
+    z-index: 2;
   }
-  .md-body .mermaid-cap {
-    font-size: 9.5px; letter-spacing: 0.18em; text-transform: uppercase;
-    color: #b8852a; font-weight: 700;
-    padding: 9px 14px 0;
-    font-family: var(--font-mono);
+  .md-body .code-block-wrapper:hover .code-copy-btn { opacity: 1; }
+  .md-body .code-copy-btn:hover { background: rgba(255,255,255,0.15); }
+
+  /* ── KaTeX math ── */
+  .md-body .katex-display { margin: 8px 0; overflow-x: auto; }
+  .md-body .katex { font-size: 1.05em; }
+
+  /* ── Mermaid diagrams ── */
+  .md-body .mermaid-wrapper {
+    background: #fffdf8; border: 1px solid var(--rule);
+    border-radius: var(--r-sm); margin: 6px 0 12px;
+    padding: 12px; overflow-x: auto; text-align: center;
   }
-  .md-body .fl-canvas {
-    display: flex; justify-content: center;
-    padding: 10px 14px 16px;
-    overflow-x: auto;
+  .md-body .mermaid-wrapper svg { max-width: 100%; height: auto; }
+  .md-body .mermaid-error {
+    background: #fff0f0; border: 1px solid #e0b0b0;
+    border-radius: var(--r-sm); padding: 8px 12px; margin: 6px 0 12px;
+    color: #a03030; font-size: 12px;
   }
-  .md-body .fl-svg { max-width: 100%; height: auto; display: block; }
-  .md-body .fl-node { fill: #faf3df; stroke: #b8852a; stroke-width: 1.4; }
-  .md-body .fl-diamond { fill: #fbeed2; }
-  .md-body .fl-text {
-    fill: #20140f; font-family: 'Inter','Noto Sans SC',sans-serif;
-    font-size: 13px; font-weight: 500;
+  body.dark .md-body .mermaid-wrapper, body[data-atmos="night"] .md-body .mermaid-wrapper {
+    background: #1a1a2e; border-color: rgba(255,255,255,0.1);
   }
-  .md-body .fl-edge { fill: none; stroke: #ad9f86; stroke-width: 1.5; }
-  .md-body .fl-arrowhead { fill: #ad9f86; }
-  .md-body .fl-elabel { fill: #6b6450; font-family: var(--font-mono); font-size: 10.5px; }
-  .md-body .fl-elabel-bg { fill: #fffdf8; }
+
+  /* ── highlight.js overrides for dark code blocks ── */
+  .md-body pre .hljs-keyword { color: #c792ea; }
+  .md-body pre .hljs-string { color: #c3e88d; }
+  .md-body pre .hljs-number { color: #f78c6c; }
+  .md-body pre .hljs-comment { color: #676e95; font-style: italic; }
+  .md-body pre .hljs-function { color: #82aaff; }
+  .md-body pre .hljs-built_in { color: #ffcb6b; }
+  .md-body pre .hljs-title { color: #82aaff; }
+  .md-body pre .hljs-params { color: #f0ebde; }
+  .md-body pre .hljs-attr { color: #ffcb6b; }
+  .md-body pre .hljs-literal { color: #f78c6c; }
 
   /* ── group channel chat ── */
   .ch-row { display: flex; }

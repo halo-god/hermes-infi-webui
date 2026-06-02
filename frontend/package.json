@@ -10,12 +10,19 @@
     "type-check": "vue-tsc --noEmit"
   },
   "dependencies": {
+    "@vscode/markdown-it-katex": "^1.1.2",
     "axios": "^1.7.2",
+    "highlight.js": "^11.11.1",
+    "katex": "^0.17.0",
+    "markdown-it": "^14.2.0",
+    "mermaid": "^11.15.0",
     "pinia": "^2.1.7",
     "vue": "^3.4.38",
     "vue-router": "^4.4.0"
   },
   "devDependencies": {
+    "@types/katex": "^0.16.8",
+    "@types/markdown-it": "^14.1.2",
     "@vitejs/plugin-vue": "^5.1.0",
     "typescript": "^5.5.3",
     "vite": "^5.4.0",
