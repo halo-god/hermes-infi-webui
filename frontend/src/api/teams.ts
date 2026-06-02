@@ -40,6 +40,15 @@ export const teamsApi = {
   async setSharedAgents(id: string, agentIds: string[]): Promise<TeamDetail> {
     return (await http.put<TeamDetail>(`/teams/${id}/shared-agents`, { agent_ids: agentIds })).data;
   },
+  async setSharedProfiles(id: string, profileIds: string[]): Promise<TeamDetail> {
+    return (await http.put<TeamDetail>(`/teams/${id}/shared-profiles`, { profile_ids: profileIds })).data;
+  },
+  async listKnowledge(id: string): Promise<Knowledge[]> {
+    return (await http.get<Knowledge[]>(`/teams/${id}/knowledge`)).data;
+  },
+  async clearChannel(id: string): Promise<void> {
+    await http.delete(`/teams/${id}/channel/messages`);
+  },
   async addKnowledge(id: string, data: { name: string; kind?: string; size_bytes?: number }): Promise<Knowledge> {
     return (await http.post<Knowledge>(`/teams/${id}/knowledge`, data)).data;
   },

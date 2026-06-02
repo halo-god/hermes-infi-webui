@@ -23,6 +23,7 @@ class Team(UUIDPrimaryKey, Timestamps, Base):
     join_mode: Mapped[str] = mapped_column(String(24), default="invite")
     policy: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     shared_agents: Mapped[list] = mapped_column(JSONB, default=lambda: ["hermes"])
+    shared_profile_ids: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     channel_mode: Mapped[str] = mapped_column(String(16), default="mention", nullable=False)
     invite_token: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
     invite_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

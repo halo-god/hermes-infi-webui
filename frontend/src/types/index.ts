@@ -301,6 +301,7 @@ export interface TeamDetail extends Team {
   my_role: string;
   members: Member[];
   shared_agents: string[];
+  shared_profile_ids: string[];
   stats: TeamStats;
   knowledge: Knowledge[];
   activity: ActivityItem[];

@@ -13,8 +13,9 @@ import ExtractItemsModal from "@/components/ExtractItemsModal.vue";
 import { useChatStore } from "@/stores/chat";
 import { useNotificationStore } from "@/stores/notifications";
 import { conversationsApi } from "@/api/conversations";
+import { teamsApi } from "@/api/teams";
 import { renderMarkdown } from "@/utils/markdown";
-import type { Agent, WsAdapter } from "@/types";
+import type { Agent, Knowledge, WsAdapter } from "@/types";
 import type { SendOptions } from "@/components/Composer.vue";
 
 const chat = useChatStore();
@@ -29,6 +30,7 @@ const showAgentMenu = ref(false);
 const showExtractModal = ref(false);
 const agentTab = ref("全部");
 const landingAgentId = ref("hermes");
+const teamKnowledge = ref<Knowledge[]>([]);
 // roundtable per-reply chosen state (keyed by messageId:slot)
 const chosenMap = ref<Record<string, boolean>>({});
 
@@ -37,6 +39,11 @@ const AGENT_TABS = ["全部", "官方", "协作", "办公", "创作"];
 onMounted(async () => {
   if (!chat.agents.length) await chat.loadAgents();
   if (!chat.profiles.length) await chat.loadProfiles();
+  // Set landing agent from first available profile
+  if (chat.profiles.length) {
+    const firstProfile = chat.profiles.find((p) => p.is_active && p.default_agent_id);
+    if (firstProfile?.default_agent_id) landingAgentId.value = firstProfile.default_agent_id;
+  }
   const cid = route.query.c as string | undefined;
   const teamCtx = route.query.team as string | undefined;
   const projCtx = route.query.project as string | undefined;
@@ -45,13 +52,26 @@ onMounted(async () => {
     await chat.openConversation(cid);
     await scrollDown();
   } else if (teamCtx || projCtx) {
-    const d = await conversationsApi.create({ primary_agent_id: "hermes", team_id: teamCtx, project_id: projCtx, first_message: seed });
+    const d = await conversationsApi.create({ primary_agent_id: landingAgentId.value, team_id: teamCtx, project_id: projCtx, first_message: seed });
     await chat.loadConversations();
     await chat.openConversation(d.id);
     if (seed) draft.value = seed;
     await scrollDown();
   }
 });
+
+// Load team knowledge when the active conversation has a team_id
+watch(
+  () => activeConvo.value?.team_id,
+  async (tid) => {
+    if (tid) {
+      try { teamKnowledge.value = await teamsApi.listKnowledge(tid); } catch { teamKnowledge.value = []; }
+    } else {
+      teamKnowledge.value = [];
+    }
+  },
+  { immediate: true }
+);
 
 // ── Greeting: time-aware + voice-aware ──
 const greeting = computed(() => {
@@ -125,10 +145,23 @@ watch(() => chat.activeId, scrollDown);
 const openFileId = ref<string | null>(null);
 
 async function onSend(opts?: SendOptions) {
-  const text = draft.value.trim();
+  let text = draft.value.trim();
   if (!text || chat.streaming) return;
   draft.value = "";
   if (opts?.stagedFiles?.length) showWorkspace.value = true;
+  // Prepend knowledge content inline
+  if (opts?.knowledgeIds?.length && activeConvo.value?.team_id) {
+    const tid = activeConvo.value.team_id;
+    const blocks: string[] = [];
+    for (const kid of opts.knowledgeIds) {
+      try {
+        const content = await teamsApi.knowledgeContent(tid, kid);
+        const item = teamKnowledge.value.find((k) => k.id === kid);
+        if (content) blocks.push(`【知识库: ${item?.name || kid}】\n${content}`);
+      } catch { /* ignore */ }
+    }
+    if (blocks.length) text = blocks.join("\n\n") + "\n\n" + text;
+  }
   await chat.send(text, landingAgentId.value, opts);
   await scrollDown();
 }
@@ -205,6 +238,7 @@ const wsAdapter = computed<WsAdapter>(() => {
           :placeholder="`给 ${landingAgent?.label || 'Hermes'} 发消息…  ⌘K 搜索 · Enter 发送`"
           :agent="{ label: landingAgent?.label, color: landingAgent?.color, model: landingAgent?.version || 'ACP' }"
           :streaming="chat.streaming"
+          :knowledge-items="teamKnowledge.length ? teamKnowledge : undefined"
           @send="onSend"
         />
 
@@ -361,6 +395,7 @@ const wsAdapter = computed<WsAdapter>(() => {
           :agent="{ label: primaryAgent?.label, color: primaryAgent?.color, model: primaryAgent?.version || 'ACP' }"
           :streaming="chat.streaming"
           :conversation-id="chat.activeId || undefined"
+          :knowledge-items="teamKnowledge.length ? teamKnowledge : undefined"
           @send="onSend"
         />
       </div>

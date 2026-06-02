@@ -379,6 +379,7 @@ async function saveProfile() {
       await agentsApi.updateProfile(editingProfileId.value, {
         name: profileForm.name, scope: profileForm.scope, color: profileForm.color,
         icon: profileForm.icon, desc: profileForm.desc, default_model: profileForm.default_model,
+        team_id: profileForm.team_id,
       });
     } else {
       await agentsApi.createProfile({ ...profileForm });
@@ -998,6 +999,13 @@ async function deleteProfileItem(p: Profile) {
                 <option value="personal">个人</option>
                 <option value="global">全局</option>
                 <option value="team">团队</option>
+              </select>
+            </label>
+            <label v-if="profileForm.scope === 'team'" style="font-size: 12.5px; color: var(--ink-mute)">
+              关联团队
+              <select v-model="profileForm.team_id" style="width:100%;margin-top:4px;padding:6px 10px;border:1px solid var(--rule);border-radius:6px;font-size:13px;background:var(--bg-canvas);color:var(--ink)">
+                <option :value="null">不关联</option>
+                <option v-for="t in teamsOpt" :key="t.id" :value="t.id">{{ t.name }}</option>
               </select>
             </label>
           </div>
