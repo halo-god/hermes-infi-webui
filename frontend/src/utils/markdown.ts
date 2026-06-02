@@ -16,7 +16,10 @@ function inline(s: string): string {
   t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   t = t.replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>");
   t = t.replace(/~~([^~]+)~~/g, "<del>$1</del>");
-  t = t.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  t = t.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, text, url) => {
+    const safe = /^\s*(https?:\/\/|mailto:|#|\/)/i.test(url) ? url : '#';
+    return `<a href="${safe}" target="_blank" rel="noopener">${text}</a>`;
+  });
   return t;
 }
 

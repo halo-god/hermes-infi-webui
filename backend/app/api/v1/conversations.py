@@ -493,7 +493,8 @@ async def upload_file(
 ):
     convo = await _require_convo(db, conversation_id, user)
     raw = await file.read()
-    name = file.filename or "upload"
+    import re as _re
+    name = _re.sub(r"[^\w.\-\u4e00-\u9fff]", "_", file.filename or "upload").strip("_. ") or "upload"
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"
     TEXT_EXTS = {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
                  "yaml", "yml", "toml", "sh", "bash", "log", "xml", "css", "diff", "patch"}

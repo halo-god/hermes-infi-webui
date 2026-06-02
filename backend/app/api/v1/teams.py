@@ -478,7 +478,8 @@ async def upload_knowledge(
     from app.db.models.team import TeamKnowledge
     await svc.require_permission(db, team_id, user.id, "knowledge.upload")
     raw = await file.read()
-    name = file.filename or "upload"
+    import re as _re
+    name = _re.sub(r"[^\w.\-\u4e00-\u9fff]", "_", file.filename or "upload").strip("_. ") or "upload"
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"
     TEXT_EXTS = {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
                  "yaml", "yml", "toml", "sh", "log", "xml", "css", "diff", "patch"}
