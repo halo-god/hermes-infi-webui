@@ -33,6 +33,11 @@ const router = createRouter({
           component: () => import("@/views/AnalyticsView.vue"),
           meta: { requiresAdmin: true },
         },
+        {
+          path: "files",
+          name: "files",
+          component: () => import("@/views/FilesView.vue"),
+        },
       ],
     },
     {

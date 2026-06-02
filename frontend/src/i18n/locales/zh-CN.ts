@@ -28,6 +28,7 @@ export default {
     allChats: "所有会话",
     search: "搜索",
     schedule: "定时任务",
+    files: "文件管理",
     teams: "团队",
     admin: "后台管理",
     settings: "个人设置",

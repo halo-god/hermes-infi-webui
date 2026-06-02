@@ -28,6 +28,7 @@ export default {
     allChats: "All Chats",
     search: "Search",
     schedule: "Scheduled Tasks",
+    files: "Files",
     teams: "Teams",
     admin: "Admin",
     settings: "Settings",
