@@ -4,7 +4,8 @@ import { conversationsApi } from "@/api/conversations";
 import { agentsApi } from "@/api/agents";
 import { teamsApi } from "@/api/teams";
 import { tokenStore } from "@/api/client";
-import type { Agent, Conversation, Message, Team, WorkspaceFile, StreamEvent, ConfirmationRequest } from "@/types";
+import { useStream } from "@/composables/useStream";
+import type { Agent, Conversation, Message, Team, WorkspaceFile, ConfirmationRequest } from "@/types";
 import type { Profile } from "@/api/agents";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api/v1";
@@ -24,8 +25,8 @@ export const useChatStore = defineStore("chat", () => {
   const hasMoreMessages = ref(true);
   const loadingOlder = ref(false);
 
-  let es: EventSource | null = null;
-  let ws: WebSocket | null = null;
+  // ── Stream composable ──
+  const stream = useStream();
 
   async function loadTeams() {
     try {
@@ -56,8 +57,8 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   function closeStream() {
-    if (es) { es.close(); es = null; }
-    if (ws) { ws.close(); ws = null; }
+    stream.close();
+    stream.offAll();
   }
 
   async function openConversation(id: string) {
@@ -68,7 +69,6 @@ export const useChatStore = defineStore("chat", () => {
     try {
       const detail = await conversationsApi.get(id);
       messages.value = detail.messages;
-      // If we got fewer than 50, there are no older messages
       hasMoreMessages.value = detail.messages.length >= 50;
       activeAgents.value = detail.active_agent_ids || ["hermes"];
       files.value = await conversationsApi.files(id);
@@ -115,7 +115,7 @@ export const useChatStore = defineStore("chat", () => {
     if (!activeId.value) return;
     let next = [...activeAgents.value];
     if (next.includes(agentId)) {
-      if (agentId === "hermes") return; // keep the lead
+      if (agentId === "hermes") return;
       next = next.filter((a) => a !== agentId);
     } else {
       next.push(agentId);
@@ -136,85 +136,86 @@ export const useChatStore = defineStore("chat", () => {
     loadConversations().catch(() => {});
   }
 
-  function _apply(ev: StreamEvent) {
-    switch (ev.type) {
-      case "token": {
-        const m = find(ev.message_id);
-        if (m) m.content = { ...m.content, text: (m.content.text || "") + ev.delta };
-        break;
+  // ── Stream event handlers (4.1 message flow pattern) ──
+
+  function registerStreamHandlers() {
+    stream.offAll();
+
+    stream.on("token", (ev) => {
+      const m = find(ev.message_id);
+      if (m) m.content = { ...m.content, text: (m.content.text || "") + ev.delta };
+    });
+
+    stream.on("rt_start", (ev) => {
+      if (!find(ev.message_id)) {
+        const replies = [...ev.agents]
+          .sort((a, b) => a.slot - b.slot)
+          .map((a) => ({ agent_id: a.agent_id, text: "", status: "streaming" as const }));
+        messages.value.push({
+          id: ev.message_id,
+          conversation_id: activeId.value || "",
+          owner_id: null,
+          role: "roundtable",
+          agent_id: replies[0]?.agent_id || null,
+          content: { text: "", replies, merged: { text: "", status: "pending" } },
+          status: "streaming",
+          created_at: new Date().toISOString(),
+        });
       }
-      case "rt_start": {
-        if (!find(ev.message_id)) {
-          const replies = [...ev.agents]
-            .sort((a, b) => a.slot - b.slot)
-            .map((a) => ({ agent_id: a.agent_id, text: "", status: "streaming" as const }));
-          messages.value.push({
-            id: ev.message_id,
-            conversation_id: activeId.value || "",
-            owner_id: null,
-            role: "roundtable",
-            agent_id: replies[0]?.agent_id || null,
-            content: { text: "", replies, merged: { text: "", status: "pending" } },
-            status: "streaming",
-            created_at: new Date().toISOString(),
-          });
+    });
+
+    stream.on("rt_token", (ev) => {
+      const r = find(ev.message_id)?.content.replies?.[ev.slot];
+      if (r) r.text += ev.delta;
+    });
+
+    stream.on("rt_reply_done", (ev) => {
+      const r = find(ev.message_id)?.content.replies?.[ev.slot];
+      if (r) r.status = "complete";
+    });
+
+    stream.on("merge_start", (ev) => {
+      const merged = find(ev.message_id)?.content.merged;
+      if (merged) merged.status = "streaming";
+    });
+
+    stream.on("merge_token", (ev) => {
+      const merged = find(ev.message_id)?.content.merged;
+      if (merged) merged.text += ev.delta;
+    });
+
+    stream.on("file", () => {
+      if (activeId.value) {
+        conversationsApi.files(activeId.value).then((f) => (files.value = f)).catch(() => {});
+      }
+    });
+
+    stream.on("confirmation_request", (ev) => {
+      pendingConfirmations.value.push(ev.request);
+    });
+
+    stream.on("confirmation_response", (ev) => {
+      pendingConfirmations.value = pendingConfirmations.value.filter(
+        (r) => r.id !== ev.request_id,
+      );
+    });
+
+    stream.on("done", (ev) => {
+      const m = find(ev.message_id);
+      if (m) {
+        m.status = (ev.status as Message["status"]) || "complete";
+        if (m.content.merged && m.content.merged.status === "streaming") {
+          m.content.merged.status = "complete";
         }
-        break;
       }
-      case "rt_token": {
-        const r = find(ev.message_id)?.content.replies?.[ev.slot];
-        if (r) r.text += ev.delta;
-        break;
-      }
-      case "rt_reply_done": {
-        const r = find(ev.message_id)?.content.replies?.[ev.slot];
-        if (r) r.status = "complete";
-        break;
-      }
-      case "merge_start": {
-        const merged = find(ev.message_id)?.content.merged;
-        if (merged) merged.status = "streaming";
-        break;
-      }
-      case "merge_token": {
-        const merged = find(ev.message_id)?.content.merged;
-        if (merged) merged.text += ev.delta;
-        break;
-      }
-      case "file": {
-        if (activeId.value) {
-          conversationsApi.files(activeId.value).then((f) => (files.value = f)).catch(() => {});
-        }
-        break;
-      }
-      case "confirmation_request": {
-        pendingConfirmations.value.push(ev.request);
-        break;
-      }
-      case "confirmation_response": {
-        pendingConfirmations.value = pendingConfirmations.value.filter(
-          (r) => r.id !== ev.request_id
-        );
-        break;
-      }
-      case "done": {
-        const m = find(ev.message_id);
-        if (m) {
-          m.status = (ev.status as Message["status"]) || "complete";
-          if (m.content.merged && m.content.merged.status === "streaming") {
-            m.content.merged.status = "complete";
-          }
-        }
-        refreshAfterTurn();
-        break;
-      }
-      case "error": {
-        const m = find(ev.message_id);
-        if (m) m.status = "error";
-        refreshAfterTurn();
-        break;
-      }
-    }
+      refreshAfterTurn();
+    });
+
+    stream.on("error", (ev) => {
+      const m = find(ev.message_id);
+      if (m) m.status = "error";
+      refreshAfterTurn();
+    });
   }
 
   async function send(
@@ -225,16 +226,13 @@ export const useChatStore = defineStore("chat", () => {
     if (!activeId.value) await newConversation(agentId);
     const id = activeId.value!;
 
-    // Upload any staged files now that we have a conversation ID
     let fileIds: string[] = [];
     if (opts?.stagedFiles?.length) {
       try {
         const uploaded = await Promise.all(opts.stagedFiles.map((f) => conversationsApi.upload(id, f)));
         fileIds = uploaded.map((r) => r.id);
         files.value = [...files.value, ...uploaded];
-      } catch {
-        /* upload failure is non-fatal; send message without file ids */
-      }
+      } catch { /* upload failure is non-fatal */ }
     }
 
     const passOpts = { profileId: opts?.profileId, webSearch: opts?.webSearch, deepThink: opts?.deepThink, fileIds };
@@ -242,20 +240,16 @@ export const useChatStore = defineStore("chat", () => {
     else await sendSingle(id, text, passOpts);
   }
 
-  /** Single agent: open SSE, wait until subscribed, then POST (no missed tokens). */
+  /** Single agent: open SSE, register handlers, then POST. */
   async function sendSingle(id: string, text: string, opts?: { profileId?: string; webSearch?: boolean; deepThink?: boolean; fileIds?: string[] }) {
     closeStream();
     streaming.value = true;
+    registerStreamHandlers();
+
     const token = tokenStore.access;
     const url = `${API_BASE}/conversations/${id}/stream?access_token=${encodeURIComponent(token || "")}`;
-    es = new EventSource(url);
-    es.onmessage = (e) => {
-      try { _apply(JSON.parse(e.data) as StreamEvent); } catch { /* heartbeat */ }
-    };
-    await new Promise<void>((resolve) => {
-      es!.onopen = () => resolve();
-      setTimeout(resolve, 600);
-    });
+    await stream.openSSE(url);
+
     const res = await conversationsApi.send(id, text, opts);
     messages.value.push(res.user_message, res.agent_message);
   }
@@ -264,21 +258,16 @@ export const useChatStore = defineStore("chat", () => {
   async function sendRoundtable(id: string, text: string, opts?: { profileId?: string; webSearch?: boolean; deepThink?: boolean; fileIds?: string[] }) {
     closeStream();
     streaming.value = true;
+    registerStreamHandlers();
+
     const token = tokenStore.access;
     const wsBase = API_BASE.startsWith("http")
       ? API_BASE.replace(/^http/, "ws")
       : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${API_BASE}`;
     const url = `${wsBase}/conversations/${id}/ws?access_token=${encodeURIComponent(token || "")}`;
-    ws = new WebSocket(url);
-    ws.onmessage = (e) => {
-      try { _apply(JSON.parse(e.data) as StreamEvent); } catch { /* noop */ }
-    };
-    ws.onclose = () => { ws = null; };
-    await new Promise<void>((resolve) => {
-      ws!.onopen = () => resolve();
-      setTimeout(resolve, 800);
-    });
-    // optimistic user bubble (server persists the real one)
+    await stream.openWS(url);
+
+    // Optimistic user bubble
     messages.value.push({
       id: `tmp-${Date.now()}`,
       conversation_id: id,
@@ -289,8 +278,9 @@ export const useChatStore = defineStore("chat", () => {
       status: "complete",
       created_at: new Date().toISOString(),
     });
+
     const { fileIds, ...restOpts } = opts || {};
-    ws?.send(JSON.stringify({ action: "send", text, ...restOpts, attached_file_ids: fileIds || [] }));
+    stream.send({ action: "send", text, ...restOpts, attached_file_ids: fileIds || [] });
   }
 
   async function cancel() {
@@ -347,6 +337,9 @@ export const useChatStore = defineStore("chat", () => {
     pendingConfirmations,
     hasMoreMessages,
     loadingOlder,
+    // Stream state (read-only exposure)
+    streamConnected: stream.connected,
+    streamError: stream.error,
     loadTeams,
     loadAgents,
     loadProfiles,

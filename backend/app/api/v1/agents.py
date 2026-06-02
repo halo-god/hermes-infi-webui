@@ -4,6 +4,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -93,6 +94,108 @@ async def delete_profile(
         raise HTTPException(status_code=404, detail="助手不存在")
     await db.delete(p)
     await db.commit()
+
+
+@router.post("/profiles/{profile_id}/clone", response_model=ProfileOut, status_code=201)
+async def clone_profile(
+    profile_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Clone an existing profile — copies all fields, generates a new handle."""
+    _require_admin(user)
+    p = await db.get(Profile, profile_id)
+    if p is None:
+        raise HTTPException(status_code=404, detail="助手不存在")
+    clone = Profile(
+        name=f"{p.name} (副本)",
+        handle=f"{p.handle}-copy-{uuid.uuid4().hex[:6]}",
+        scope=p.scope,
+        color=p.color,
+        icon=p.icon,
+        desc=p.desc,
+        default_agent_id=p.default_agent_id,
+        default_model=p.default_model,
+        team_id=p.team_id,
+        path=p.path,
+    )
+    db.add(clone)
+    await db.commit()
+    await db.refresh(clone)
+    return ProfileOut.model_validate(clone)
+
+
+class ProfileExport(BaseModel):
+    """Portable profile export format."""
+    name: str
+    handle: str
+    scope: str
+    color: str
+    icon: str
+    desc: str
+    default_agent_id: str
+    default_model: str
+
+
+@router.get("/profiles/{profile_id}/export", response_model=ProfileExport)
+async def export_profile(
+    profile_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Export a profile as a portable JSON object (no team_id, no path)."""
+    p = await db.get(Profile, profile_id)
+    if p is None:
+        raise HTTPException(status_code=404, detail="助手不存在")
+    return ProfileExport(
+        name=p.name,
+        handle=p.handle,
+        scope=p.scope,
+        color=p.color,
+        icon=p.icon,
+        desc=p.desc,
+        default_agent_id=p.default_agent_id,
+        default_model=p.default_model,
+    )
+
+
+class ProfileImportRequest(BaseModel):
+    """Payload for importing one or more profiles."""
+    profiles: list[ProfileExport]
+
+
+@router.post("/profiles/import", response_model=list[ProfileOut], status_code=201)
+async def import_profiles(
+    payload: ProfileImportRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Import profiles from exported JSON. Skips duplicates by handle."""
+    _require_admin(user)
+    existing = await db.execute(select(Profile.handle))
+    existing_handles = set(existing.scalars().all())
+    created: list[Profile] = []
+    for item in payload.profiles:
+        handle = item.handle
+        if handle in existing_handles:
+            handle = f"{item.handle}-{uuid.uuid4().hex[:6]}"
+        p = Profile(
+            name=item.name,
+            handle=handle,
+            scope=item.scope,
+            color=item.color,
+            icon=item.icon,
+            desc=item.desc,
+            default_agent_id=item.default_agent_id,
+            default_model=item.default_model,
+        )
+        db.add(p)
+        created.append(p)
+        existing_handles.add(handle)
+    await db.commit()
+    for p in created:
+        await db.refresh(p)
+    return [ProfileOut.model_validate(p) for p in created]
 
 
 @router.post("/profiles/scan", response_model=ScanProfilesResponse, status_code=200)

@@ -70,4 +70,13 @@ export const agentsApi = {
   async scanProfiles(): Promise<ScanResult> {
     return (await http.post("/profiles/scan")).data;
   },
+  async cloneProfile(id: string): Promise<Profile> {
+    return (await http.post<Profile>(`/profiles/${id}/clone`)).data;
+  },
+  async exportProfile(id: string): Promise<Record<string, string>> {
+    return (await http.get(`/profiles/${id}/export`)).data;
+  },
+  async importProfiles(profiles: Record<string, string>[]): Promise<Profile[]> {
+    return (await http.post<Profile[]>("/profiles/import", { profiles })).data;
+  },
 };

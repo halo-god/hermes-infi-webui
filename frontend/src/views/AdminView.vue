@@ -397,6 +397,57 @@ async function deleteProfileItem(p: Profile) {
   await agentsApi.deleteProfile(p.id);
   await loadProfiles();
 }
+
+async function cloneProfile(p: Profile) {
+  try {
+    await agentsApi.cloneProfile(p.id);
+    await loadProfiles();
+  } catch { /* noop */ }
+}
+
+async function exportProfile(p: Profile) {
+  try {
+    const data = await agentsApi.exportProfile(p.id);
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `profile-${p.handle}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch { /* noop */ }
+}
+
+async function exportAllProfiles() {
+  try {
+    const all = await Promise.all(profiles.value.map((p) => agentsApi.exportProfile(p.id)));
+    const blob = new Blob([JSON.stringify(all, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "profiles-export.json";
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch { /* noop */ }
+}
+
+const importFileRef = ref<HTMLInputElement | null>(null);
+
+async function handleImportFile(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const parsed = JSON.parse(text);
+    const items = Array.isArray(parsed) ? parsed : [parsed];
+    await agentsApi.importProfiles(items);
+    await loadProfiles();
+  } catch {
+    alert("导入失败：文件格式不正确");
+  }
+  // Reset input
+  if (importFileRef.value) importFileRef.value.value = "";
+}
 </script>
 
 <template>
@@ -932,6 +983,9 @@ async function deleteProfileItem(p: Profile) {
             <button class="btn" :disabled="scanLoading" @click="scanAgents">
               <Icon name="refresh" :size="13" /> {{ scanLoading ? "扫描中…" : "扫描 Agent" }}
             </button>
+            <button class="btn" @click="exportAllProfiles"><Icon name="download" :size="13" /> 导出全部</button>
+            <button class="btn" @click="() => importFileRef?.click()"><Icon name="upload" :size="13" /> 导入</button>
+            <input ref="importFileRef" type="file" accept=".json" style="display:none" @change="handleImportFile" />
             <button class="btn primary" @click="openCreateProfile"><Icon name="plus" /> 新建助手</button>
           </div>
         </div>
@@ -1032,6 +1086,8 @@ async function deleteProfileItem(p: Profile) {
             </div>
             <span style="font-size:11px;padding:2px 8px;border-radius:999px;background:rgba(29,26,20,0.06);color:var(--ink-mute)">{{ SCOPE_LABEL[p.scope] || p.scope }}</span>
             <span style="font-size:10.5px;color:var(--ink-mute);font-family:var(--font-mono)">{{ p.default_model }}</span>
+            <button class="icon-btn" title="克隆" @click="cloneProfile(p)"><Icon name="copy" :size="13" /></button>
+            <button class="icon-btn" title="导出" @click="exportProfile(p)"><Icon name="download" :size="13" /></button>
             <button class="icon-btn" title="编辑" @click="openEditProfile(p)"><Icon name="edit" :size="13" /></button>
             <button class="icon-btn" title="删除" style="color:var(--danger)" @click="deleteProfileItem(p)"><Icon name="close" :size="13" /></button>
           </div>
