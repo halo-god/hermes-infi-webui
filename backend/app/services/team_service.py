@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import HTTPException, status
+from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -202,9 +202,14 @@ async def create_task(db: AsyncSession, project_id: uuid.UUID, data) -> ProjectT
 
 # ── team shared agents ──
 async def set_shared_agents(db: AsyncSession, team: Team, agent_ids: list[str]) -> Team:
-    if "hermes" not in agent_ids:
-        agent_ids = ["hermes", *agent_ids]
     team.shared_agents = agent_ids
+    await db.commit()
+    await db.refresh(team)
+    return team
+
+
+async def set_shared_profiles(db: AsyncSession, team: Team, profile_ids: list[str]) -> Team:
+    team.shared_profile_ids = profile_ids
     await db.commit()
     await db.refresh(team)
     return team

@@ -15,12 +15,14 @@ const props = defineProps<{
   streaming?: boolean;
   autofocus?: boolean;
   conversationId?: string;
+  knowledgeItems?: { id: string; name: string }[];
 }>();
 export interface SendOptions {
   profileId?: string;
   webSearch?: boolean;
   deepThink?: boolean;
   stagedFiles?: File[];
+  knowledgeIds?: string[];
 }
 
 const emit = defineEmits<{ "update:modelValue": [string]; send: [SendOptions] }>();
@@ -30,11 +32,13 @@ const wrap = ref<HTMLElement | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
 const showProfile = ref(false);
 const showAttach = ref(false);
+const showKnowledgePicker = ref(false);
 const webSearch = ref(false);
 const deepThink = ref(false);
 const profiles = ref<Profile[]>([]);
 const selected = ref<Profile | null>(null);
 const stagedFiles = ref<File[]>([]);
+const stagedKnowledge = ref<{ id: string; name: string }[]>([]);
 
 onMounted(async () => {
   document.addEventListener("mousedown", onDocClick);
@@ -50,6 +54,7 @@ function onDocClick(e: MouseEvent) {
   if (wrap.value && !wrap.value.contains(e.target as Node)) {
     showProfile.value = false;
     showAttach.value = false;
+    showKnowledgePicker.value = false;
   }
 }
 
@@ -77,8 +82,10 @@ function onKey(e: KeyboardEvent) {
 }
 function doSend() {
   const files = stagedFiles.value.length ? [...stagedFiles.value] : undefined;
+  const kIds = stagedKnowledge.value.length ? stagedKnowledge.value.map((k) => k.id) : undefined;
   stagedFiles.value = [];
-  emit("send", { profileId: selected.value?.id, webSearch: webSearch.value, deepThink: deepThink.value, stagedFiles: files });
+  stagedKnowledge.value = [];
+  emit("send", { profileId: selected.value?.id, webSearch: webSearch.value, deepThink: deepThink.value, stagedFiles: files, knowledgeIds: kIds });
 }
 function pickProfile(p: Profile) {
   selected.value = p;
@@ -87,10 +94,31 @@ function pickProfile(p: Profile) {
 function removeStagedFile(idx: number) {
   stagedFiles.value.splice(idx, 1);
 }
+function removeStagedKnowledge(idx: number) {
+  stagedKnowledge.value.splice(idx, 1);
+}
 
 function triggerUpload() {
   showAttach.value = false;
   fileInput.value?.click();
+}
+
+function openKnowledgePicker() {
+  showAttach.value = false;
+  showKnowledgePicker.value = true;
+}
+
+function toggleKnowledge(item: { id: string; name: string }) {
+  const idx = stagedKnowledge.value.findIndex((k) => k.id === item.id);
+  if (idx >= 0) {
+    stagedKnowledge.value.splice(idx, 1);
+  } else {
+    stagedKnowledge.value.push({ id: item.id, name: item.name });
+  }
+}
+
+function isKnowledgeSelected(id: string) {
+  return stagedKnowledge.value.some((k) => k.id === id);
 }
 
 function onFileSelected(e: Event) {
@@ -106,11 +134,16 @@ function onFileSelected(e: Event) {
   <div class="composer-wrap" ref="wrap">
     <input ref="fileInput" type="file" style="display:none" @change="onFileSelected" />
     <!-- staged file chips -->
-    <div v-if="stagedFiles.length" class="staged-files">
-      <span v-for="(f, i) in stagedFiles" :key="i" class="staged-chip">
+    <div v-if="stagedFiles.length || stagedKnowledge.length" class="staged-files">
+      <span v-for="(f, i) in stagedFiles" :key="'f'+i" class="staged-chip">
         <Icon name="paperclip" :size="11" />
         <span class="staged-name">{{ f.name }}</span>
         <button class="staged-rm" @click="removeStagedFile(i)">×</button>
+      </span>
+      <span v-for="(k, i) in stagedKnowledge" :key="'k'+i" class="staged-chip" style="background: var(--accent-soft, rgba(184,133,42,0.12));">
+        <Icon name="doc" :size="11" />
+        <span class="staged-name">{{ k.name }}</span>
+        <button class="staged-rm" @click="removeStagedKnowledge(i)">×</button>
       </span>
     </div>
     <div class="composer">
@@ -126,14 +159,34 @@ function onFileSelected(e: Event) {
       ></textarea>
       <div class="composer-toolbar">
         <div style="position: relative">
-          <button class="composer-tool" :class="{ active: showAttach }" title="附件" @click="showAttach = !showAttach"><Icon name="paperclip" /></button>
+          <button class="composer-tool" :class="{ active: showAttach }" title="附件" @click="showAttach = !showAttach; showKnowledgePicker = false"><Icon name="paperclip" /></button>
           <div v-if="showAttach" class="menu" style="bottom: 120%; left: 0; min-width: 220px">
             <div class="menu-label">添加到会话</div>
             <button class="menu-item" @click="triggerUpload">
               <Icon name="paperclip" /><span class="m-name">上传本地文件</span>
             </button>
-            <button class="menu-item" @click="showAttach = false"><Icon name="doc" /><span class="m-name">引用知识库</span></button>
+            <button class="menu-item" @click="openKnowledgePicker" :disabled="!knowledgeItems?.length">
+              <Icon name="doc" /><span class="m-name">引用知识库</span>
+              <span v-if="knowledgeItems?.length" style="margin-left:auto;font-size:11px;color:var(--ink-mute)">{{ knowledgeItems.length }}</span>
+            </button>
             <button class="menu-item" @click="showAttach = false"><Icon name="globe" /><span class="m-name">粘贴网页链接</span></button>
+          </div>
+          <!-- knowledge picker -->
+          <div v-if="showKnowledgePicker && knowledgeItems?.length" class="menu" style="bottom: 120%; left: 0; min-width: 260px; max-height: 240px; overflow-y: auto;">
+            <div class="menu-label">选择知识库条目</div>
+            <button
+              v-for="item in knowledgeItems"
+              :key="item.id"
+              class="menu-item"
+              :class="{ active: isKnowledgeSelected(item.id) }"
+              @click="toggleKnowledge(item)"
+            >
+              <Icon name="doc" :size="13" />
+              <span class="m-name">{{ item.name }}</span>
+              <Icon v-if="isKnowledgeSelected(item.id)" name="check" :size="12" style="margin-left:auto;color:var(--accent)" />
+            </button>
+            <div class="menu-sep"></div>
+            <button class="menu-item" style="color:var(--accent)" @click="showKnowledgePicker = false">确定 ({{ stagedKnowledge.length }} 已选)</button>
           </div>
         </div>
         <button class="composer-tool" :class="{ active: webSearch }" title="网页搜索" @click="webSearch = !webSearch"><Icon name="globe" /> 联网</button>

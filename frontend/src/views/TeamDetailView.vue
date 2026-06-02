@@ -16,11 +16,16 @@ import { teamsApi } from "@/api/teams";
 import { agentsApi, type Profile } from "@/api/agents";
 import { projectsApi } from "@/api/projects";
 import { useChatStore } from "@/stores/chat";
+import { useAuthStore } from "@/stores/auth";
+import { useNotificationStore } from "@/stores/notifications";
+import { renderMarkdown } from "@/utils/markdown";
 import type { Agent, FileItem, Member, Project, TeamDetail, TeamPolicy, WsAdapter } from "@/types";
 
 const route = useRoute();
 const router = useRouter();
 const chat = useChatStore();
+const auth = useAuthStore();
+const ns = useNotificationStore();
 const teamId = computed(() => route.params.id as string);
 const showNewProject = ref(false);
 const editingProject = ref<Project | null>(null);
@@ -44,6 +49,7 @@ const policy = ref<TeamPolicy | null>(null);
 const policyMap = reactive<Record<string, Record<string, boolean>>>({});
 const tab = ref<string>("overview");
 const menuFor = ref<string | null>(null);
+const menuPos = ref({ x: 0, y: 0 });
 const projMenuFor = ref<string | null>(null);
 
 const ROLE_LABEL: Record<string, string> = { owner: "所有者", admin: "管理员", member: "成员", viewer: "只读" };
@@ -148,6 +154,20 @@ const channelAttachments = ref<{ id: string; name: string }[]>([]);
 const showKnowledgePicker = ref(false);
 const chCardMsg = ref<Message | null>(null);
 const chCardPos = ref({ x: 0, y: 0 });
+const channelTa = ref<HTMLTextAreaElement | null>(null);
+const mentionQuery = ref("");
+const showMentionPicker = ref(false);
+const channelFileInput = ref<HTMLInputElement | null>(null);
+
+const mentionItems = computed(() => [
+  ...teamProfiles.value.map((p) => ({ kind: "agent" as const, id: p.handle || p.id, label: p.name, color: p.color || "#b8852a", icon: p.icon || "sparkle" })),
+  ...members.value.map((m) => ({ kind: "member" as const, id: m.email || m.user_id, label: m.name || m.email || "成员", color: m.color || "#b8852a", icon: "user" })),
+]);
+const filteredMentions = computed(() =>
+  mentionQuery.value
+    ? mentionItems.value.filter((x) => x.label.toLowerCase().includes(mentionQuery.value.toLowerCase()) || x.id.toLowerCase().includes(mentionQuery.value.toLowerCase()))
+    : mentionItems.value.slice(0, 10)
+);
 
 function stopChannelPoll() {
   if (channelPollTimer.value) { clearInterval(channelPollTimer.value); channelPollTimer.value = null; }
@@ -157,7 +177,22 @@ async function refreshChannelMessages() {
   if (!channelConvo.value) return;
   try {
     const d = await conversationsApi.get(channelConvo.value.id);
-    channelMessages.value = (d as any).messages || [];
+    const newMsgs: Message[] = (d as any).messages || [];
+    const oldCount = channelMessages.value.length;
+    channelMessages.value = newMsgs;
+    // Check for @mentions of current user in new messages
+    const me = auth.user;
+    if (me && newMsgs.length > oldCount) {
+      const myHandle = me.email?.split("@")[0] || "";
+      for (const m of newMsgs.slice(oldCount)) {
+        if (m.role !== "user") continue;
+        if (m.owner_id === me.id) continue;
+        const text = m.content.text || "";
+        if (text.includes(`@${me.email}`) || text.includes(`@${myHandle}`) || text.includes(`@${me.name}`)) {
+          ns.push({ title: "有人@了你", body: text.slice(0, 80), kind: "info" });
+        }
+      }
+    }
   } catch { /* ignore */ }
 }
 
@@ -248,6 +283,45 @@ async function updateChannelMode(mode: string) {
   await teamsApi.setChannelMode(teamId.value, mode);
 }
 
+async function clearChannelMessages() {
+  if (!confirm("确认清空所有群聊记录？此操作不可恢复。")) return;
+  await teamsApi.clearChannel(teamId.value);
+  channelMessages.value = [];
+}
+
+function onChannelInput(e: Event) {
+  const text = (e.target as HTMLTextAreaElement).value;
+  const cursor = (e.target as HTMLTextAreaElement).selectionStart;
+  const beforeCursor = text.slice(0, cursor);
+  const atMatch = beforeCursor.match(/@([\w一-鿿.-]*)$/);
+  if (atMatch) {
+    mentionQuery.value = atMatch[1];
+    showMentionPicker.value = true;
+  } else {
+    showMentionPicker.value = false;
+  }
+}
+
+function insertMention(id: string) {
+  const el = channelTa.value;
+  if (!el) return;
+  const cursor = el.selectionStart;
+  const beforeCursor = channelDraft.value.slice(0, cursor);
+  const atPos = beforeCursor.lastIndexOf("@");
+  channelDraft.value = channelDraft.value.slice(0, atPos) + "@" + id + " " + channelDraft.value.slice(cursor);
+  showMentionPicker.value = false;
+  nextTick(() => el.focus());
+}
+
+function onChannelFileSelected(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0];
+  if (!file || !channelConvo.value) return;
+  const { id: fid, name } = { id: URL.createObjectURL(file), name: file.name };
+  channelAttachments.value.push({ id: fid, name });
+  ns.toast(`已添加 ${name}`);
+  if (channelFileInput.value) channelFileInput.value.value = "";
+}
+
 function toggleKnowledgePicker() {
   showKnowledgePicker.value = !showKnowledgePicker.value;
 }
@@ -272,10 +346,6 @@ function showChCard(ev: MouseEvent, msg: Message) {
   chCardMsg.value = msg;
   chCardPos.value = { x: (ev.currentTarget as HTMLElement).getBoundingClientRect().left, y: (ev.currentTarget as HTMLElement).getBoundingClientRect().bottom + 6 };
 }
-function hideChCard() {
-  chCardMsg.value = null;
-}
-
 // ── computed stat footer values using real data ──
 const lastKnowledgeUpdate = computed(() => {
   const items = detail.value?.knowledge;
@@ -335,16 +405,13 @@ const team = computed(() => {
 function fmtSize(b: number): string {
   return b >= 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(b / 1024)) + " KB";
 }
-async function toggleSharedAgent(id: string) {
-  if (!can("agent.manage")) return;
-  const cur = new Set(team.value.sharedAgents);
-  cur.has(id) ? cur.delete(id) : cur.add(id);
-  await teamsApi.setSharedAgents(teamId.value, [...cur]);
-  await load();
-}
 async function openSharedAgentsModal() {
   if (!chat.profiles.length) await chat.loadProfiles();
   showSharedAgentsModal.value = true;
+}
+function onSharedAgentsUpdated(d: TeamDetail) {
+  detail.value = d;
+  showSharedAgentsModal.value = false;
 }
 async function addKnowledge() {
   editingKnowledge.value = null;
@@ -418,8 +485,13 @@ function shade(hex: string, percent: number) {
   const adj = (n: number) => Math.max(0, Math.min(255, Math.round(n + (percent / 100) * 255)));
   return "#" + [adj(r), adj(g), adj(b)].map((v) => v.toString(16).padStart(2, "0")).join("");
 }
-function toggleMenu(h: string) {
-  menuFor.value = menuFor.value === h ? null : h;
+function toggleMenu(h: string, e?: MouseEvent) {
+  if (menuFor.value === h) { menuFor.value = null; return; }
+  menuFor.value = h;
+  if (e?.currentTarget) {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    menuPos.value = { x: rect.right - 180, y: rect.bottom + 4 };
+  }
 }
 
 // ── actions wired to API ──
@@ -658,18 +730,8 @@ async function deleteTeam() {
             <div><span class="mem-role" :class="roleClass(m.role)">{{ m.role }}</span></div>
             <div style="font-size: 12px; color: var(--ink-mute)"><span class="dot-inline" :class="m.status"></span>{{ statusLabel(m.status) }}</div>
             <div class="col-last-active" style="font-size: 12px; color: var(--ink-mute)">{{ m.last }}</div>
-            <div style="position: relative">
-              <button v-if="(can('member.role') || can('member.remove')) && m.roleKey !== 'owner'" class="icon-btn" @click.stop="toggleMenu(m.handle)"><Icon name="settings" /></button>
-              <div v-if="menuFor === m.handle" class="menu" style="top: 34px; right: 0; min-width: 180px" @click.stop>
-                <template v-if="can('member.role')">
-                  <div class="menu-label">调整角色</div>
-                  <button v-for="r in ROLE_OPTIONS" :key="r" class="menu-item" :class="{ active: m.role === r }" @click="changeMemberRole(m.handle, r)">
-                    <Icon name="user" /><span class="m-name">{{ r }}</span><Icon v-if="m.role === r" name="check" style="margin-left: auto" />
-                  </button>
-                </template>
-                <div v-if="can('member.role') && can('member.remove')" class="menu-sep"></div>
-                <button v-if="can('member.remove')" class="menu-item danger" @click="removeMember(m.handle)"><Icon name="logout" /> <span class="m-name">移出团队</span></button>
-              </div>
+            <div>
+              <button v-if="(can('member.role') || can('member.remove')) && m.roleKey !== 'owner'" class="icon-btn" @click.stop="toggleMenu(m.handle, $event)"><Icon name="settings" /></button>
             </div>
           </div>
         </div>
@@ -727,12 +789,14 @@ async function deleteTeam() {
 
       <!-- CHANNEL (group chat) -->
       <template v-else-if="tab === 'channel'">
+        <input ref="channelFileInput" type="file" style="display:none" @change="onChannelFileSelected" />
         <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:14px">
           <div>
             <div style="font-family:var(--font-serif);font-size:22px;font-weight:600;color:var(--ink)">群聊频道</div>
             <div style="font-size:12.5px;color:var(--ink-mute);margin-top:2px">团队成员共享频道 · 输入 @助手名 呼出助手，或开启「始终响应」模式</div>
           </div>
           <div style="display:flex;align-items:center;gap:8px">
+            <button v-if="can('channel.clear')" class="btn" style="color:var(--danger);border-color:var(--danger)" @click="clearChannelMessages"><Icon name="close" :size="13" /> 清空记录</button>
             <span style="font-size:12px;color:var(--ink-mute)">响应模式：</span>
             <select :value="channelMode" @change="updateChannelMode(($event.target as HTMLSelectElement).value)"
               style="font-size:12.5px;padding:4px 8px;border:1px solid var(--rule);border-radius:6px;background:var(--bg-canvas);color:var(--ink)">
@@ -747,12 +811,12 @@ async function deleteTeam() {
           <div ref="channelScroller" style="flex:1;overflow-y:auto;padding:14px 18px;display:flex;flex-direction:column;gap:10px">
             <div v-if="channelLoading" style="text-align:center;color:var(--ink-mute);font-size:13px;padding:40px 0">加载中…</div>
             <div v-else-if="!channelMessages.length" style="text-align:center;color:var(--ink-mute);font-size:13px;padding:40px 0">
-              还没有消息。发送 @hermes + 问题，或开启「始终响应」模式。
+              还没有消息。发送 @助手名 + 问题，或开启「始终响应」模式。
             </div>
             <template v-for="m in channelMessages" :key="m.id">
               <!-- User message row -->
               <div v-if="m.role === 'user'" class="ch-row user" style="align-items:flex-end;gap:8px">
-                <div class="ch-bubble" v-html="m.content.text"></div>
+                <div class="ch-bubble" v-html="renderMarkdown(m.content.text || '')"></div>
                 <div class="ch-av"
                   :style="{ background: channelMemberInfo(m.owner_id)?.color || 'var(--accent)' }"
                   :title="channelMemberInfo(m.owner_id)?.name || '成员'"
@@ -769,12 +833,12 @@ async function deleteTeam() {
                   <Icon :name="agentInfo(m.agent_id || 'hermes').icon || 'sparkle'" :size="16"
                     :style="{ color: agentInfo(m.agent_id || 'hermes').color || '#b8852a' }" />
                 </div>
-                <div class="ch-bubble" v-html="m.content.markdown || m.content.text || '…'"></div>
+                <div class="ch-bubble" v-html="m.content.markdown || renderMarkdown(m.content.text || '') || '…'"></div>
               </div>
             </template>
           </div>
 
-          <!-- Knowledge attachment chips -->
+          <!-- Knowledge/file attachment chips -->
           <div v-if="channelAttachments.length" style="padding:6px 14px 0;display:flex;flex-wrap:wrap;gap:6px">
             <span v-for="a in channelAttachments" :key="a.id"
               style="display:inline-flex;align-items:center;gap:4px;background:var(--accent-soft);color:var(--accent);font-size:11.5px;padding:2px 8px;border-radius:12px">
@@ -793,14 +857,25 @@ async function deleteTeam() {
                 </button>
               </div>
             </div>
-            <div style="display:flex;gap:8px;align-items:flex-end">
+            <div style="position:relative;display:flex;gap:8px;align-items:flex-end">
+              <!-- @mention picker -->
+              <div v-if="showMentionPicker && filteredMentions.length" class="mention-picker">
+                <button v-for="m in filteredMentions" :key="m.id" class="menu-item" @click.stop="insertMention(m.id)">
+                  <Icon :name="m.icon" :size="13" />
+                  {{ m.label }}
+                  <span class="handle">@{{ m.id }}</span>
+                </button>
+              </div>
               <button class="icon-btn" title="引用知识库" @click="toggleKnowledgePicker" :style="showKnowledgePicker ? 'color:var(--accent)' : ''"><Icon name="paperclip" :size="15" /></button>
+              <button class="icon-btn" title="上传文件" @click="channelFileInput?.click()"><Icon name="paperclip2" :size="15" /></button>
               <textarea
+                ref="channelTa"
                 v-model="channelDraft"
-                placeholder="发消息… 输入 @hermes 呼出助手"
+                placeholder="发消息… 输入 @ 呼出助手或成员"
                 rows="2"
                 style="flex:1;resize:none;padding:8px 12px;border:1px solid var(--rule);border-radius:8px;font-size:13.5px;background:var(--bg-canvas);color:var(--ink);outline:none;font-family:inherit"
                 @keydown.enter.exact.prevent="sendChannelMessage"
+                @input="onChannelInput"
               ></textarea>
               <button class="btn primary" :disabled="!channelDraft.trim() || channelSending" @click="sendChannelMessage" style="height:36px;min-width:60px">
                 <Icon name="send" :size="14" />
@@ -811,13 +886,13 @@ async function deleteTeam() {
 
         <!-- Avatar info popover -->
         <div v-if="chCardMsg" class="ch-card" :style="{ left: chCardPos.x + 'px', top: chCardPos.y + 'px' }" @click.stop>
-          <template v-if="chCardMsg.role === 'user'">
+          <template v-if="chCardMsg?.role === 'user'">
             <div class="ch-card-name">{{ channelMemberInfo(chCardMsg.owner_id)?.name || '成员' }}</div>
-            <div class="ch-card-meta">{{ members.find(x => x.user_id === chCardMsg.owner_id)?.role || '' }}</div>
+            <div class="ch-card-meta">{{ members.find(x => x.user_id === chCardMsg!.owner_id)?.role || '' }}</div>
           </template>
           <template v-else>
-            <div class="ch-card-name">{{ agentInfo(chCardMsg.agent_id || 'hermes').label }}</div>
-            <div class="ch-card-meta">{{ agentInfo(chCardMsg.agent_id || 'hermes').description }}</div>
+            <div class="ch-card-name">{{ agentInfo(chCardMsg?.agent_id || 'hermes').label }}</div>
+            <div class="ch-card-meta">{{ agentInfo(chCardMsg?.agent_id || 'hermes').description }}</div>
           </template>
         </div>
       </template>
@@ -939,9 +1014,9 @@ async function deleteTeam() {
     <SharedAgentsModal
       v-if="showSharedAgentsModal"
       :team-id="teamId"
-      :shared-agent-ids="team.sharedAgents"
+      :shared-profile-ids="detail?.shared_profile_ids || []"
       @close="showSharedAgentsModal = false"
-      @toggle="toggleSharedAgent"
+      @updated="onSharedAgentsUpdated"
     />
     <ConfirmModal
       v-if="confirmAction"
@@ -961,5 +1036,25 @@ async function deleteTeam() {
       :uploadable="can('knowledge.upload')"
       @close="showKnowledgePanel = false"
     />
+
+    <!-- Fixed-position member settings menu (escapes overflow clipping) -->
+    <div
+      v-if="menuFor"
+      class="menu"
+      :style="{ position: 'fixed', left: menuPos.x + 'px', top: menuPos.y + 'px', minWidth: '180px', zIndex: 300 }"
+      @click.stop
+    >
+      <template v-if="can('member.role')">
+        <div class="menu-label">调整角色</div>
+        <button v-for="r in ROLE_OPTIONS" :key="r" class="menu-item"
+          :class="{ active: team.members.find(x => x.handle === menuFor)?.role === r }"
+          @click="changeMemberRole(menuFor!, r)">
+          <Icon name="user" /><span class="m-name">{{ r }}</span>
+          <Icon v-if="team.members.find(x => x.handle === menuFor)?.role === r" name="check" style="margin-left:auto" />
+        </button>
+      </template>
+      <div v-if="can('member.role') && can('member.remove')" class="menu-sep"></div>
+      <button v-if="can('member.remove')" class="menu-item danger" @click="removeMember(menuFor!)"><Icon name="logout" /><span class="m-name">移出团队</span></button>
+    </div>
   </div>
 </template>

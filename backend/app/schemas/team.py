@@ -104,6 +104,7 @@ class TeamDetail(TeamOut):
     my_role: str
     members: list[MemberOut] = Field(default_factory=list)
     shared_agents: list[str] = Field(default_factory=list)
+    shared_profile_ids: list[str] = Field(default_factory=list)
     stats: TeamStats = Field(default_factory=TeamStats)
     knowledge: list[KnowledgeOut] = Field(default_factory=list)
     activity: list[ActivityItem] = Field(default_factory=list)
@@ -112,6 +113,10 @@ class TeamDetail(TeamOut):
 
 class SharedAgentsUpdate(BaseModel):
     agent_ids: list[str]
+
+
+class SharedProfilesUpdate(BaseModel):
+    profile_ids: list[str]
 
 
 class AddMemberRequest(BaseModel):

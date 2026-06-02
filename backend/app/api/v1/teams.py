@@ -38,6 +38,7 @@ from app.schemas.team import (
     ProjectOut,
     ProjectUpdate,
     SharedAgentsUpdate,
+    SharedProfilesUpdate,
     TaskCreate,
     TaskOut,
     TaskUpdate,
@@ -127,10 +128,22 @@ async def get_team_channel(
     )
     channel = res.scalar_one_or_none()
     if channel is None:
+        # Use first shared profile's agent as the channel agent, fallback to "hermes"
+        primary_aid = "hermes"
+        if team.shared_profile_ids:
+            from app.db.models.agent import Profile as ProfileModel
+            first_pid_str = team.shared_profile_ids[0]
+            try:
+                import uuid as _uuid
+                p = await db.get(ProfileModel, _uuid.UUID(first_pid_str))
+                if p and p.default_agent_id:
+                    primary_aid = p.default_agent_id
+            except Exception:
+                pass
         channel = Conversation(
             owner_id=user.id,
             title=f"{team.name} · 群聊频道",
-            primary_agent_id="hermes",
+            primary_agent_id=primary_aid,
             team_id=team_id,
             is_channel=True,
         )
@@ -153,6 +166,27 @@ async def set_channel_mode(
     team.channel_mode = payload.channel_mode
     await db.commit()
     return {"channel_mode": team.channel_mode}
+
+
+@router.delete("/teams/{team_id}/channel/messages", status_code=204)
+async def clear_channel_messages(
+    team_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    """Clear all messages in the team channel. Requires channel.clear permission."""
+    from app.db.models.conversation import Conversation, Message
+    from sqlalchemy import delete as sa_delete, and_
+    team, member = await svc.require_membership(db, team_id, user.id)
+    if not gov.can(team.policy, "channel.clear", member.role):
+        raise HTTPException(status_code=403, detail="无权清空频道记录")
+    res = await db.execute(
+        select(Conversation).where(
+            and_(Conversation.team_id == team_id, Conversation.is_channel.is_(True))
+        ).limit(1)
+    )
+    channel = res.scalar_one_or_none()
+    if channel:
+        await db.execute(sa_delete(Message).where(Message.conversation_id == channel.id))
+        await db.commit()
 
 
 # ── invite token ──
@@ -308,6 +342,16 @@ async def set_shared_agents(
 ):
     team, _m = await svc.require_permission(db, team_id, user.id, "agent.manage")
     await svc.set_shared_agents(db, team, payload.agent_ids)
+    return await _team_detail(db, team_id, user)
+
+
+@router.put("/teams/{team_id}/shared-profiles", response_model=TeamDetail)
+async def set_shared_profiles(
+    team_id: uuid.UUID, payload: SharedProfilesUpdate,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    team, _m = await svc.require_permission(db, team_id, user.id, "agent.manage")
+    await svc.set_shared_profiles(db, team, payload.profile_ids)
     return await _team_detail(db, team_id, user)
 
 
@@ -646,6 +690,7 @@ async def _team_detail(db: AsyncSession, team_id: uuid.UUID, user: User) -> Team
         my_role=my.role if my else "viewer",
         members=[_member_out(m, u) for m, u in rows],
         shared_agents=shared,
+        shared_profile_ids=list(team.shared_profile_ids or []),
         stats=TeamStats(
             members=len(rows),
             agents=len(shared),

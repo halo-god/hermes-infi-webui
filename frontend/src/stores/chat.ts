@@ -123,6 +123,7 @@ export const useChatStore = defineStore("chat", () => {
           messages.value.push({
             id: ev.message_id,
             conversation_id: activeId.value || "",
+            owner_id: null,
             role: "roundtable",
             agent_id: replies[0]?.agent_id || null,
             content: { text: "", replies, merged: { text: "", status: "pending" } },
@@ -253,6 +254,7 @@ export const useChatStore = defineStore("chat", () => {
     messages.value.push({
       id: `tmp-${Date.now()}`,
       conversation_id: id,
+      owner_id: null,
       role: "user",
       agent_id: null,
       content: { text },
