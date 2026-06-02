@@ -4,6 +4,7 @@
    so it renders pixel-identical; wired to the real chat store. */
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { useVirtualizer } from "@tanstack/vue-virtual";
 import Icon from "@/components/Icon.vue";
 import Composer from "@/components/Composer.vue";
 import ConfirmModal from "@/components/ConfirmModal.vue";
@@ -187,6 +188,33 @@ async function scrollDown() {
 watch(() => chat.messages.map((m) => m.content.text).join("|"), scrollDown);
 watch(() => chat.activeId, scrollDown);
 
+// ── Virtual scroll for message list ──
+const virtualizerContainer = ref<HTMLElement | null>(null);
+
+const virtualizer = useVirtualizer({
+  count: chat.messages.length,
+  getScrollElement: () => scroller.value,
+  estimateSize: () => 120, // default estimate for a message
+  overscan: 5,
+  getItemKey: (index) => chat.messages[index]?.id ?? index,
+});
+
+// Update virtualizer count when messages change
+watch(() => chat.messages.length, (newCount) => {
+  virtualizer.value.options.count = newCount;
+  // Auto-scroll to bottom for new messages
+  nextTick(() => {
+    virtualizer.value.scrollToIndex(newCount - 1, { align: "end" });
+  });
+});
+
+// Measure actual element height for variable-height messages
+function onMeasure(el: HTMLElement, _index: number) {
+  if (el) {
+    virtualizer.value.measureElement(el);
+  }
+}
+
 const openFileId = ref<string | null>(null);
 
 async function onSend(opts?: SendOptions) {
@@ -363,16 +391,27 @@ const wsAdapter = computed<WsAdapter>(() => {
             </div>
           </div>
 
-          <!-- messages -->
+          <!-- messages (virtual scroll) -->
           <div v-if="chat.hasMoreMessages || chat.loadingOlder" ref="loadMoreSentinel" class="load-more-sentinel">
             <span v-if="chat.loadingOlder" class="loading-spinner"></span>
             <span v-else class="load-more-hint">↑ 上滑加载更多消息</span>
           </div>
-          <template v-for="m in chat.messages" :key="m.id">
-            <!-- roundtable -->
-            <div v-if="m.role === 'roundtable'" class="roundtable">
-              <div class="roundtable-label">圆桌 · {{ m.content.replies?.length || 0 }} 位助手并行作答</div>
-              <div v-for="(r, idx) in m.content.replies" :key="idx" class="rt-card">
+          <div
+            ref="virtualizerContainer"
+            :style="{ height: virtualizer.getTotalSize() + 'px', width: '100%', position: 'relative' }"
+          >
+            <div
+              v-for="row in virtualizer.getVirtualItems()"
+              :key="String(row.key)"
+              :ref="(el) => onMeasure(el as HTMLElement, row.index)"
+              :data-index="row.index"
+              :style="{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${row.start}px)` }"
+            >
+              <template v-if="chat.messages[row.index]">
+                <!-- roundtable -->
+                <div v-if="chat.messages[row.index].role === 'roundtable'" class="roundtable">
+              <div class="roundtable-label">圆桌 · {{ chat.messages[row.index].content.replies?.length || 0 }} 位助手并行作答</div>
+              <div v-for="(r, idx) in chat.messages[row.index].content.replies" :key="idx" class="rt-card">
                 <div class="rt-card-head">
                   <span class="rt-avatar" :style="{ background: agentDisplay(r.agent_id).color }"><Icon :name="agentDisplay(r.agent_id).icon" :size="11" /></span>
                   <span class="rt-name">{{ agentDisplay(r.agent_id).label }}</span>
@@ -384,7 +423,7 @@ const wsAdapter = computed<WsAdapter>(() => {
                 </div>
                 <!-- vote buttons -->
                 <div v-if="r.status !== 'streaming'" class="rt-vote">
-                  <button :class="{ chosen: isChosen(m.id, idx) }" @click="toggleChosen(m.id, idx)">
+                  <button :class="{ chosen: isChosen(chat.messages[row.index].id, idx) }" @click="toggleChosen(chat.messages[row.index].id, idx)">
                     <Icon name="check" :size="10" /> 采纳
                   </button>
                   <button @click="followUp(r.agent_id)">
@@ -395,45 +434,47 @@ const wsAdapter = computed<WsAdapter>(() => {
                   </button>
                 </div>
               </div>
-              <div v-if="m.content.merged && (m.content.merged.text || m.content.merged.status !== 'pending')" class="rt-merge">
+              <div v-if="chat.messages[row.index]?.content?.merged && (chat.messages[row.index]?.content?.merged?.text || chat.messages[row.index]?.content?.merged?.status !== 'pending')" class="rt-merge">
                 <div class="rt-merge-head"><Icon name="sparkle" :size="12" /> Hermes 综合各方观点</div>
-                <span v-if="m.content.merged.status === 'streaming' && !m.content.merged.text" class="typing"><span></span><span></span><span></span></span>
-                <div v-else class="md-body" v-html="md(m.content.merged.text)" />
+                <span v-if="chat.messages[row.index].content.merged?.status === 'streaming' && !chat.messages[row.index].content.merged?.text" class="typing"><span></span><span></span><span></span></span>
+                <div v-else class="md-body" v-html="md(chat.messages[row.index].content.merged?.text || '')" />
               </div>
             </div>
 
             <!-- normal message -->
-            <div v-else class="msg" :class="m.role">
-              <div v-if="m.role === 'agent'" class="msg-avatar" :style="{ background: agentById(m.agent_id || 'hermes')?.color || '#b8852a' }">
-                <Icon :name="agentById(m.agent_id || 'hermes')?.icon || 'brand'" :size="14" />
+            <div v-else class="msg" :class="chat.messages[row.index].role">
+              <div v-if="chat.messages[row.index].role === 'agent'" class="msg-avatar" :style="{ background: agentById(chat.messages[row.index].agent_id || 'hermes')?.color || '#b8852a' }">
+                <Icon :name="agentById(chat.messages[row.index].agent_id || 'hermes')?.icon || 'brand'" :size="14" />
               </div>
               <div class="msg-body">
-                <div v-if="m.role === 'agent'" class="msg-name">
-                  {{ agentById(m.agent_id || 'hermes')?.label || "Hermes" }}
-                  <span v-if="agentById(m.agent_id || 'hermes')?.official" class="official">OFFICIAL</span>
+                <div v-if="chat.messages[row.index].role === 'agent'" class="msg-name">
+                  {{ agentById(chat.messages[row.index].agent_id || 'hermes')?.label || "Hermes" }}
+                  <span v-if="agentById(chat.messages[row.index].agent_id || 'hermes')?.official" class="official">OFFICIAL</span>
                 </div>
                 <div class="msg-bubble">
-                  <span v-if="m.status === 'streaming' && !m.content.text" class="typing"><span></span><span></span><span></span></span>
-                  <div v-else-if="m.role === 'agent'" class="md-body" v-html="md(m.content.text)" />
+                  <span v-if="chat.messages[row.index].status === 'streaming' && !chat.messages[row.index].content.text" class="typing"><span></span><span></span><span></span></span>
+                  <div v-else-if="chat.messages[row.index].role === 'agent'" class="md-body" v-html="md(chat.messages[row.index].content.text)" />
                   <template v-else>
-                    {{ m.content.text }}
-                    <div v-if="m.content.files?.length" class="msg-files">
-                      <button v-for="f in m.content.files" :key="f.id" class="msg-file-chip" @click="openFile(f.id)">
+                    {{ chat.messages[row.index].content.text }}
+                    <div v-if="chat.messages[row.index].content.files?.length" class="msg-files">
+                      <button v-for="f in chat.messages[row.index].content.files" :key="f.id" class="msg-file-chip" @click="openFile(f.id)">
                         <Icon name="paperclip" :size="11" /> {{ f.name }}
                       </button>
                     </div>
                   </template>
                 </div>
-                <div v-if="m.role === 'agent' && m.status !== 'streaming'" class="msg-tools">
-                  <button title="复制" @click="copyMessage(m.content.text)"><Icon name="copy" :size="12" /></button>
+                <div v-if="chat.messages[row.index].role === 'agent' && chat.messages[row.index].status !== 'streaming'" class="msg-tools">
+                  <button title="复制" @click="copyMessage(chat.messages[row.index].content.text)"><Icon name="copy" :size="12" /></button>
                   <button title="重新生成"><Icon name="refresh" :size="12" /></button>
                   <button title="点赞"><Icon name="thumbs_up" :size="12" /></button>
-                  <button title="分享" @click="shareMessage(m.conversation_id)"><Icon name="share" :size="12" /></button>
+                  <button title="分享" @click="shareMessage(chat.messages[row.index].conversation_id)"><Icon name="share" :size="12" /></button>
                 </div>
               </div>
-              <div v-if="m.role === 'user'" class="msg-avatar"><Icon name="user" :size="14" /></div>
+              <div v-if="chat.messages[row.index].role === 'user'" class="msg-avatar"><Icon name="user" :size="14" /></div>
             </div>
-          </template>
+              </template>
+            </div>
+          </div>
         </div>
       </div>
 

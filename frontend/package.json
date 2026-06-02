@@ -10,6 +10,7 @@
     "type-check": "vue-tsc --noEmit"
   },
   "dependencies": {
+    "@tanstack/vue-virtual": "^3.13.28",
     "@vscode/markdown-it-katex": "^1.1.2",
     "axios": "^1.7.2",
     "highlight.js": "^11.11.1",
