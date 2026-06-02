@@ -27,6 +27,7 @@ class MessageOut(BaseModel):
 
     id: uuid.UUID
     conversation_id: uuid.UUID
+    owner_id: uuid.UUID | None = None
     role: str
     agent_id: str | None
     content: dict

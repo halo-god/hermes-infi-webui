@@ -452,7 +452,10 @@ function fmtDate(s: string) {
             </div>
             <!-- PDF -->
             <div v-else-if="fileMode(activeFile) === 'pdf'" class="pdf-preview">
-              <iframe :src="rawUrl" frameborder="0" width="100%" height="100%" />
+              <iframe :src="rawUrl" frameborder="0" style="width:100%;height:calc(100% - 36px);border:none" />
+              <div style="height:36px;display:flex;align-items:center;justify-content:center;border-top:1px solid var(--rule-soft);gap:8px">
+                <a :href="rawUrl" target="_blank" class="btn" style="font-size:12px;padding:4px 12px">在新标签页打开</a>
+              </div>
             </div>
             <!-- Diff -->
             <div v-else-if="fileMode(activeFile) === 'diff'" class="diff-preview">

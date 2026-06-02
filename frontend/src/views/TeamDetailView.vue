@@ -21,7 +21,7 @@ import type { Agent, FileItem, Member, Project, TeamDetail, TeamPolicy, WsAdapte
 const route = useRoute();
 const router = useRouter();
 const chat = useChatStore();
-const teamId = route.params.id as string;
+const teamId = computed(() => route.params.id as string);
 const showNewProject = ref(false);
 const editingProject = ref<Project | null>(null);
 const editingMembersProject = ref<Project | null>(null);
@@ -54,27 +54,46 @@ onMounted(() => {
   document.addEventListener("click", closeMenus);
   load();
 });
-onBeforeUnmount(() => document.removeEventListener("click", closeMenus));
+onBeforeUnmount(() => {
+  document.removeEventListener("click", closeMenus);
+  stopChannelPoll();
+  if (channelEsRef.value) { channelEsRef.value.close(); channelEsRef.value = null; }
+});
+
+watch(() => route.params.id, async (newId, oldId) => {
+  if (newId && newId !== oldId) {
+    tab.value = "overview";
+    stopChannelPoll();
+    channelConvo.value = null;
+    channelMessages.value = [];
+    await load();
+  }
+});
 function closeMenus() {
   menuFor.value = null;
   projMenuFor.value = null;
+  chCardMsg.value = null;
+  showKnowledgePicker.value = false;
 }
 
 async function load() {
+  const tid = teamId.value;
   const [d, ps, pol, allProfiles] = await Promise.all([
-    teamsApi.get(teamId),
-    projectsApi.listByTeam(teamId).catch(() => []),
-    teamsApi.policy(teamId).catch(() => null),
+    teamsApi.get(tid),
+    projectsApi.listByTeam(tid).catch(() => []),
+    teamsApi.policy(tid).catch(() => null),
     agentsApi.profiles().catch(() => []),
   ]);
   detail.value = d;
   projects.value = ps;
   policy.value = pol;
-  teamProfiles.value = allProfiles.filter((p) => p.team_id === teamId || p.scope === "global");
+  teamProfiles.value = allProfiles.filter((p) => p.team_id === tid || p.scope === "global");
   if (pol) {
     Object.keys(policyMap).forEach((k) => delete policyMap[k]);
     Object.entries(pol.policy).forEach(([pid, roles]) => (policyMap[pid] = { ...roles }));
   }
+  if (!chat.agents.length) chat.loadAgents();
+  if (!chat.profiles.length) chat.loadProfiles();
 }
 
 const knowledgeFiles = computed<FileItem[]>(() =>
@@ -87,11 +106,11 @@ const knowledgeFiles = computed<FileItem[]>(() =>
 );
 
 const kbAdapter = computed<WsAdapter>(() => ({
-  getContent: (fid) => teamsApi.knowledgeContent(teamId, fid),
-  getRawUrl: (fid) => teamsApi.knowledgeRawUrl(teamId, fid),
-  patchContent: (fid, content) => teamsApi.updateKnowledgeContent(teamId, fid, content),
+  getContent: (fid) => teamsApi.knowledgeContent(teamId.value, fid),
+  getRawUrl: (fid) => teamsApi.knowledgeRawUrl(teamId.value, fid),
+  patchContent: (fid, content) => teamsApi.updateKnowledgeContent(teamId.value, fid, content),
   upload: async (file) => {
-    await teamsApi.uploadKnowledge(teamId, file);
+    await teamsApi.uploadKnowledge(teamId.value, file);
     await load();
   },
 }));
@@ -103,12 +122,18 @@ function openKnowledgeFile(fileId: string) {
 
 watch(tab, (newTab) => {
   if (newTab !== "knowledge") showKnowledgePanel.value = false;
-  if (newTab === "channel") loadChannel();
+  if (newTab === "channel") {
+    loadChannel();
+  } else {
+    stopChannelPoll();
+  }
 });
 
 // ── Group channel ──
 import { conversationsApi } from "@/api/conversations";
+import { tokenStore } from "@/api/client";
 import type { Conversation, Message } from "@/types";
+const API_BASE = import.meta.env.VITE_API_BASE || "/api/v1";
 
 const channelConvo = ref<Conversation | null>(null);
 const channelMode = ref<string>("mention");
@@ -117,18 +142,53 @@ const channelDraft = ref("");
 const channelLoading = ref(false);
 const channelSending = ref(false);
 const channelScroller = ref<HTMLElement | null>(null);
+const channelEsRef = ref<EventSource | null>(null);
+const channelPollTimer = ref<ReturnType<typeof setInterval> | null>(null);
+const channelAttachments = ref<{ id: string; name: string }[]>([]);
+const showKnowledgePicker = ref(false);
+const chCardMsg = ref<Message | null>(null);
+const chCardPos = ref({ x: 0, y: 0 });
+
+function stopChannelPoll() {
+  if (channelPollTimer.value) { clearInterval(channelPollTimer.value); channelPollTimer.value = null; }
+}
+
+async function refreshChannelMessages() {
+  if (!channelConvo.value) return;
+  try {
+    const d = await conversationsApi.get(channelConvo.value.id);
+    channelMessages.value = (d as any).messages || [];
+  } catch { /* ignore */ }
+}
+
+function applyChannelEvent(ev: { type: string; delta?: string; text?: string }) {
+  if (!channelMessages.value.length) return;
+  const last = channelMessages.value[channelMessages.value.length - 1];
+  if (last.role !== "agent" && last.role !== "roundtable") return;
+  if (ev.type === "token" && ev.delta) {
+    last.content = { ...last.content, text: (last.content.text || "") + ev.delta };
+  } else if (ev.type === "done" && ev.text !== undefined) {
+    last.content = { ...last.content, text: ev.text };
+    last.status = "complete";
+  }
+}
 
 async function loadChannel() {
   if (channelLoading.value) return;
   channelLoading.value = true;
   try {
-    const res = await teamsApi.getChannel(teamId);
+    const res = await teamsApi.getChannel(teamId.value);
     channelConvo.value = res.channel;
     channelMode.value = res.channel_mode;
-    const detail = await conversationsApi.get(res.channel.id);
-    channelMessages.value = (detail as any).messages || [];
+    const d = await conversationsApi.get(res.channel.id);
+    channelMessages.value = (d as any).messages || [];
     await nextTick();
     if (channelScroller.value) channelScroller.value.scrollTop = channelScroller.value.scrollHeight;
+    // Poll every 5s so other members see fresh messages
+    stopChannelPoll();
+    channelPollTimer.value = setInterval(async () => {
+      await refreshChannelMessages();
+    }, 5000);
   } catch {
     /* ignore */
   } finally {
@@ -141,28 +201,79 @@ async function sendChannelMessage() {
   if (!text || !channelConvo.value || channelSending.value) return;
   channelDraft.value = "";
   channelSending.value = true;
+
+  // Inline-attach any selected knowledge items
+  let fullText = text;
+  if (channelAttachments.value.length) {
+    try {
+      const parts: string[] = [];
+      for (const att of channelAttachments.value) {
+        const content = await teamsApi.knowledgeContent(teamId.value, att.id);
+        if (content) parts.push(`【知识库: ${att.name}】\n${content}`);
+      }
+      if (parts.length) fullText = parts.join("\n\n---\n\n") + "\n\n---\n\n" + text;
+    } catch { /* ignore */ }
+    channelAttachments.value = [];
+  }
+
+  const convoId = channelConvo.value.id;
+  const token = tokenStore.access || "";
+  const url = `${API_BASE}/conversations/${convoId}/stream?access_token=${encodeURIComponent(token)}`;
+
+  // Open SSE before POSTing so we don't miss early tokens
+  if (channelEsRef.value) { channelEsRef.value.close(); }
+  const es = new EventSource(url);
+  channelEsRef.value = es;
+  es.onmessage = (e) => {
+    try { applyChannelEvent(JSON.parse(e.data)); } catch { /* heartbeat */ }
+  };
+  await new Promise<void>((resolve) => {
+    es.addEventListener("open", () => resolve());
+    setTimeout(resolve, 600);
+  });
+
   try {
-    const mentionMatch = text.match(/@([\w-]+)/);
-    const shouldRespond = !!mentionMatch || channelMode.value === "always";
-    if (shouldRespond) {
-      const agentId = mentionMatch ? mentionMatch[1] : "hermes";
-      await conversationsApi.send(channelConvo.value.id, text);
-      void agentId;
-    } else {
-      await conversationsApi.send(channelConvo.value.id, text);
-    }
-    const detail = await conversationsApi.get(channelConvo.value.id);
-    channelMessages.value = (detail as any).messages || [];
+    const res = await conversationsApi.send(convoId, fullText);
+    channelMessages.value.push(res.user_message, res.agent_message);
     await nextTick();
     if (channelScroller.value) channelScroller.value.scrollTop = channelScroller.value.scrollHeight;
   } finally {
     channelSending.value = false;
+    setTimeout(() => { if (channelEsRef.value === es) { es.close(); channelEsRef.value = null; } }, 4000);
   }
 }
 
 async function updateChannelMode(mode: string) {
   channelMode.value = mode;
-  await teamsApi.setChannelMode(teamId, mode);
+  await teamsApi.setChannelMode(teamId.value, mode);
+}
+
+function toggleKnowledgePicker() {
+  showKnowledgePicker.value = !showKnowledgePicker.value;
+}
+function addChannelAttachment(k: { id: string; name: string }) {
+  if (!channelAttachments.value.find((a) => a.id === k.id)) {
+    channelAttachments.value.push({ id: k.id, name: k.name });
+  }
+  showKnowledgePicker.value = false;
+}
+function removeChannelAttachment(id: string) {
+  channelAttachments.value = channelAttachments.value.filter((a) => a.id !== id);
+}
+
+function channelMemberInfo(ownerId: string | null | undefined): { name: string; initials: string; color: string } | null {
+  if (!ownerId) return null;
+  const m = members.value.find((x) => x.user_id === ownerId);
+  if (!m) return null;
+  return { name: m.name || "成员", initials: m.initials || (m.name || "?").slice(0, 1), color: m.color || "#b8852a" };
+}
+
+function showChCard(ev: MouseEvent, msg: Message) {
+  chCardMsg.value = msg;
+  chCardPos.value = { x: (ev.currentTarget as HTMLElement).getBoundingClientRect().left, y: (ev.currentTarget as HTMLElement).getBoundingClientRect().bottom + 6 };
+}
+function hideChCard() {
+  chCardMsg.value = null;
 }
 
 // ── computed stat footer values using real data ──
@@ -228,10 +339,11 @@ async function toggleSharedAgent(id: string) {
   if (!can("agent.manage")) return;
   const cur = new Set(team.value.sharedAgents);
   cur.has(id) ? cur.delete(id) : cur.add(id);
-  await teamsApi.setSharedAgents(teamId, [...cur]);
+  await teamsApi.setSharedAgents(teamId.value, [...cur]);
   await load();
 }
-function openSharedAgentsModal() {
+async function openSharedAgentsModal() {
+  if (!chat.profiles.length) await chat.loadProfiles();
   showSharedAgentsModal.value = true;
 }
 async function addKnowledge() {
@@ -249,7 +361,7 @@ function deleteKnowledge(kid: string) {
     confirmText: "删除",
     danger: true,
     onConfirm: async () => {
-      await teamsApi.deleteKnowledge(teamId, kid);
+      await teamsApi.deleteKnowledge(teamId.value, kid);
       confirmAction.value = null;
       await load();
     },
@@ -315,7 +427,7 @@ async function togglePolicy(permId: string, roleKey: string) {
   if (roleKey === "owner" || !canEditPolicy.value) return;
   if (!policyMap[permId]) policyMap[permId] = {};
   policyMap[permId][roleKey] = !policyMap[permId][roleKey];
-  const res = await teamsApi.updatePolicy(teamId, JSON.parse(JSON.stringify(policyMap)));
+  const res = await teamsApi.updatePolicy(teamId.value, JSON.parse(JSON.stringify(policyMap)));
   policy.value = res;
 }
 async function resetPolicyDefaults() {
@@ -325,7 +437,7 @@ async function resetPolicyDefaults() {
 async function changeMemberRole(handleEmail: string, roleZh: string) {
   const m = members.value.find((x) => (x.email || x.user_id) === handleEmail);
   if (!m) return;
-  await teamsApi.updateMember(teamId, m.user_id, ROLE_OPTION_KEY[roleZh] || "member");
+  await teamsApi.updateMember(teamId.value, m.user_id, ROLE_OPTION_KEY[roleZh] || "member");
   await load();
   menuFor.value = null;
 }
@@ -333,7 +445,7 @@ async function removeMember(handleEmail: string) {
   const m = members.value.find((x) => (x.email || x.user_id) === handleEmail);
   if (!m) return;
   if (!confirm(`移出成员 ${m.name}？`)) return;
-  await teamsApi.removeMember(teamId, m.user_id);
+  await teamsApi.removeMember(teamId.value, m.user_id);
   await load();
   menuFor.value = null;
 }
@@ -373,7 +485,7 @@ function openProject(id: string) {
 }
 async function deleteTeam() {
   if (!confirm(`确认解散团队「${team.value.name}」？此操作不可恢复。`)) return;
-  await teamsApi.remove(teamId);
+  await teamsApi.remove(teamId.value);
   router.push("/");
 }
 </script>
@@ -638,23 +750,75 @@ async function deleteTeam() {
               还没有消息。发送 @hermes + 问题，或开启「始终响应」模式。
             </div>
             <template v-for="m in channelMessages" :key="m.id">
-              <div :class="m.role === 'user' ? 'ch-row user' : 'ch-row agent'">
-                <div class="ch-bubble" v-html="m.role === 'user' ? m.content.text : (m.content.markdown || m.content.text)"></div>
+              <!-- User message row -->
+              <div v-if="m.role === 'user'" class="ch-row user" style="align-items:flex-end;gap:8px">
+                <div class="ch-bubble" v-html="m.content.text"></div>
+                <div class="ch-av"
+                  :style="{ background: channelMemberInfo(m.owner_id)?.color || 'var(--accent)' }"
+                  :title="channelMemberInfo(m.owner_id)?.name || '成员'"
+                  @click.stop="showChCard($event, m)">
+                  {{ channelMemberInfo(m.owner_id)?.initials || '?' }}
+                </div>
+              </div>
+              <!-- Agent message row -->
+              <div v-else class="ch-row agent" style="align-items:flex-end;gap:8px">
+                <div class="ch-av-icon"
+                  :style="{ background: (agentInfo(m.agent_id || 'hermes').color || '#b8852a') + '22' }"
+                  :title="agentInfo(m.agent_id || 'hermes').label"
+                  @click.stop="showChCard($event, m)">
+                  <Icon :name="agentInfo(m.agent_id || 'hermes').icon || 'sparkle'" :size="16"
+                    :style="{ color: agentInfo(m.agent_id || 'hermes').color || '#b8852a' }" />
+                </div>
+                <div class="ch-bubble" v-html="m.content.markdown || m.content.text || '…'"></div>
               </div>
             </template>
           </div>
-          <div style="padding:10px 14px;border-top:1px solid var(--rule-soft);display:flex;gap:8px;align-items:flex-end">
-            <textarea
-              v-model="channelDraft"
-              placeholder="发消息… 输入 @hermes 呼出助手"
-              rows="2"
-              style="flex:1;resize:none;padding:8px 12px;border:1px solid var(--rule);border-radius:8px;font-size:13.5px;background:var(--bg-canvas);color:var(--ink);outline:none;font-family:inherit"
-              @keydown.enter.exact.prevent="sendChannelMessage"
-            ></textarea>
-            <button class="btn primary" :disabled="!channelDraft.trim() || channelSending" @click="sendChannelMessage" style="height:36px;min-width:60px">
-              <Icon name="send" :size="14" />
-            </button>
+
+          <!-- Knowledge attachment chips -->
+          <div v-if="channelAttachments.length" style="padding:6px 14px 0;display:flex;flex-wrap:wrap;gap:6px">
+            <span v-for="a in channelAttachments" :key="a.id"
+              style="display:inline-flex;align-items:center;gap:4px;background:var(--accent-soft);color:var(--accent);font-size:11.5px;padding:2px 8px;border-radius:12px">
+              <Icon name="doc" :size="10" />{{ a.name }}
+              <button @click="removeChannelAttachment(a.id)" style="background:none;border:none;cursor:pointer;color:var(--ink-mute);padding:0;line-height:1">×</button>
+            </span>
           </div>
+
+          <div style="padding:10px 14px;border-top:1px solid var(--rule-soft);display:flex;flex-direction:column;gap:6px">
+            <!-- Knowledge picker -->
+            <div v-if="showKnowledgePicker" style="position:relative">
+              <div style="background:var(--bg-panel);border:1px solid var(--rule);border-radius:8px;padding:6px;max-height:180px;overflow-y:auto;box-shadow:var(--shadow-lg)">
+                <div v-if="!team.knowledge.length" style="padding:8px;font-size:12.5px;color:var(--ink-mute)">没有知识库文件</div>
+                <button v-for="k in team.knowledge" :key="k.id" class="menu-item" style="width:100%;text-align:left" @click="addChannelAttachment(k)">
+                  <Icon name="doc" :size="13" />{{ k.name }}
+                </button>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;align-items:flex-end">
+              <button class="icon-btn" title="引用知识库" @click="toggleKnowledgePicker" :style="showKnowledgePicker ? 'color:var(--accent)' : ''"><Icon name="paperclip" :size="15" /></button>
+              <textarea
+                v-model="channelDraft"
+                placeholder="发消息… 输入 @hermes 呼出助手"
+                rows="2"
+                style="flex:1;resize:none;padding:8px 12px;border:1px solid var(--rule);border-radius:8px;font-size:13.5px;background:var(--bg-canvas);color:var(--ink);outline:none;font-family:inherit"
+                @keydown.enter.exact.prevent="sendChannelMessage"
+              ></textarea>
+              <button class="btn primary" :disabled="!channelDraft.trim() || channelSending" @click="sendChannelMessage" style="height:36px;min-width:60px">
+                <Icon name="send" :size="14" />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Avatar info popover -->
+        <div v-if="chCardMsg" class="ch-card" :style="{ left: chCardPos.x + 'px', top: chCardPos.y + 'px' }" @click.stop>
+          <template v-if="chCardMsg.role === 'user'">
+            <div class="ch-card-name">{{ channelMemberInfo(chCardMsg.owner_id)?.name || '成员' }}</div>
+            <div class="ch-card-meta">{{ members.find(x => x.user_id === chCardMsg.owner_id)?.role || '' }}</div>
+          </template>
+          <template v-else>
+            <div class="ch-card-name">{{ agentInfo(chCardMsg.agent_id || 'hermes').label }}</div>
+            <div class="ch-card-meta">{{ agentInfo(chCardMsg.agent_id || 'hermes').description }}</div>
+          </template>
         </div>
       </template>
 

@@ -146,6 +146,7 @@ export interface RoundtableContent {
 export interface Message {
   id: string;
   conversation_id: string;
+  owner_id: string | null;
   role: "user" | "agent" | "roundtable";
   agent_id: string | null;
   content: MessageContent & Partial<RoundtableContent>;

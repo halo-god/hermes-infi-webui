@@ -93,7 +93,7 @@ async def create_conversation(
         project_id=payload.project_id,
     )
     if payload.first_message:
-        await svc.send_message(db, convo, payload.first_message)
+        await svc.send_message(db, convo, payload.first_message, owner_id=user.id)
     msgs = await svc.get_messages(db, convo.id)
     return ConversationDetail(
         **ConversationOut.model_validate(convo).model_dump(),
@@ -188,7 +188,7 @@ async def send_message(
         raise HTTPException(status_code=429, detail="发送过于频繁，请稍后再试")
     metrics.MESSAGES.inc()
     user_msg, agent_msg = await svc.dispatch(
-        db, convo, payload.text, attached_file_ids=payload.attached_file_ids
+        db, convo, payload.text, attached_file_ids=payload.attached_file_ids, owner_id=user.id
     )
     return SendMessageResponse(
         user_message=MessageOut.model_validate(user_msg),

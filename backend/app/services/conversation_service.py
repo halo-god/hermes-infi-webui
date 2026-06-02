@@ -136,6 +136,7 @@ async def send_message(
     convo: Conversation,
     text: str,
     attached_file_ids: list[str] | None = None,
+    owner_id: uuid.UUID | None = None,
 ) -> tuple[Message, Message]:
     """Persist the user turn + an empty streaming agent turn, then enqueue ACP work.
 
@@ -149,6 +150,7 @@ async def send_message(
 
     user_msg = Message(
         conversation_id=convo.id,
+        owner_id=owner_id,
         role="user",
         content=user_content,
         status="complete",
@@ -202,6 +204,7 @@ async def send_roundtable(
     text: str,
     agents: list[str],
     attached_file_ids: list[str] | None = None,
+    owner_id: uuid.UUID | None = None,
 ) -> tuple[Message, Message]:
     """Multi-agent turn: one roundtable message holding per-agent replies + a
     synthesized merge. The runner streams each reply in parallel, then merges."""
@@ -210,7 +213,7 @@ async def send_roundtable(
     if attached:
         user_content["files"] = attached
     user_msg = Message(
-        conversation_id=convo.id, role="user", content=user_content, status="complete"
+        conversation_id=convo.id, owner_id=owner_id, role="user", content=user_content, status="complete"
     )
     rt_msg = Message(
         conversation_id=convo.id,
@@ -261,12 +264,13 @@ async def dispatch(
     convo: Conversation,
     text: str,
     attached_file_ids: list[str] | None = None,
+    owner_id: uuid.UUID | None = None,
 ) -> tuple[Message, Message]:
     """Route to single or roundtable based on the conversation's active agents."""
     agents = list(convo.active_agent_ids or [convo.primary_agent_id])
     if len(agents) > 1:
-        return await send_roundtable(db, convo, text, agents, attached_file_ids=attached_file_ids)
-    return await send_message(db, convo, text, attached_file_ids=attached_file_ids)
+        return await send_roundtable(db, convo, text, agents, attached_file_ids=attached_file_ids, owner_id=owner_id)
+    return await send_message(db, convo, text, attached_file_ids=attached_file_ids, owner_id=owner_id)
 
 
 async def set_active_agents(

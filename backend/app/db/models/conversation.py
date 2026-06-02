@@ -48,6 +48,9 @@ class Message(UUIDPrimaryKey, Timestamps, Base):
         ForeignKey("conversations.id", ondelete="CASCADE"),
         index=True,
     )
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
     role: Mapped[str] = mapped_column(String(16), nullable=False)  # user | agent | roundtable
     agent_id: Mapped[str | None] = mapped_column(String(64))
     # {text, markdown?, tool_calls?, merged?, replies?}
