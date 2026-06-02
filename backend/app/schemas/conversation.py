@@ -58,7 +58,7 @@ class ConversationDetail(ConversationOut):
 
 
 class SendMessageRequest(BaseModel):
-    text: str = Field(min_length=1)
+    text: str = Field(min_length=1, max_length=100000)
     attached_file_ids: list[str] = Field(default_factory=list)
 
 

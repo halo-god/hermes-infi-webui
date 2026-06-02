@@ -323,7 +323,7 @@ async def conversation_ws(
                     async with async_session_maker() as db2:
                         c = await svc.get_conversation(db2, conversation_id, user.id)
                         if c:
-                            await svc.dispatch(db2, c, text, attached_file_ids=file_ids)
+                            await svc.dispatch(db2, c, text, attached_file_ids=file_ids, owner_id=user.id)
             elif action == "cancel":
                 await redis_core.request_cancel(str(conversation_id))
     except WebSocketDisconnect:

@@ -164,8 +164,9 @@ async def list_users(
 ):
     stmt = select(User).order_by(User.created_at.desc()).limit(500)
     if q:
-        like = f"%{q.lower()}%"
-        stmt = stmt.where(func.lower(User.name).like(like) | func.lower(User.email).like(like))
+        escaped = q.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like = f"%{escaped}%"
+        stmt = stmt.where(func.lower(User.name).like(like, escape="\\") | func.lower(User.email).like(like, escape="\\"))
     return list((await db.execute(stmt)).scalars().all())
 
 

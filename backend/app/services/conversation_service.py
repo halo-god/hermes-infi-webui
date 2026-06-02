@@ -24,7 +24,8 @@ async def list_conversations(
     if pinned_only:
         stmt = stmt.where(Conversation.pinned.is_(True))
     if q:
-        stmt = stmt.where(func.lower(Conversation.title).like(f"%{q.lower()}%"))
+        escaped = q.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        stmt = stmt.where(func.lower(Conversation.title).like(f"%{escaped}%", escape="\\"))
     stmt = stmt.order_by(Conversation.pinned.desc(), Conversation.updated_at.desc())
     return list((await db.execute(stmt)).scalars().all())
 
