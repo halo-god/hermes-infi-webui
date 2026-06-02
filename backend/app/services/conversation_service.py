@@ -1,11 +1,13 @@
 """Conversation + message persistence and the send→enqueue hot path."""
 from __future__ import annotations
 
+import os
 import uuid
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core import redis as redis_core
 from app.db.models.conversation import Conversation, Message
 from app.db.models.workspace import WorkspaceFile, WorkspaceFileVersion
@@ -87,26 +89,44 @@ async def create_conversation(
 
 
 async def _resolve_attached_files(
-    db: AsyncSession, file_ids: list[str]
+    db: AsyncSession, file_ids: list[str], conversation_id: str | None = None,
 ) -> list[dict]:
-    """Look up workspace files by id, return [{id, name, kind, content}] for valid ones."""
+    """Look up workspace files by id, write to agent workspace dir, return metadata.
+
+    Returns [{id, name, kind, workspace_path}] — no content inline.
+    Agent reads files on demand via read_file tool from its workspace CWD.
+    """
     if not file_ids:
         return []
-    import uuid as _uuid
 
-    MAX_INLINE = 50_000  # 50KB per file to avoid prompt explosion
+    # Prepare workspace dir for the agent to access files
+    ws_dir = None
+    if conversation_id:
+        ws_dir = os.path.join(settings.workspace_root, conversation_id, "attachments")
+        os.makedirs(ws_dir, exist_ok=True)
+
     result = []
     for raw_id in file_ids:
         try:
-            fid = _uuid.UUID(str(raw_id))
+            fid = uuid.UUID(str(raw_id))
         except ValueError:
             continue
         f = await db.get(WorkspaceFile, fid)
         if f is not None:
-            content = f.content or ""
-            if len(content) > MAX_INLINE:
-                content = content[:MAX_INLINE] + f"\n\n[... 文件过大，已截断至 {MAX_INLINE} 字符，原始 {len(f.content)} 字符]"
-            result.append({"id": str(f.id), "name": f.name, "kind": f.kind, "content": content})
+            # Write file content to workspace so agent can read it
+            if ws_dir and f.content:
+                fpath = os.path.join(ws_dir, f.name)
+                with open(fpath, "w", encoding="utf-8") as fh:
+                    fh.write(f.content)
+                result.append({
+                    "id": str(f.id), "name": f.name, "kind": f.kind,
+                    "workspace_path": f"attachments/{f.name}",
+                })
+            else:
+                result.append({
+                    "id": str(f.id), "name": f.name, "kind": f.kind,
+                    "workspace_path": None,
+                })
     return result
 
 
@@ -121,7 +141,7 @@ async def send_message(
     The per-token hot path does NOT touch the DB — the runner streams via Redis
     Pub/Sub and writes the agent message once on completion.
     """
-    attached = await _resolve_attached_files(db, attached_file_ids or [])
+    attached = await _resolve_attached_files(db, attached_file_ids or [], conversation_id=str(convo.id))
     user_content: dict = {"text": text}
     if attached:
         user_content["files"] = attached
@@ -149,14 +169,14 @@ async def send_message(
     await db.refresh(user_msg)
     await db.refresh(agent_msg)
 
-    # Build prompt text — include file content so the agent can read them.
+    # Build prompt — file references only, agent reads via read_file tool.
     prompt_text = text
     if attached:
         parts = []
         for f in attached:
-            c = f.get("content", "")
-            if c:
-                parts.append(f"[附件: {f['name']}]\n```\n{c}\n```")
+            wp = f.get("workspace_path")
+            if wp:
+                parts.append(f"[附件: {f['name']}] (文件路径: {wp}，请用 read_file 读取内容)")
             else:
                 parts.append(f"[附件: {f['name']}]（文件内容为空）")
         file_block = "\n\n".join(parts)
@@ -184,7 +204,7 @@ async def send_roundtable(
 ) -> tuple[Message, Message]:
     """Multi-agent turn: one roundtable message holding per-agent replies + a
     synthesized merge. The runner streams each reply in parallel, then merges."""
-    attached = await _resolve_attached_files(db, attached_file_ids or [])
+    attached = await _resolve_attached_files(db, attached_file_ids or [], conversation_id=str(convo.id))
     user_content: dict = {"text": text}
     if attached:
         user_content["files"] = attached
@@ -214,9 +234,9 @@ async def send_roundtable(
     if attached:
         parts = []
         for f in attached:
-            c = f.get("content", "")
-            if c:
-                parts.append(f"[附件: {f['name']}]\n```\n{c}\n```")
+            wp = f.get("workspace_path")
+            if wp:
+                parts.append(f"[附件: {f['name']}] (文件路径: {wp}，请用 read_file 读取内容)")
             else:
                 parts.append(f"[附件: {f['name']}]（文件内容为空）")
         file_block = "\n\n".join(parts)
