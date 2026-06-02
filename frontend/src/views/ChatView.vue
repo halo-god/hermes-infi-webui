@@ -2,15 +2,13 @@
 /* 1:1 port of the prototype chat (hermes-app.js landing + thread), main-content
    only — the sidebar/topbar live in AppLayout. Uses the prototype CSS classes
    so it renders pixel-identical; wired to the real chat store. */
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useVirtualizer } from "@tanstack/vue-virtual";
 import Icon from "@/components/Icon.vue";
 import Composer from "@/components/Composer.vue";
 import ConfirmModal from "@/components/ConfirmModal.vue";
 import ConvoSeal from "@/components/ConvoSeal.vue";
-import WorkspacePanel from "@/components/WorkspacePanel.vue";
-import ExtractItemsModal from "@/components/ExtractItemsModal.vue";
 import { useChatStore } from "@/stores/chat";
 import { useNotificationStore } from "@/stores/notifications";
 import { conversationsApi } from "@/api/conversations";
@@ -18,6 +16,10 @@ import { teamsApi } from "@/api/teams";
 import { renderMarkdown, renderMarkdownAsync } from "@/utils/markdown";
 import type { Agent, Knowledge, WsAdapter } from "@/types";
 import type { SendOptions } from "@/components/Composer.vue";
+
+// Lazy-load heavy components (split from main bundle)
+const WorkspacePanel = defineAsyncComponent(() => import("@/components/WorkspacePanel.vue"));
+const ExtractItemsModal = defineAsyncComponent(() => import("@/components/ExtractItemsModal.vue"));
 
 const chat = useChatStore();
 const ns = useNotificationStore();
