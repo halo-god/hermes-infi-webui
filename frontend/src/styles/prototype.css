@@ -505,8 +505,9 @@
     position: absolute;
     left: 50%; transform: translateX(-50%);
     bottom: 18px;
-    width: calc(100% - 80px);
-    max-width: 740px;
+    width: 80%;
+    min-width: 480px;
+    max-width: 900px;
     pointer-events: none;
   }
   .dock .composer-wrap { pointer-events: auto; }

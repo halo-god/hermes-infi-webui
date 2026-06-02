@@ -5,7 +5,7 @@ import Icon from "@/components/Icon.vue";
 import ModalShell from "@/components/ModalShell.vue";
 import { projectsApi } from "@/api/projects";
 import { useChatStore } from "@/stores/chat";
-import type { Member, Project } from "@/types";
+import type { Agent, Member, Project } from "@/types";
 
 const props = defineProps<{
   teamId: string; teamName: string; members: Member[];
@@ -37,9 +37,24 @@ const form = reactive({
   summary: props.project?.summary || "",
   deadline: props.project?.deadline || defaultDeadline(),
   sections: (props.project as any)?.sections || ["concept", "spec", "rollout"],
-  pinnedAgents: (props.project as any)?.pinned_agents || ["hermes", "cowork"],
+  pinnedAgents: (props.project as any)?.pinned_agents || [] as string[],
   members: props.project ? ((props.project as any)?.member_ids || []) : props.members.slice(0, 2).map((m) => m.user_id),
   visibility: (props.project as any)?.visibility || "team",
+});
+
+// Unified list: profiles first, then raw agents without a profile
+const agentItems = computed<Agent[]>(() => {
+  const coveredIds = new Set<string>();
+  const items: Agent[] = [];
+  for (const p of chat.profiles) {
+    const id = p.default_agent_id || p.handle || p.id;
+    items.push({ id, label: p.name, icon: p.icon || "sparkle", color: p.color || "#b8852a", description: p.desc || "" } as Agent);
+    if (p.default_agent_id) coveredIds.add(p.default_agent_id);
+  }
+  for (const a of chat.agents) {
+    if (!coveredIds.has(a.id)) items.push(a);
+  }
+  return items.slice(0, 8);
 });
 let handleEdited = false as boolean;
 if (isEdit.value) handleEdited = true;
@@ -132,7 +147,7 @@ async function submit() {
     <div class="np-field">
       <label class="np-label">钉选助手 <span class="np-hint">项目首页直接可用 · 已选 {{ form.pinnedAgents.length }}</span></label>
       <div class="np-agents">
-        <button v-for="a in chat.agents.slice(0, 8)" :key="a.id" class="np-agent" :class="{ on: form.pinnedAgents.includes(a.id) }" @click="toggle(form.pinnedAgents, a.id)">
+        <button v-for="a in agentItems" :key="a.id" class="np-agent" :class="{ on: form.pinnedAgents.includes(a.id) }" @click="toggle(form.pinnedAgents, a.id)">
           <span class="np-agent-ico" :style="{ background: a.color || '#b8852a' }"><Icon :name="a.icon || 'sparkle'" /></span>
           <span class="np-agent-nm">{{ a.label }}</span>
           <span v-if="form.pinnedAgents.includes(a.id)" class="np-agent-check"><Icon name="check" :size="9" /></span>

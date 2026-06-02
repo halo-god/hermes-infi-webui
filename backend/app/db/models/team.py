@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -24,6 +24,9 @@ class Team(UUIDPrimaryKey, Timestamps, Base):
     policy: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     shared_agents: Mapped[list] = mapped_column(JSONB, default=lambda: ["hermes"])
     channel_mode: Mapped[str] = mapped_column(String(16), default="mention", nullable=False)
+    invite_token: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
+    invite_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    invite_role: Mapped[str] = mapped_column(String(16), default="member", nullable=False)
 
     members: Mapped[list["TeamMember"]] = relationship(
         back_populates="team", cascade="all, delete-orphan"

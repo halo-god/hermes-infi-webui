@@ -3,12 +3,13 @@
    only — the sidebar/topbar live in AppLayout. Uses the prototype CSS classes
    so it renders pixel-identical; wired to the real chat store. */
 import { computed, nextTick, onMounted, ref, watch } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import Icon from "@/components/Icon.vue";
 import Composer from "@/components/Composer.vue";
 import ConfirmModal from "@/components/ConfirmModal.vue";
 import ConvoSeal from "@/components/ConvoSeal.vue";
 import WorkspacePanel from "@/components/WorkspacePanel.vue";
+import ExtractItemsModal from "@/components/ExtractItemsModal.vue";
 import { useChatStore } from "@/stores/chat";
 import { useNotificationStore } from "@/stores/notifications";
 import { conversationsApi } from "@/api/conversations";
@@ -19,11 +20,13 @@ import type { SendOptions } from "@/components/Composer.vue";
 const chat = useChatStore();
 const ns = useNotificationStore();
 const route = useRoute();
+const router = useRouter();
 
 const draft = ref("");
 const scroller = ref<HTMLElement | null>(null);
 const showWorkspace = ref(false);
 const showAgentMenu = ref(false);
+const showExtractModal = ref(false);
 const agentTab = ref("全部");
 const landingAgentId = ref("hermes");
 // roundtable per-reply chosen state (keyed by messageId:slot)
@@ -255,6 +258,9 @@ const wsAdapter = computed<WsAdapter>(() => {
             <button class="thread-action" v-if="chat.files.length" @click="showWorkspace = !showWorkspace" style="flex-shrink:0;margin-top:2px;">
               <Icon name="folder" /> 工作区 ({{ chat.files.length }})
             </button>
+            <button class="thread-action" v-if="chat.messages.length >= 2" @click="showExtractModal = true" style="flex-shrink:0;margin-top:2px;" title="从对话内容自动创建项目与任务">
+              <Icon name="sparkle" /> 智能创建
+            </button>
           </div>
 
           <!-- agent switcher -->
@@ -374,5 +380,12 @@ const wsAdapter = computed<WsAdapter>(() => {
     :request="chat.pendingConfirmations[0]"
     @close="chat.respondConfirmation(chat.pendingConfirmations[0].id, 'deny')"
     @respond="(choice) => chat.respondConfirmation(chat.pendingConfirmations[0].id, choice)"
+  />
+  <ExtractItemsModal
+    v-if="showExtractModal && chat.activeId"
+    :conversation-id="chat.activeId"
+    :teams="chat.teams.map((t) => ({ id: t.id, name: t.name }))"
+    @close="showExtractModal = false"
+    @created="(pid) => { showExtractModal = false; router.push(`/projects/${pid}`); }"
   />
 </template>

@@ -29,6 +29,12 @@ const router = createRouter({
         },
       ],
     },
+    {
+      path: "/i/:teamHandle/:token",
+      name: "join-team",
+      component: () => import("@/views/JoinTeamView.vue"),
+      meta: { public: false },
+    },
     { path: "/:pathMatch(.*)*", redirect: "/" },
   ],
 });

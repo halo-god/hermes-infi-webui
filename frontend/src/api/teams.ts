@@ -72,4 +72,10 @@ export const teamsApi = {
   async setChannelMode(id: string, channel_mode: string): Promise<{ channel_mode: string }> {
     return (await http.patch(`/teams/${id}/channel/mode`, { channel_mode })).data;
   },
+  async generateInviteToken(id: string, role: string, expiresDays: number): Promise<{ token: string; url: string; role: string }> {
+    return (await http.post(`/teams/${id}/invite-token`, { role, expires_days: expiresDays })).data;
+  },
+  async joinByToken(token: string): Promise<{ team_id: string; role: string; joined: boolean; message: string }> {
+    return (await http.post(`/teams/join-by-token`, { token })).data;
+  },
 };

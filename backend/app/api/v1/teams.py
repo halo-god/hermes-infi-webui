@@ -7,8 +7,9 @@ owner/admin.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, File as FastApiFile, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File as FastApiFile, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel as _BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -154,6 +155,78 @@ async def set_channel_mode(
     return {"channel_mode": team.channel_mode}
 
 
+# ── invite token ──
+class InviteTokenRequest(_BaseModel):
+    role: str = "member"
+    expires_days: int = 7  # 0 = never
+
+
+class InviteTokenOut(_BaseModel):
+    token: str
+    url: str
+    role: str
+    expires_days: int
+
+
+@router.post("/teams/{team_id}/invite-token", response_model=InviteTokenOut)
+async def generate_invite_token(
+    team_id: uuid.UUID, payload: InviteTokenRequest,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """(Re)generate a shareable invite token. Owner/admin only."""
+    import secrets
+    from datetime import timezone, timedelta
+    team, member = await svc.require_membership(db, team_id, user.id)
+    if member.role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="仅所有者/管理员可生成邀请链接")
+    team.invite_token = secrets.token_urlsafe(32)
+    team.invite_role = payload.role
+    team.invite_expires_at = (
+        None if payload.expires_days == 0
+        else datetime.now(timezone.utc) + timedelta(days=payload.expires_days)
+    )
+    await db.commit()
+    await db.refresh(team)
+    handle = team.handle or str(team.id)
+    return InviteTokenOut(
+        token=team.invite_token,
+        url=f"/i/{handle}/{team.invite_token}",
+        role=team.invite_role,
+        expires_days=payload.expires_days,
+    )
+
+
+class JoinRequest(_BaseModel):
+    token: str
+
+
+@router.post("/teams/join-by-token", response_model=dict)
+async def join_by_token(
+    payload: JoinRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Join a team by presenting a valid invite token."""
+    from datetime import timezone
+    from app.db.models.team import Team, TeamMember
+
+    res = await db.execute(select(Team).where(Team.invite_token == payload.token))
+    team = res.scalar_one_or_none()
+    if team is None:
+        raise HTTPException(status_code=404, detail="邀请链接无效或已失效")
+    if team.invite_expires_at and team.invite_expires_at < datetime.now(timezone.utc):
+        raise HTTPException(status_code=410, detail="邀请链接已过期")
+
+    existing = await svc.get_membership(db, team.id, user.id)
+    if existing:
+        return {"team_id": str(team.id), "role": existing.role, "joined": False, "message": "已是团队成员"}
+
+    member = TeamMember(team_id=team.id, user_id=user.id, role=team.invite_role)
+    db.add(member)
+    await db.commit()
+    return {"team_id": str(team.id), "role": team.invite_role, "joined": True, "message": "加入成功"}
+
+
 # ── members ──
 @router.get("/teams/{team_id}/members", response_model=list[MemberOut])
 async def list_members(
@@ -296,13 +369,21 @@ async def get_knowledge_content(
 @router.get("/teams/{team_id}/knowledge/{kid}/raw")
 async def get_knowledge_raw(
     team_id: uuid.UUID, kid: uuid.UUID,
-    access_token: str = Query(...),
+    request: Request,
+    access_token: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
 ):
     from fastapi.responses import Response
     from app.db.models.team import TeamKnowledge
     from app.deps import user_from_access_token
-    user = await user_from_access_token(access_token, db)
+    token = access_token
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[len("Bearer "):]
+    if not token:
+        raise HTTPException(status_code=401, detail="未认证")
+    user = await user_from_access_token(token, db)
     await svc.require_membership(db, team_id, user.id)
     k = await db.get(TeamKnowledge, kid)
     if k is None or k.team_id != team_id:
@@ -312,6 +393,8 @@ async def get_knowledge_raw(
         "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
         "gif": "image/gif", "svg": "image/svg+xml", "webp": "image/webp",
         "bmp": "image/bmp", "pdf": "application/pdf",
+        "txt": "text/plain", "md": "text/markdown", "html": "text/html",
+        "htm": "text/html", "csv": "text/csv", "json": "application/json",
     }
     ext = k.name.rsplit(".", 1)[-1].lower() if "." in k.name else ""
     mime = MIME.get(ext, "application/octet-stream")
@@ -320,14 +403,20 @@ async def get_knowledge_raw(
         raise HTTPException(status_code=404, detail="文件内容不存在")
 
     import base64
-    try:
-        data = base64.b64decode(k.content)
-    except Exception:
-        data = (k.content or "").encode("utf-8")
+    TEXT_EXTS = {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
+                 "yaml", "yml", "toml", "sh", "log", "xml", "css", "diff", "patch"}
+    if ext in TEXT_EXTS:
+        data = k.content.encode("utf-8")
+    else:
+        try:
+            data = base64.b64decode(k.content.strip())
+        except Exception:
+            data = k.content.encode("utf-8")
 
+    safe_name = k.name.replace('"', "_").replace("\\", "_")
     return Response(
         content=data, media_type=mime,
-        headers={"Content-Disposition": f'inline; filename="{k.name}"'},
+        headers={"Content-Disposition": f'inline; filename="{safe_name}"'},
     )
 
 

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /* 1:1 port of the prototype InviteMembersModal. The 邮箱 tab adds existing
    users to the team via the real API; 链接 / SSO tabs reproduce the prototype. */
-import { computed, reactive, ref } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import Icon from "@/components/Icon.vue";
 import ModalShell from "@/components/ModalShell.vue";
 import { teamsApi } from "@/api/teams";
@@ -13,17 +13,37 @@ const emit = defineEmits<{ close: []; invited: [TeamDetail] }>();
 const tab = ref<"link" | "email" | "sso">("link");
 const role = ref("member");
 const expires = ref("7d");
-const rid = () => Math.random().toString(36).slice(2, 8) + Math.random().toString(36).slice(2, 6);
 const baseUrl = window.location.origin;
-const link = ref(`${baseUrl}/i/${props.team.handle || props.team.id}/${rid()}`);
+const link = ref("");
 const copied = ref(false);
+const tokenLoading = ref(false);
+
+const EXPIRES_DAYS: Record<string, number> = { "1d": 1, "7d": 7, "30d": 30, "never": 0 };
+
+async function fetchToken() {
+  tokenLoading.value = true;
+  try {
+    const res = await teamsApi.generateInviteToken(props.team.id, role.value, EXPIRES_DAYS[expires.value] ?? 7);
+    link.value = `${baseUrl}${res.url}`;
+  } catch {
+    link.value = `${baseUrl}/i/${props.team.handle || props.team.id}/error`;
+  } finally {
+    tokenLoading.value = false;
+  }
+}
+
+// Fetch token when tab becomes active or role/expires changes
+watch([tab, role, expires], ([newTab]) => {
+  if (newTab === "link") fetchToken();
+}, { immediate: true });
+
 function copyLink() {
   navigator.clipboard?.writeText(link.value);
   copied.value = true;
   setTimeout(() => (copied.value = false), 1600);
 }
-function regen() {
-  link.value = `${baseUrl}/i/${props.team.handle || props.team.id}/${rid()}`;
+async function regen() {
+  await fetchToken();
 }
 
 const emailInput = ref("");
@@ -84,9 +104,9 @@ const EXPIRES = [{ id: "1d", label: "1 天" }, { id: "7d", label: "7 天" }, { i
     <div v-if="tab === 'link'" class="inv-pane">
       <div class="inv-link-box">
         <Icon name="share" />
-        <input class="np-input inv-link-input" :value="link" readonly @click="($event.target as HTMLInputElement).select()" />
-        <button class="btn" @click="regen" title="重新生成"><Icon name="refresh" /></button>
-        <button class="btn primary" @click="copyLink"><Icon :name="copied ? 'check' : 'copy'" /> {{ copied ? "已复制" : "复制" }}</button>
+        <input class="np-input inv-link-input" :value="tokenLoading ? '生成中…' : link" readonly @click="($event.target as HTMLInputElement).select()" />
+        <button class="btn" @click="regen" :disabled="tokenLoading" title="重新生成"><Icon name="refresh" /></button>
+        <button class="btn primary" :disabled="tokenLoading || !link" @click="copyLink"><Icon :name="copied ? 'check' : 'copy'" /> {{ copied ? "已复制" : "复制" }}</button>
       </div>
       <div class="np-row" style="margin-top: 14px">
         <div class="np-field">

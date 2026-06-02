@@ -23,7 +23,7 @@ from app.core import metrics, ratelimit
 from app.core import redis as redis_core
 from app.db.base import async_session_maker, get_db
 from app.db.models.user import User
-from app.db.models.workspace import WorkspaceFile, WorkspaceFileVersion
+from app.db.models.workspace import WorkspaceFile
 from app.deps import get_current_user, user_from_access_token
 
 from app.schemas.conversation import (
@@ -158,7 +158,8 @@ async def get_shared_conversation(
     conversation_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
 ):
-    from fastapi import HTTPException
+    from sqlalchemy import select
+    from app.db.models.conversation import Conversation
     res = await db.execute(
         select(Conversation).where(
             Conversation.id == conversation_id,
@@ -168,7 +169,11 @@ async def get_shared_conversation(
     convo = res.scalar_one_or_none()
     if not convo:
         raise HTTPException(status_code=404, detail="分享链接不存在或已失效")
-    return convo
+    msgs = await svc.get_messages(db, convo.id)
+    return ConversationDetail(
+        **ConversationOut.model_validate(convo).model_dump(),
+        messages=[MessageOut.model_validate(m) for m in msgs],
+    )
 
 
 @router.post("/{conversation_id}/messages", response_model=SendMessageResponse)
@@ -511,3 +516,64 @@ async def upload_file(
     await db.commit()
     await db.refresh(wf)
     return WorkspaceFileOut.model_validate(wf)
+
+
+@router.post("/{conversation_id}/extract-items")
+async def extract_items(
+    conversation_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Parse the most recent agent messages for project/task creation intent.
+
+    Returns a suggested project name and task list extracted from bullet/numbered
+    lists in the conversation. The caller presents this in a confirmation modal
+    before actually creating anything.
+    """
+    import re
+    convo = await _require_convo(db, conversation_id, user)
+    msgs = await svc.get_messages(db, convo.id)
+
+    agent_texts = [
+        m.content.get("text", "") for m in msgs
+        if m.role in ("agent", "roundtable") and m.content.get("text")
+    ]
+    combined = "\n".join(agent_texts[-3:])  # look at last 3 agent turns
+
+    # Extract numbered or bulleted list items as tasks
+    task_patterns = [
+        r"^\s*(?:\d+[\.\)、]|\*|-|·|•)\s+(.+)$",
+    ]
+    tasks: list[str] = []
+    for line in combined.splitlines():
+        for pat in task_patterns:
+            m = re.match(pat, line.strip())
+            if m:
+                task = m.group(1).strip()
+                if 3 <= len(task) <= 120:
+                    tasks.append(task)
+                break
+
+    # Derive a project name from conversation title or first user message
+    project_name = convo.title if convo.title and convo.title != "新会话" else ""
+    if not project_name and msgs:
+        first_user = next((m for m in msgs if m.role == "user"), None)
+        if first_user:
+            project_name = (first_user.content.get("text") or "")[:40].strip()
+
+    # Deduplicate and cap
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for t in tasks:
+        key = t[:50].lower()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(t)
+    deduped = deduped[:20]
+
+    return {
+        "project_name": project_name,
+        "tasks": deduped,
+        "conversation_id": str(convo.id),
+        "team_id": str(convo.team_id) if convo.team_id else None,
+    }

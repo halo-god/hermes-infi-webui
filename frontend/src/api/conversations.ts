@@ -90,4 +90,7 @@ export const conversationsApi = {
       headers: { "Content-Type": "multipart/form-data" },
     })).data;
   },
+  async extractItems(id: string): Promise<{ project_name: string; tasks: string[]; conversation_id: string; team_id: string | null }> {
+    return (await http.post(`/conversations/${id}/extract-items`)).data;
+  },
 };

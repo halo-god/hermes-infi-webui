@@ -452,7 +452,7 @@ function fmtDate(s: string) {
             </div>
             <!-- PDF -->
             <div v-else-if="fileMode(activeFile) === 'pdf'" class="pdf-preview">
-              <embed :src="rawUrl" type="application/pdf" width="100%" height="100%" />
+              <iframe :src="rawUrl" frameborder="0" width="100%" height="100%" />
             </div>
             <!-- Diff -->
             <div v-else-if="fileMode(activeFile) === 'diff'" class="diff-preview">
