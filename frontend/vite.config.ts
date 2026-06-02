@@ -14,6 +14,7 @@ export default defineConfig({
       output: {
         manualChunks: {
           "vendor-vue": ["vue", "vue-router", "pinia", "axios"],
+          "vendor-naive": ["naive-ui"],
           "vendor-mermaid": ["mermaid"],
           "vendor-katex": ["katex", "@vscode/markdown-it-katex"],
           "vendor-hljs": ["highlight.js"],
