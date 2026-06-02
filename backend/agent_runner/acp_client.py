@@ -22,11 +22,23 @@ from typing import Any
 
 logger = logging.getLogger("hermes.acp")
 
+# ── Timeouts (seconds) ──
+START_TIMEOUT = 30       # subprocess spawn
+INIT_TIMEOUT = 30        # initialize handshake
+SESSION_TIMEOUT = 30     # session/new
+PROMPT_TIMEOUT = 300     # session/prompt (agent can think for a while)
+CANCEL_TIMEOUT = 5       # session/cancel (fire-and-forget)
+
 OnUpdate = Callable[[dict], Awaitable[None]]
 OnFsWrite = Callable[[str, str], Awaitable[None]]  # (path, content)
 
 
 class ACPError(Exception):
+    pass
+
+
+class ACPTimeout(ACPError):
+    """Raised when an ACP call exceeds its deadline."""
     pass
 
 
@@ -115,6 +127,7 @@ class ACPClient:
                 "clientCapabilities": {"fs": {"writeTextFile": True, "readTextFile": True}},
                 "clientInfo": {"name": "hermes-runner", "version": "0.1.0"},
             },
+            timeout=INIT_TIMEOUT,
         )
 
     async def authenticate(self, method_id: str) -> dict:
@@ -123,11 +136,11 @@ class ACPClient:
         Most local CLIs (incl. Hermes) self-authenticate at the host level
         (env API key / `hermes login`), so this is only used when configured.
         """
-        return await self._request("authenticate", {"methodId": method_id})
+        return await self._request("authenticate", {"methodId": method_id}, timeout=INIT_TIMEOUT)
 
     async def new_session(self, cwd: str, mcp_servers: list | None = None) -> str:
         res = await self._request(
-            "session/new", {"cwd": cwd, "mcpServers": mcp_servers or []}
+            "session/new", {"cwd": cwd, "mcpServers": mcp_servers or []}, timeout=SESSION_TIMEOUT,
         )
         self._session_id = res.get("sessionId")
         if not self._session_id:
@@ -142,6 +155,7 @@ class ACPClient:
                 "sessionId": self._session_id,
                 "prompt": [{"type": "text", "text": text}],
             },
+            timeout=PROMPT_TIMEOUT,
         )
         return res.get("stopReason", "end_turn")
 
@@ -150,7 +164,7 @@ class ACPClient:
             await self._notify("session/cancel", {"sessionId": self._session_id})
 
     # ── JSON-RPC plumbing ──
-    async def _request(self, method: str, params: dict) -> dict:
+    async def _request(self, method: str, params: dict, timeout: float = 60) -> dict:
         if not self._proc or self._proc.stdin is None:
             raise ACPError("subprocess not started")
         self._next_id += 1
@@ -158,7 +172,11 @@ class ACPClient:
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending[rid] = fut
         await self._write({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
-        result = await fut
+        try:
+            result = await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._pending.pop(rid, None)
+            raise ACPTimeout(f"{method} timed out after {timeout}s")
         return result or {}
 
     async def _notify(self, method: str, params: dict) -> None:

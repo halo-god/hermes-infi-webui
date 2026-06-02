@@ -6,12 +6,18 @@ conversation are processed sequentially by the runner.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from app.config import settings
-from agent_runner.acp_client import ACPClient, OnFsWrite, OnUpdate
+from agent_runner.acp_client import ACPClient, ACPTimeout, OnFsWrite, OnUpdate
 
 logger = logging.getLogger("hermes.pool")
+
+# Timeouts for pool operations (seconds)
+POOL_START_TIMEOUT = 30
+POOL_INIT_TIMEOUT = 30
+POOL_SESSION_TIMEOUT = 30
 
 
 class SessionPool:
@@ -41,6 +47,10 @@ class SessionPool:
             c.on_fs_write = on_fs_write
             return c, None
 
+        # Drop stale client if any
+        if c is not None:
+            await self.drop(conversation_id)
+
         c = ACPClient(
             command,
             cwd,
@@ -48,11 +58,18 @@ class SessionPool:
             on_update=on_update,
             on_fs_write=on_fs_write,
         )
-        await c.start()
-        await c.initialize()
-        if settings.hermes_acp_auth_method:
-            await c.authenticate(settings.hermes_acp_auth_method)
-        session_id = await c.new_session(cwd)
+        try:
+            await asyncio.wait_for(c.start(), timeout=POOL_START_TIMEOUT)
+            await asyncio.wait_for(c.initialize(), timeout=POOL_INIT_TIMEOUT)
+            if settings.hermes_acp_auth_method:
+                await asyncio.wait_for(
+                    c.authenticate(settings.hermes_acp_auth_method), timeout=POOL_INIT_TIMEOUT,
+                )
+            session_id = await asyncio.wait_for(c.new_session(cwd), timeout=POOL_SESSION_TIMEOUT)
+        except (asyncio.TimeoutError, Exception) as exc:
+            logger.error("Failed to create ACP session for %s: %s", conversation_id, exc)
+            await c.stop()
+            raise
         self._clients[conversation_id] = c
         return c, session_id
 

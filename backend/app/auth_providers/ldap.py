@@ -114,7 +114,9 @@ class LDAPProvider:
         template = config.get("user_dn_template")
         if not template:
             raise ProviderError("LDAP 未配置 user_dn_template（直连绑定模式）")
-        user_dn = template.format(username=uname)
+        # If username is an email, extract the uid part for DN lookup
+        uid = uname.split("@")[0] if "@" in uname else uname
+        user_dn = template.format(username=uid)
 
         attr_email = config.get("attr_email", "mail")
         attr_name = config.get("attr_name", "cn")

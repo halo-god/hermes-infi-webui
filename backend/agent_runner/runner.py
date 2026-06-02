@@ -4,6 +4,12 @@
 
 Performance: the per-token path is Redis-only (publish), never the DB. The
 agent message row is written once on completion.
+
+Stability features:
+  - Singleton lock: only one runner active at a time (Redis distributed lock)
+  - ACP timeouts: prompt 300s, start/init 30s — no infinite hangs
+  - Stale reclaim: stuck pending messages auto-claimed after 60s
+  - Graceful shutdown: SIGTERM/SIGINT handled, ACP subprocesses cleaned up
 """
 from __future__ import annotations
 
@@ -11,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import uuid
 from datetime import datetime, timezone
 
@@ -23,16 +30,76 @@ from app.db.base import async_session_maker
 from app.db.models.agent import Agent
 from app.db.models.conversation import Conversation, Message
 from agent_runner import discovery, storage
-from agent_runner.acp_client import ACPClient
+from agent_runner.acp_client import ACPClient, ACPError, ACPTimeout
 from agent_runner.session_pool import SessionPool
 
 logger = logging.getLogger("hermes.runner")
+
+# ── Stability constants ──
+LOCK_KEY = "hermes:runner:lock"
+LOCK_TTL = 30          # seconds; must be > heartbeat interval
+HEARTBEAT_INTERVAL = 10  # refresh lock every N seconds
+STALE_THRESHOLD_MS = 120_000  # 2 minutes — reclaim stuck pending messages
+RECLAIM_INTERVAL = 30   # check for stale messages every N seconds
 
 
 class Runner:
     def __init__(self) -> None:
         self.pool = SessionPool()
         self.agents: dict[str, discovery.DiscoveredAgent] = {}
+        self._shutdown = False
+        self._lock_token: str | None = None
+
+    # ── Singleton lock ──
+    async def _acquire_lock(self) -> bool:
+        """Try to acquire a distributed lock. Returns True if we are the leader."""
+        self._lock_token = str(uuid.uuid4())
+        redis = R.get_redis()
+        try:
+            ok = await redis.set(LOCK_KEY, self._lock_token, nx=True, ex=LOCK_TTL)
+            if ok:
+                logger.info("Runner lock acquired (token=%s)", self._lock_token[:8])
+                return True
+            # Check if the existing lock holder is alive
+            existing = await redis.get(LOCK_KEY)
+            if existing:
+                logger.warning("Another runner is active (token=%s). Exiting.", existing[:8])
+            return False
+        except Exception:
+            logger.exception("Failed to acquire runner lock")
+            return False
+
+    async def _refresh_lock(self) -> None:
+        """Refresh the lock TTL to prevent expiry while we're alive."""
+        if not self._lock_token:
+            return
+        redis = R.get_redis()
+        try:
+            # Only refresh if we still own it
+            current = await redis.get(LOCK_KEY)
+            if current and current.decode() == self._lock_token:
+                await redis.expire(LOCK_KEY, LOCK_TTL)
+        except Exception:
+            logger.warning("Failed to refresh runner lock")
+
+    async def _release_lock(self) -> None:
+        """Release the lock only if we own it (Lua-safe compare-and-delete)."""
+        if not self._lock_token:
+            return
+        redis = R.get_redis()
+        try:
+            # Atomic: delete only if value matches our token
+            lua = """
+            if redis.call("get", KEYS[1]) == ARGV[1] then
+                return redis.call("del", KEYS[1])
+            else
+                return 0
+            end
+            """
+            await redis.eval(lua, 1, LOCK_KEY, self._lock_token)
+            logger.info("Runner lock released")
+        except Exception:
+            logger.warning("Failed to release runner lock (non-fatal)")
 
     # ── startup ──
     async def register_agents(self) -> None:
@@ -66,39 +133,107 @@ class Runner:
             if "BUSYGROUP" not in str(e):
                 raise
 
+    # ── Signal handling ──
+    def _handle_signal(self, sig: int) -> None:
+        logger.info("Received signal %s, shutting down gracefully...", sig)
+        self._shutdown = True
+
+    # ── Stale message reclaim ──
+    async def _reclaim_stale(self) -> None:
+        """Claim stuck pending messages that exceed STALE_THRESHOLD_MS."""
+        try:
+            redis = R.get_redis()
+            # xautoclaim: returns [next_start_id, [(msg_id, fields), ...], deleted_ids]
+            result = await redis.xautoclaim(
+                settings.acp_stream, settings.acp_group,
+                settings.acp_consumer, STALE_THRESHOLD_MS, "0-0",
+            )
+            if result and len(result) > 1:
+                claimed = result[1]
+                for msg_id, fields in claimed:
+                    logger.warning("Reclaimed stale message %s", msg_id)
+                    # ACK it so it doesn't block
+                    await redis.xack(settings.acp_stream, settings.acp_group, msg_id)
+                    # Re-enqueue for fresh processing
+                    data = fields.get(b"data", fields.get("data"))
+                    if data:
+                        await redis.xadd(settings.acp_stream, {"data": data})
+                        logger.info("Re-enqueued stale message %s", msg_id)
+        except Exception:
+            logger.debug("Reclaim check failed (non-fatal)", exc_info=True)
+
+    # ── Heartbeat + reclaim loop ──
+    async def _heartbeat_loop(self) -> None:
+        """Background task: refresh lock + reclaim stale messages."""
+        counter = 0
+        while not self._shutdown:
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+            await self._refresh_lock()
+            counter += 1
+            if counter * HEARTBEAT_INTERVAL >= RECLAIM_INTERVAL:
+                counter = 0
+                await self._reclaim_stale()
+
     # ── main loop ──
     async def run(self) -> None:
         configure_logging()
+
+        # Register signal handlers (async-safe)
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, lambda s=sig: self._handle_signal(s))
+
+        # Singleton check
+        if not await self._acquire_lock():
+            return
+
         await self.register_agents()
         await self.ensure_group()
         logger.info("Runner consuming %s as %s/%s",
                     settings.acp_stream, settings.acp_group, settings.acp_consumer)
-        while True:
-            try:
-                resp = await R.get_redis().xreadgroup(
-                    settings.acp_group,
-                    settings.acp_consumer,
-                    {settings.acp_stream: ">"},
-                    count=8,
-                    block=5000,
-                )
-            except Exception:  # noqa: BLE001
-                logger.exception("xreadgroup failed; backing off")
-                await asyncio.sleep(1)
-                continue
 
-            if not resp:
-                continue
-            for _stream, entries in resp:
-                for entry_id, fields in entries:
-                    try:
-                        await self.handle(json.loads(fields["data"]))
-                    except Exception:  # noqa: BLE001
-                        logger.exception("handle failed for %s", entry_id)
-                    finally:
-                        await R.get_redis().xack(
-                            settings.acp_stream, settings.acp_group, entry_id
-                        )
+        # Start background heartbeat + reclaim
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
+        try:
+            while not self._shutdown:
+                try:
+                    resp = await R.get_redis().xreadgroup(
+                        settings.acp_group,
+                        settings.acp_consumer,
+                        {settings.acp_stream: ">"},
+                        count=1,
+                        block=3000,
+                    )
+                except Exception:
+                    logger.exception("xreadgroup failed; backing off")
+                    await asyncio.sleep(2)
+                    continue
+
+                if not resp:
+                    continue
+                for _stream, entries in resp:
+                    for entry_id, fields in entries:
+                        if self._shutdown:
+                            break
+                        try:
+                            await self.handle(json.loads(fields["data"]))
+                        except Exception:
+                            logger.exception("handle failed for %s", entry_id)
+                        finally:
+                            try:
+                                await R.get_redis().xack(
+                                    settings.acp_stream, settings.acp_group, entry_id
+                                )
+                            except Exception:
+                                logger.warning("Failed to ACK %s", entry_id)
+        finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            await self._release_lock()
 
     # ── dispatch ──
     async def handle(self, task: dict) -> None:
@@ -159,6 +294,9 @@ class Runner:
                 await client.initialize()
                 await client.new_session(cwd)
                 await client.prompt(text)
+            except ACPTimeout as exc:
+                logger.error("roundtable timeout (%s): %s", aid, exc)
+                buf["text"] = buf["text"] or f"（{aid} 超时未响应）"
             except Exception:  # noqa: BLE001
                 logger.exception("roundtable reply failed (%s)", aid)
                 buf["text"] = buf["text"] or "（该助手作答失败）"
@@ -211,6 +349,8 @@ class Runner:
             await mclient.initialize()
             await mclient.new_session(cwd)
             await mclient.prompt(merge_prompt)
+        except ACPTimeout:
+            logger.error("roundtable merge timed out")
         except Exception:  # noqa: BLE001
             logger.exception("roundtable merge failed")
         finally:
@@ -313,6 +453,11 @@ class Runner:
             if new_session:
                 await self._set_session_id(conversation_id, new_session)
             stop_reason = await client.prompt(text)
+        except ACPTimeout as exc:
+            logger.error("prompt timed out for %s: %s", conversation_id, exc)
+            await self.pool.drop(conversation_id)
+            await self._fail(conversation_id, message_id, f"响应超时：{exc}")
+            return
         except Exception as exc:  # noqa: BLE001
             logger.exception("prompt failed")
             await self.pool.drop(conversation_id)
