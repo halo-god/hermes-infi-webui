@@ -89,11 +89,12 @@ async def create_conversation(
 async def _resolve_attached_files(
     db: AsyncSession, file_ids: list[str]
 ) -> list[dict]:
-    """Look up workspace files by id, return [{id, name, kind}] for valid ones."""
+    """Look up workspace files by id, return [{id, name, kind, content}] for valid ones."""
     if not file_ids:
         return []
     import uuid as _uuid
 
+    MAX_INLINE = 50_000  # 50KB per file to avoid prompt explosion
     result = []
     for raw_id in file_ids:
         try:
@@ -102,7 +103,10 @@ async def _resolve_attached_files(
             continue
         f = await db.get(WorkspaceFile, fid)
         if f is not None:
-            result.append({"id": str(f.id), "name": f.name, "kind": f.kind})
+            content = f.content or ""
+            if len(content) > MAX_INLINE:
+                content = content[:MAX_INLINE] + f"\n\n[... 文件过大，已截断至 {MAX_INLINE} 字符，原始 {len(f.content)} 字符]"
+            result.append({"id": str(f.id), "name": f.name, "kind": f.kind, "content": content})
     return result
 
 
@@ -145,11 +149,18 @@ async def send_message(
     await db.refresh(user_msg)
     await db.refresh(agent_msg)
 
-    # Build prompt text — append file summaries so the agent sees them.
+    # Build prompt text — include file content so the agent can read them.
     prompt_text = text
     if attached:
-        file_lines = "\n".join(f"[附件: {f['name']}]" for f in attached)
-        prompt_text = f"{text}\n\n{file_lines}"
+        parts = []
+        for f in attached:
+            c = f.get("content", "")
+            if c:
+                parts.append(f"[附件: {f['name']}]\n```\n{c}\n```")
+            else:
+                parts.append(f"[附件: {f['name']}]（文件内容为空）")
+        file_block = "\n\n".join(parts)
+        prompt_text = f"{text}\n\n{file_block}"
 
     await redis_core.clear_cancel(str(convo.id))
     await redis_core.enqueue_prompt(
@@ -201,8 +212,15 @@ async def send_roundtable(
 
     prompt_text = text
     if attached:
-        file_lines = "\n".join(f"[附件: {f['name']}]" for f in attached)
-        prompt_text = f"{text}\n\n{file_lines}"
+        parts = []
+        for f in attached:
+            c = f.get("content", "")
+            if c:
+                parts.append(f"[附件: {f['name']}]\n```\n{c}\n```")
+            else:
+                parts.append(f"[附件: {f['name']}]（文件内容为空）")
+        file_block = "\n\n".join(parts)
+        prompt_text = f"{text}\n\n{file_block}"
 
     await redis_core.clear_cancel(str(convo.id))
     await redis_core.enqueue_prompt(
