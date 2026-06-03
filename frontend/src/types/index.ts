@@ -222,7 +222,7 @@ export interface ConfirmationRequest {
   question: string;
   options: string[];
   // Multi-question mode: each sub-question has its own options
-  questions?: Array<{ question: string; options: string[] }>;
+  questions?: Array<{ question: string; options: string[]; allow_free_text?: boolean }>;
 }
 
 export interface RtAgentMeta {

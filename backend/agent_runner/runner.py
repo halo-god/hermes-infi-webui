@@ -536,24 +536,15 @@ class Runner:
             detected = self._detect_clarification(acc["text"])
             if detected:
                 request_id = str(uuid.uuid4())
-                question, options_or_questions = detected
-                # Check if multi-question (list of dicts) or single question (list of str)
-                is_multi = (
-                    isinstance(options_or_questions, list)
-                    and options_or_questions
-                    and isinstance(options_or_questions[0], dict)
-                )
+                preamble, questions = detected
                 request_payload = {
                     "id": request_id,
                     "conversation_id": conversation_id,
                     "message_id": message_id,
-                    "question": question,
+                    "question": preamble,
+                    "questions": questions,
+                    "options": [],  # legacy compat
                 }
-                if is_multi:
-                    request_payload["questions"] = options_or_questions
-                    request_payload["options"] = []  # legacy compat
-                else:
-                    request_payload["options"] = options_or_questions
                 await R.publish_event(
                     conversation_id,
                     {
@@ -580,148 +571,103 @@ class Runner:
 
     # ── Clarification detection: scan for questions with options ──
     @staticmethod
-    def _detect_clarification(text: str) -> tuple[str, list[str] | list[dict]] | None:
-        """Detect if the agent response is a clarification question with options.
+    def _detect_clarification(text: str) -> tuple[str, list[dict]] | None:
+        """Detect if the agent response is a clarification question.
 
-        Returns (question, options_or_questions) if detected, None otherwise.
-        Supports:
-        - ### template: "### Q1\n1. A\n2. B\n\n### Q2\n1. C\n2. D"
-        - Numbered with sub-bullets: "1. **Q1**\n   - A\n   - B\n2. **Q2**"
-        - Legacy numbered lists: "1. A\n2. B"
-        - "A还是B" pattern
+        Supports the fixed prompt format:
+          1. **标题** — 选项A、选项B、选项C？
+          2. **标题** — 选项A、选项B...？
+          3. **标题** — 纯问题？
+
+        Returns (preamble, questions) where each question dict has:
+          - question: str
+          - options: list[str]  (empty if pure text question)
+          - allow_free_text: bool  (True if ... present or no options)
         """
         import re
 
         text = text.strip()
 
-        # Pattern 0: Multi-question template — "### xxx" sections
-        h3_sections = re.findall(r"###\s*(.+?)(?=\n|$)(.*?)(?=###|\Z)", text, re.DOTALL)
-        if h3_sections:
-            questions = []
-            for title, body in h3_sections:
-                title = title.strip()
-                numbered = re.findall(r"(?:^|\n)\s*\d+[.、)）]\s*(.+?)(?=\n|$)", body)
-                if numbered:
-                    options = []
-                    for opt in numbered:
-                        cleaned = opt.strip().rstrip("？?。. ")
-                        cleaned = re.sub(r"\*\*([^*]+)\*\*", r"\1", cleaned)
-                        cleaned = re.sub(r"[（(][^）)]*[）)]", "", cleaned).strip()
-                        if cleaned:
-                            options.append(cleaned)
-                    if options:
-                        questions.append({"question": title, "options": options})
-            if len(questions) >= 1:
-                marker = re.search(r"###", text)
-                preamble = text[: marker.start()].strip() if marker else ""
-                preamble = re.sub(r"##\s*确认\s*", "", preamble)
-                preamble = re.sub(r"需要确认以下信息[：:]\s*", "", preamble)
-                preamble = preamble.strip()
-                return preamble or "请选择", questions
+        # ── Pattern: numbered items "1. **标题** — 内容？" ──
+        # Also handles ### blocks as preamble separator
+        lines = text.split("\n")
+        questions: list[dict] = []
+        preamble_lines: list[str] = []
 
-        # Pattern 1: Numbered items with sub-bullets (agent's typical format)
-        # Pattern 1: Numbered items with sub-bullets (agent's typical format)
-        # "1. **项目类型** — 什么方向？\n   - Web全栈\n   - CLI工具\n2. **技术栈**"
-        numbered_blocks = re.finditer(
-            r"(?:^|\n)\s*(\d+)[.、)）]\s*(.+?)(?=\n\s*\d+[.、)）]|\Z)",
-            text,
-            re.DOTALL,
+        # Regex for: N. **标题** — 内容？  or  N. 标题 — 内容？
+        item_re = re.compile(
+            r"^\s*\d+[.、)）]\s*"
+            r"(?:\*\*(.+?)\*\*|(.+?))"  # title in bold or plain
+            r"\s*[—\-:：]\s*"
+            r"(.+?)"  # content after dash
+            r"[？?]\s*$"
         )
-        questions_from_blocks = []
-        for match in numbered_blocks:
-            block_text = match.group(2).strip()
-            lines = block_text.split("\n")
-            question_line = lines[0].strip()
-            # Clean markdown bold
-            question_line = re.sub(r"\*\*([^*]+)\*\*", r"\1", question_line)
-            # Extract sub-bullets as options
-            options = []
-            for line in lines[1:]:
-                bullet_match = re.match(r"\s*[-*•]\s*(.+)", line)
-                if bullet_match:
-                    opt = bullet_match.group(1).strip()
-                    opt = re.sub(r"\*\*([^*]+)\*\*", r"\1", opt)
-                    opt = re.sub(r"[（(][^）)]*[）)]", "", opt).strip()
-                    opt = opt.rstrip("？?。. ")
-                    if opt:
-                        options.append(opt)
-            # If no sub-bullets, try to extract inline options from question text
-            # Pattern: "项目类型 — Web应用、CLI工具、API服务、桌面应用？"
-            if not options:
-                inline_match = re.search(
-                    r"[—\-:：]\s*(.+?)[？?]\s*$", question_line
-                )
-                if inline_match:
-                    inline_text = inline_match.group(1)
-                    # Split by 、 or ,
-                    inline_opts = re.split(r"[、,，]", inline_text)
-                    for opt in inline_opts:
-                        opt = opt.strip()
-                        opt = re.sub(r"\*\*([^*]+)\*\*", r"\1", opt)
-                        opt = re.sub(r"[（(][^）)]*[）)]", "", opt).strip()
-                        if opt:
-                            options.append(opt)
-                    # Clean question: remove the inline options part
-                    question_line = re.sub(
-                        r"[—\-:：]\s*.+?[？?]\s*$", "", question_line
-                    ).strip()
-            # Clean question: remove trailing punctuation
-            question_line = question_line.rstrip("？?。:：")
-            if question_line:
-                questions_from_blocks.append({
-                    "question": question_line,
-                    "options": options if options else [],
-                })
-        if len(questions_from_blocks) >= 2:
-            preamble = re.search(r"^(.*?)(?=\n\s*\d+[.、)）])", text, re.DOTALL)
-            preamble_text = preamble.group(1).strip() if preamble else ""
-            return preamble_text or "请选择", questions_from_blocks
 
-        # Pattern 2: Single question template — "## 确认" or "需要确认以下信息"
-        template_match = re.search(
-            r"(?:##\s*确认|需要确认以下信息)[：:\s]*(.*)", text, re.DOTALL
+        # Regex for: N. **标题** — 纯问题（没有顿号分隔的选项）
+        plain_q_re = re.compile(
+            r"^\s*\d+[.、)）]\s*"
+            r"(?:\*\*(.+?)\*\*|(.+?))"
+            r"\s*[—\-:：]\s*"
+            r"(.+)"
         )
-        if template_match:
-            block = template_match.group(1)
-            numbered = re.findall(r"(?:^|\n)\s*\d+[.、)）]\s*(.+?)(?=\n|$)", block)
-            if len(numbered) >= 2:
-                marker = re.search(r"(?:##\s*确认|需要确认以下信息)", text)
-                question = text[: marker.start()].strip() if marker else ""
-                options = []
-                for opt in numbered:
-                    cleaned = opt.strip().rstrip("？?。. ")
-                    cleaned = re.sub(r"\*\*([^*]+)\*\*", r"\1", cleaned)
-                    cleaned = re.sub(r"[（(][^）)]*[）)]", "", cleaned).strip()
-                    if cleaned:
-                        options.append(cleaned)
-                if len(options) >= 2:
-                    return question or "请选择", options
 
-        # Pattern 3: Simple numbered list (legacy)
-        numbered = re.findall(r"(?:^|\n)\s*\d+[.、)）]\s*(.+?)(?=\n|$)", text)
-        if len(numbered) >= 2:
-            first_num = re.search(r"(?:^|\n)\s*\d+[.、)）]", text)
-            question = text[: first_num.start()].strip() if first_num else text
-            options = []
-            for opt in numbered:
-                cleaned = opt.rstrip("？?。. ").strip()
-                cleaned = re.sub(r"\*\*([^*]+)\*\*", r"\1", cleaned)
-                cleaned = re.sub(r"[（(][^）)]*[）)]", "", cleaned).strip()
-                if "：" in cleaned:
-                    cleaned = cleaned.split("：")[0].strip()
-                elif ":" in cleaned:
-                    cleaned = cleaned.split(":")[0].strip()
-                if cleaned:
-                    options.append(cleaned)
-            if len(options) >= 2:
-                return question or "请选择", options
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
 
-        # Pattern 4: "A还是B"
-        haisi = re.search(r"(.+?)还是(.+?)[？?]?\s*$", text)
+            # Skip header markers
+            if stripped.startswith("## ") or stripped.startswith("### "):
+                continue
+            if stripped in ("需要确认以下信息：", "需要确认以下信息:"):
+                continue
+
+            m = item_re.match(stripped)
+            if m:
+                title = (m.group(1) or m.group(2) or "").strip()
+                content = m.group(3).strip()
+
+                # Check if content has 顿号-separated options
+                if "、" in content:
+                    has_ellipsis = content.rstrip("？?").endswith("...")
+                    raw = content.rstrip("？?").rstrip(".")
+                    # Split by 顿号
+                    opts = [o.strip() for o in raw.split("、") if o.strip()]
+                    # Remove trailing ... from last option
+                    if opts and opts[-1].endswith("..."):
+                        opts[-1] = opts[-1][:-3].strip()
+                    if not opts[-1]:
+                        opts.pop()
+                    questions.append({
+                        "question": title,
+                        "options": opts,
+                        "allow_free_text": has_ellipsis,
+                    })
+                else:
+                    # Pure question, no options
+                    questions.append({
+                        "question": title,
+                        "options": [],
+                        "allow_free_text": True,
+                    })
+            else:
+                # Not a numbered question line
+                if not questions:
+                    preamble_lines.append(stripped)
+
+        if len(questions) >= 1:
+            preamble = " ".join(preamble_lines).strip()
+            # Clean common prefixes
+            preamble = re.sub(r"^##\s*确认\s*", "", preamble)
+            preamble = re.sub(r"^需要确认以下信息[：:]\s*", "", preamble)
+            return preamble or "请选择", questions
+
+        # ── Fallback: "A还是B" pattern ──
+        haisi = re.search(r"(.+?)还是(.+?)[？?]?\\s*$", text)
         if haisi:
-            opts = [haisi.group(1).strip(), haisi.group(2).strip()]
-            question = text[: haisi.start()].strip()
-            return question or "请选择", opts
+            return "请选择", [
+                {"question": "请选择", "options": [haisi.group(1).strip(), haisi.group(2).strip()], "allow_free_text": False}
+            ]
 
         return None
 
