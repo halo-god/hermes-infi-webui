@@ -242,14 +242,24 @@ async function sendChannelMessage() {
   channelDraft.value = "";
   channelSending.value = true;
 
-  // Inline-attach any selected knowledge items
+  // Inline-attach any selected knowledge items + uploaded files
   let fullText = text;
   if (channelAttachments.value.length) {
     try {
       const parts: string[] = [];
       for (const att of channelAttachments.value) {
-        const content = await teamsApi.knowledgeContent(teamId.value, att.id);
-        if (content) parts.push(`【知识库: ${att.name}】\n${content}`);
+        if (att.id.startsWith("blob:")) {
+          // Uploaded file: read content from blob URL
+          try {
+            const resp = await fetch(att.id);
+            const fileText = await resp.text();
+            if (fileText) parts.push(`【附件: ${att.name}】\n${fileText}`);
+          } catch { /* skip unreadable file */ }
+        } else {
+          // Knowledge item: fetch from API
+          const content = await teamsApi.knowledgeContent(teamId.value, att.id);
+          if (content) parts.push(`【知识库: ${att.name}】\n${content}`);
+        }
       }
       if (parts.length) fullText = parts.join("\n\n---\n\n") + "\n\n---\n\n" + text;
     } catch { /* ignore */ }
