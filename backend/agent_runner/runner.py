@@ -620,6 +620,7 @@ class Runner:
                 return preamble or "请选择", questions
 
         # Pattern 1: Numbered items with sub-bullets (agent's typical format)
+        # Pattern 1: Numbered items with sub-bullets (agent's typical format)
         # "1. **项目类型** — 什么方向？\n   - Web全栈\n   - CLI工具\n2. **技术栈**"
         numbered_blocks = re.finditer(
             r"(?:^|\n)\s*(\d+)[.、)）]\s*(.+?)(?=\n\s*\d+[.、)）]|\Z)",
@@ -629,12 +630,10 @@ class Runner:
         questions_from_blocks = []
         for match in numbered_blocks:
             block_text = match.group(2).strip()
-            # Extract question: first line (before any sub-bullets)
             lines = block_text.split("\n")
             question_line = lines[0].strip()
-            # Clean markdown
+            # Clean markdown bold
             question_line = re.sub(r"\*\*([^*]+)\*\*", r"\1", question_line)
-            question_line = question_line.rstrip("？?。:：")
             # Extract sub-bullets as options
             options = []
             for line in lines[1:]:
@@ -646,13 +645,34 @@ class Runner:
                     opt = opt.rstrip("？?。. ")
                     if opt:
                         options.append(opt)
+            # If no sub-bullets, try to extract inline options from question text
+            # Pattern: "项目类型 — Web应用、CLI工具、API服务、桌面应用？"
+            if not options:
+                inline_match = re.search(
+                    r"[—\-:：]\s*(.+?)[？?]\s*$", question_line
+                )
+                if inline_match:
+                    inline_text = inline_match.group(1)
+                    # Split by 、 or ,
+                    inline_opts = re.split(r"[、,，]", inline_text)
+                    for opt in inline_opts:
+                        opt = opt.strip()
+                        opt = re.sub(r"\*\*([^*]+)\*\*", r"\1", opt)
+                        opt = re.sub(r"[（(][^）)]*[）)]", "", opt).strip()
+                        if opt:
+                            options.append(opt)
+                    # Clean question: remove the inline options part
+                    question_line = re.sub(
+                        r"[—\-:：]\s*.+?[？?]\s*$", "", question_line
+                    ).strip()
+            # Clean question: remove trailing punctuation
+            question_line = question_line.rstrip("？?。:：")
             if question_line:
                 questions_from_blocks.append({
                     "question": question_line,
                     "options": options if options else [],
                 })
         if len(questions_from_blocks) >= 2:
-            # At least 2 questions to trigger multi-step
             preamble = re.search(r"^(.*?)(?=\n\s*\d+[.、)）])", text, re.DOTALL)
             preamble_text = preamble.group(1).strip() if preamble else ""
             return preamble_text or "请选择", questions_from_blocks

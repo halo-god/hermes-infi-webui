@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, computed, nextTick } from "vue";
+import Icon from "@/components/Icon.vue";
 import type { ConfirmationRequest } from "@/types";
 
 const props = withDefaults(
@@ -107,78 +108,104 @@ function onKeydown(e: KeyboardEvent) {
 </script>
 
 <template>
+  <!-- AI Confirmation Mode -->
   <template v-if="request">
     <Teleport to="body">
-      <div class="confirm-overlay" @click.self="emit('close')">
-        <div class="confirm-modal">
-          <div class="confirm-header">
-            <span class="confirm-icon">🤔</span>
+      <div class="modal-scrim" @mousedown.self="emit('close')">
+        <div class="modal" :style="{ maxWidth: '480px' }" role="dialog">
+          <div class="modal-head">
             <div>
-              <div class="confirm-title">
-                {{ isMultiQuestion ? `问题 ${currentStep + 1} / ${totalSteps}` : "需要您的确认" }}
+              <div class="modal-title">
+                {{ isMultiQuestion ? `问题 ${currentStep + 1} / ${totalSteps}` : "需要确认" }}
               </div>
-              <div class="confirm-sub">
-                {{ request.question || "AI 在继续前需要您做出选择" }}
-              </div>
+              <div v-if="request.question" class="modal-sub">{{ request.question }}</div>
+            </div>
+            <button class="modal-close" @click="emit('close')" aria-label="关闭">
+              <Icon name="close" />
+            </button>
+          </div>
+
+          <!-- Progress bar for multi-step -->
+          <div v-if="isMultiQuestion" class="cf-progress">
+            <div class="cf-progress-fill" :style="{ width: `${((currentStep + 1) / totalSteps) * 100}%` }" />
+          </div>
+
+          <div class="modal-body">
+            <!-- Current question -->
+            <div class="cf-question">{{ currentQuestion }}</div>
+
+            <!-- Options list -->
+            <div v-if="!isFreeText" class="cf-options">
+              <button
+                v-for="opt in currentOptions"
+                :key="opt"
+                class="cf-option"
+                @click="selectOption(opt)"
+              >
+                <span class="cf-option-dot" />
+                <span>{{ opt }}</span>
+              </button>
+            </div>
+
+            <!-- Free text input -->
+            <div v-else class="cf-free">
+              <input
+                ref="textInput"
+                v-model="freeText"
+                type="text"
+                :placeholder="`输入 ${currentQuestion}...`"
+                class="cf-input"
+                @keydown="onKeydown"
+              />
             </div>
           </div>
 
-          <div v-if="isMultiQuestion" class="progress-bar">
-            <div class="progress-fill" :style="{ width: `${((currentStep + 1) / totalSteps) * 100}%` }" />
-          </div>
-
-          <div class="confirm-question">{{ currentQuestion }}</div>
-
-          <!-- Options list -->
-          <div v-if="!isFreeText" class="confirm-options">
-            <button
-              v-for="opt in currentOptions"
-              :key="opt"
-              class="confirm-option"
-              @click="selectOption(opt)"
-            >
-              {{ opt }}
-            </button>
-          </div>
-
-          <!-- Free text input -->
-          <div v-else class="confirm-free-input">
-            <input
-              ref="textInput"
-              v-model="freeText"
-              type="text"
-              :placeholder="`请输入 ${currentQuestion}...`"
-              class="text-input"
-              @keydown="onKeydown"
-            />
-            <button class="btn btn-primary" :disabled="!freeText.trim()" @click="submitFreeText">
-              确认
-            </button>
-          </div>
-
-          <div class="confirm-footer">
-            <button class="btn" @click="emit('respond', 'deny')">跳过全部</button>
-            <button v-if="isMultiQuestion && currentStep > 0" class="btn" @click="goBack">上一步</button>
+          <div class="modal-foot">
+            <span v-if="isMultiQuestion" class="np-foot-hint">
+              {{ isLastStep ? "选择后将提交所有答案" : `还有 ${totalSteps - currentStep - 1} 个问题` }}
+            </span>
+            <span v-else />
+            <div style="display: flex; gap: 8px">
+              <button class="btn" @click="emit('respond', 'deny')">跳过</button>
+              <button v-if="isMultiQuestion && currentStep > 0" class="btn" @click="goBack">上一步</button>
+              <button
+                v-if="isFreeText"
+                class="btn primary"
+                :disabled="!freeText.trim()"
+                @click="submitFreeText"
+              >
+                确认
+              </button>
+            </div>
           </div>
         </div>
       </div>
     </Teleport>
   </template>
 
-  <template v-else>
+  <!-- Classic Dialog Mode -->
+  <template v-else-if="message">
     <Teleport to="body">
-      <div class="confirm-overlay" @click.self="emit('close')">
-        <div class="confirm-modal" style="max-width: 420px">
-          <div class="confirm-question">{{ message }}</div>
-          <div class="confirm-footer">
-            <button class="btn" @click="emit('close')">取消</button>
-            <button
-              class="btn"
-              :style="danger ? 'color:#fff;background:var(--danger);border-color:var(--danger)' : 'color:#fff;background:var(--accent);border-color:var(--accent)'"
-              @click="emit('confirm')"
-            >
-              {{ confirmText }}
-            </button>
+      <div class="modal-scrim" @mousedown.self="emit('close')">
+        <div class="modal" :style="{ maxWidth: '420px' }" role="dialog">
+          <div class="modal-body">
+            <div class="cf-body">
+              <div class="cf-icon" :class="{ danger }">
+                <Icon name="alert-triangle" />
+              </div>
+              <div>
+                <div class="cf-msg">{{ message }}</div>
+              </div>
+            </div>
+          </div>
+          <div class="modal-foot">
+            <span />
+            <div style="display: flex; gap: 8px">
+              <button class="btn" @click="emit('close')">取消</button>
+              <button class="btn primary" :class="{ 'btn-danger': danger }" @click="emit('confirm')">
+                {{ confirmText }}
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -187,122 +214,80 @@ function onKeydown(e: KeyboardEvent) {
 </template>
 
 <style scoped>
-.confirm-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(3px);
-  z-index: 2000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.cf-progress {
+  height: 3px;
+  background: var(--rule-soft);
+  position: relative;
 }
-.confirm-modal {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  box-shadow: var(--shadow-lg);
-  width: min(520px, 92vw);
-  padding: 28px;
-}
-.confirm-header {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin-bottom: 18px;
-}
-.confirm-icon { font-size: 28px; line-height: 1; }
-.confirm-title { font-size: 16px; font-weight: 600; color: var(--ink); }
-.confirm-sub { font-size: 12px; color: var(--ink-mute); margin-top: 2px; }
-.progress-bar {
-  height: 4px;
-  background: var(--rule);
-  border-radius: 2px;
-  margin-bottom: 18px;
-  overflow: hidden;
-}
-.progress-fill {
+.cf-progress-fill {
   height: 100%;
   background: var(--accent);
-  border-radius: 2px;
-  transition: width 300ms ease;
+  transition: width 300ms cubic-bezier(0.4, 0, 0.2, 1);
 }
-.confirm-question {
+.cf-question {
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--ink);
-  line-height: 1.6;
-  margin-bottom: 20px;
-  padding: 14px 16px;
-  background: var(--bg-panel);
-  border-radius: 10px;
+  line-height: 1.5;
+  padding: 12px 14px;
+  background: var(--bg-canvas);
+  border-radius: var(--r-sm);
   border: 1px solid var(--rule);
 }
-.confirm-options {
+.cf-options {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-bottom: 18px;
+  gap: 4px;
 }
-.confirm-option {
-  width: 100%;
-  padding: 12px 16px;
-  border-radius: 10px;
-  border: 1.5px solid var(--rule);
-  background: var(--bg-panel);
-  color: var(--ink);
+.cf-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
   font-size: 13.5px;
+  color: var(--ink);
   text-align: left;
   cursor: pointer;
-  transition: border-color 160ms, background 160ms;
+  transition: background 120ms;
+  border: 1px solid transparent;
 }
-.confirm-option:hover {
-  border-color: var(--accent);
+.cf-option:hover {
   background: var(--accent-tint);
-  color: var(--accent-deep);
+  border-color: var(--accent-soft);
 }
-.confirm-free-input {
+.cf-option-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ink-faint);
+  flex-shrink: 0;
+  transition: background 120ms;
+}
+.cf-option:hover .cf-option-dot {
+  background: var(--accent);
+}
+.cf-free {
   display: flex;
   gap: 8px;
-  margin-bottom: 18px;
 }
-.text-input {
+.cf-input {
   flex: 1;
-  padding: 10px 14px;
-  border-radius: 8px;
-  border: 1.5px solid var(--rule);
+  height: 36px;
+  padding: 0 12px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--rule);
   background: var(--bg-panel);
   color: var(--ink);
   font-size: 13.5px;
   outline: none;
-  transition: border-color 160ms;
+  transition: border-color 120ms, box-shadow 120ms;
 }
-.text-input:focus {
+.cf-input:focus {
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(184, 133, 42, 0.1);
 }
-.confirm-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  border-top: 1px solid var(--rule-soft);
-  padding-top: 14px;
+.cf-input::placeholder {
+  color: var(--ink-faint);
 }
-.btn {
-  padding: 8px 16px;
-  border-radius: 8px;
-  border: 1px solid var(--rule);
-  background: var(--surface);
-  color: var(--ink);
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 160ms;
-}
-.btn:hover { border-color: var(--accent); }
-.btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
-}
-.btn-primary:hover:not(:disabled) { opacity: 0.9; }
 </style>
