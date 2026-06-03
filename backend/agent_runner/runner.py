@@ -463,7 +463,7 @@ class Runner:
                     "questions": [{"question": question, "options": options, "allow_free_text": True}],
                     "options": options,
                 }
-                acc["pending_confirmation"] = req_payload
+                acc.setdefault("pending_confirmations", []).append(req_payload)
                 await R.publish_event(
                     conversation_id,
                     {"type": "confirmation_request", "message_id": message_id, "request": req_payload},
@@ -528,8 +528,8 @@ class Runner:
             )
 
         # ── Confirmation handling: wait for user response before finalizing ──
-        pending = acc.get("pending_confirmation")
-        if not pending and status == "complete" and acc["text"]:
+        pending_list: list[dict] = acc.get("pending_confirmations", [])
+        if not pending_list and status == "complete" and acc["text"]:
             # Fallback: regex-detect clarification from agent text output
             detected = self._detect_clarification(acc["text"])
             if detected:
@@ -538,21 +538,21 @@ class Runner:
                 flat_opts = []
                 for q in questions:
                     flat_opts.extend(q.get("options", []))
-                pending = {
+                pending_list = [{
                     "id": request_id,
                     "conversation_id": conversation_id,
                     "message_id": message_id,
                     "question": preamble,
                     "questions": questions,
                     "options": flat_opts or ["继续", "跳过"],
-                }
+                }]
                 await R.publish_event(
                     conversation_id,
-                    {"type": "confirmation_request", "message_id": message_id, "request": pending},
+                    {"type": "confirmation_request", "message_id": message_id, "request": pending_list[0]},
                 )
                 logger.info("Regex-detected confirmation, waiting for user: %s", request_id)
 
-        if pending:
+        for pending in pending_list:
             # Wait for user to respond (up to 5 min)
             rid = pending["id"]
             logger.info("Waiting for confirmation response: conv=%s rid=%s", conversation_id[:8], rid[:8])
@@ -570,6 +570,11 @@ class Runner:
                     logger.info("User chose: %s (frontend will send as new turn)", choice)
             except Exception:
                 logger.warning("Confirmation wait failed/timed out for %s", rid[:8])
+                # Notify frontend to close the modal on timeout
+                await R.publish_event(
+                    conversation_id,
+                    {"type": "confirmation_response", "request_id": rid, "choice": "超时"},
+                )
 
         await self._finalize(message_id, acc["text"], status, steps)
         await R.clear_cancel(conversation_id)
@@ -589,10 +594,13 @@ class Runner:
     def _detect_clarification(text: str) -> tuple[str, list[dict]] | None:
         """Detect if the agent response is a clarification question.
 
-        Supports the fixed prompt format:
+        Supports multiple formats:
           1. **标题** — 选项A、选项B、选项C？
           2. **标题** — 选项A、选项B...？
           3. **标题** — 纯问题？
+          4. - 选项A\n- 选项B\n- 选项C (markdown list)
+          5. A还是B？ (inline choice)
+          6. 请问...？ (direct question with options nearby)
 
         Returns (preamble, questions) where each question dict has:
           - question: str
@@ -603,13 +611,11 @@ class Runner:
 
         text = text.strip()
 
-        # ── Pattern: numbered items "1. **标题** — 内容？" ──
-        # Also handles ### blocks as preamble separator
         lines = text.split("\n")
         questions: list[dict] = []
         preamble_lines: list[str] = []
 
-        # Regex for: N. **标题** — 内容？  or  N. 标题 — 内容？
+        # ── Pattern 1: numbered items "N. **标题** — 内容？" ──
         item_re = re.compile(
             r"^\s*\d+[.、)）]\s*"
             r"(?:\*\*(.+?)\*\*|(.+?))"  # title in bold or plain
@@ -618,20 +624,10 @@ class Runner:
             r"[？?]\s*$"
         )
 
-        # Regex for: N. **标题** — 纯问题（没有顿号分隔的选项）
-        plain_q_re = re.compile(
-            r"^\s*\d+[.、)）]\s*"
-            r"(?:\*\*(.+?)\*\*|(.+?))"
-            r"\s*[—\-:：]\s*"
-            r"(.+)"
-        )
-
         for line in lines:
             stripped = line.strip()
             if not stripped:
                 continue
-
-            # Skip header markers
             if stripped.startswith("## ") or stripped.startswith("### "):
                 continue
             if stripped in ("需要确认以下信息：", "需要确认以下信息:"):
@@ -642,16 +638,13 @@ class Runner:
                 title = (m.group(1) or m.group(2) or "").strip()
                 content = m.group(3).strip()
 
-                # Check if content has 顿号-separated options
                 if "、" in content:
                     has_ellipsis = content.rstrip("？?").endswith("...")
                     raw = content.rstrip("？?").rstrip(".")
-                    # Split by 顿号
                     opts = [o.strip() for o in raw.split("、") if o.strip()]
-                    # Remove trailing ... from last option
                     if opts and opts[-1].endswith("..."):
                         opts[-1] = opts[-1][:-3].strip()
-                    if not opts[-1]:
+                    if opts and not opts[-1]:
                         opts.pop()
                     questions.append({
                         "question": title,
@@ -659,30 +652,52 @@ class Runner:
                         "allow_free_text": has_ellipsis,
                     })
                 else:
-                    # Pure question, no options
                     questions.append({
                         "question": title,
                         "options": [],
                         "allow_free_text": True,
                     })
             else:
-                # Not a numbered question line
                 if not questions:
                     preamble_lines.append(stripped)
 
         if len(questions) >= 1:
             preamble = " ".join(preamble_lines).strip()
-            # Clean common prefixes
             preamble = re.sub(r"^##\s*确认\s*", "", preamble)
             preamble = re.sub(r"^需要确认以下信息[：:]\s*", "", preamble)
             return preamble or "请选择", questions
 
-        # ── Fallback: "A还是B" pattern ──
-        haisi = re.search(r"(.+?)还是(.+?)[？?]?\\s*$", text)
+        # ── Pattern 2: markdown list "- 选项A\n- 选项B" ──
+        list_opts = re.findall(r"^[-*]\s+(.+)$", text, re.MULTILINE)
+        if len(list_opts) >= 2:
+            # Check if the text contains a question
+            q_match = re.search(r"(.{2,20})[？?]", text)
+            q_title = q_match.group(1).strip() if q_match else "请选择"
+            return q_title, [{
+                "question": q_title,
+                "options": [o.strip() for o in list_opts],
+                "allow_free_text": False,
+            }]
+
+        # ── Pattern 3: "A还是B" ──
+        haisi = re.search(r"(.+?)还是(.+?)[？?]?\s*$", text, re.MULTILINE)
         if haisi:
             return "请选择", [
                 {"question": "请选择", "options": [haisi.group(1).strip(), haisi.group(2).strip()], "allow_free_text": False}
             ]
+
+        # ── Pattern 4: "你想...吗？" or "需要...吗？" with options nearby ──
+        # Only trigger if the response is short (likely a question, not a long answer)
+        if len(text) < 200:
+            q_end = re.search(r"[？?]\s*$", text)
+            if q_end:
+                # Look for quoted options: "选项A"、"选项B"
+                quoted = re.findall(r"[「\"'](.+?)[」\"']", text)
+                if len(quoted) >= 2:
+                    return "请选择", [
+                        {"question": text.split("？")[0].split("?")[0].strip()[:50],
+                         "options": quoted, "allow_free_text": False}
+                    ]
 
         return None
 

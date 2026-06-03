@@ -86,15 +86,33 @@ def confirm_key(conversation_id: str, request_id: str) -> str:
 
 async def wait_for_confirmation(conversation_id: str, request_id: str, timeout: int = 300) -> dict:
     key = confirm_key(conversation_id, request_id)
-    for _ in range(timeout * 2):
+    pubsub_key = f"confirm_notify:{conversation_id}"
+    pubsub = get_redis().pubsub()
+    await pubsub.subscribe(pubsub_key)
+    try:
+        # Check if already present
         val = await get_redis().get(key)
         if val:
             await get_redis().delete(key)
             return _json.loads(val)
-        await _asyncio.sleep(0.5)
-    return {"choice": "deny"}
+        # Wait via pub/sub notification (much more efficient than polling)
+        deadline = _asyncio.get_event_loop().time() + timeout
+        while _asyncio.get_event_loop().time() < deadline:
+            remaining = deadline - _asyncio.get_event_loop().time()
+            msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=min(remaining, 1.0))
+            if msg and msg["type"] == "message":
+                val = await get_redis().get(key)
+                if val:
+                    await get_redis().delete(key)
+                    return _json.loads(val)
+        return {"choice": "超时"}
+    finally:
+        await pubsub.unsubscribe(pubsub_key)
+        await pubsub.close()
 
 
 async def respond_to_confirmation(conversation_id: str, request_id: str, choice: str) -> None:
     key = confirm_key(conversation_id, request_id)
     await get_redis().set(key, _json.dumps({"choice": choice}), ex=300)
+    # Notify waiters via pub/sub
+    await get_redis().publish(f"confirm_notify:{conversation_id}", request_id)
