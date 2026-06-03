@@ -161,6 +161,36 @@ export const useChatStore = defineStore("chat", () => {
       if (m) m.content = { ...m.content, text: (m.content.text || "") + ev.delta };
     });
 
+    // Debounced refresh: intermediate "done" events (multi-message split) are followed
+    // by a "start" event within ~100ms. Delay refresh to avoid killing the SSE stream.
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleRefresh = () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null;
+        refreshAfterTurn();
+      }, 500);
+    };
+    const cancelRefresh = () => {
+      if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null; }
+    };
+
+    stream.on("start", (ev) => {
+      cancelRefresh();  // New message coming, don't close stream
+      if (!find(ev.message_id)) {
+        messages.value.push({
+          id: ev.message_id,
+          conversation_id: activeId.value || "",
+          owner_id: null,
+          role: "agent",
+          agent_id: "hermes",
+          content: { text: "" },
+          status: "streaming",
+          created_at: new Date().toISOString(),
+        });
+      }
+    });
+
     stream.on("rt_start", (ev) => {
       if (!find(ev.message_id)) {
         const replies = [...ev.agents]
@@ -234,13 +264,13 @@ export const useChatStore = defineStore("chat", () => {
           m.content.merged.status = "complete";
         }
       }
-      refreshAfterTurn();
+      scheduleRefresh();  // Delayed: cancel if a new "start" event follows
     });
 
     stream.on("error", (ev) => {
       const m = find(ev.message_id);
       if (m) m.status = "error";
-      refreshAfterTurn();
+      scheduleRefresh();
     });
   }
 

@@ -41,6 +41,24 @@ async def save_file(
     # Normalize: remove leading ./ and /
     name = path.lstrip("./").lstrip("/") or "untitled.txt"
     kind = _kind_of(name)
+
+    # Guard: never overwrite existing content with empty/whitespace-only data
+    if not content or not content.strip():
+        async with async_session_maker() as db:
+            res = await db.execute(
+                select(WorkspaceFile).where(
+                    WorkspaceFile.conversation_id == conversation_id,
+                    WorkspaceFile.name == name,
+                )
+            )
+            existing = res.scalar_one_or_none()
+            if existing is not None:
+                # File already exists and new content is empty — skip overwrite
+                await db.refresh(existing)
+                return existing
+            # New file with empty content — still create it (agent may be scaffolding)
+            content = ""
+
     data = content.encode("utf-8")
     size = len(data)
 
@@ -74,26 +92,27 @@ async def save_file(
             )
             db.add(f)
         else:
-            # Save old version before overwriting
-            ver = WorkspaceFileVersion(
-                file_id=f.id,
-                version_num=f.current_version,
-                content=f.content,
-                size_bytes=f.size_bytes,
-                author=agent_id,
-            )
-            db.add(ver)
-            # Keep only the latest 10 versions
-            old_versions = (
-                await db.execute(
-                    select(WorkspaceFileVersion)
-                    .where(WorkspaceFileVersion.file_id == f.id)
-                    .order_by(WorkspaceFileVersion.version_num.desc())
-                    .offset(9)  # Keep 10 (0-9), delete from 10th onwards
+            # Save old version before overwriting — only if old content is non-empty
+            if f.content:
+                ver = WorkspaceFileVersion(
+                    file_id=f.id,
+                    version_num=f.current_version,
+                    content=f.content,
+                    size_bytes=f.size_bytes,
+                    author=agent_id,
                 )
-            ).scalars().all()
-            for old in old_versions:
-                await db.delete(old)
+                db.add(ver)
+                # Keep only the latest 10 versions
+                old_versions = (
+                    await db.execute(
+                        select(WorkspaceFileVersion)
+                        .where(WorkspaceFileVersion.file_id == f.id)
+                        .order_by(WorkspaceFileVersion.version_num.desc())
+                        .offset(9)  # Keep 10 (0-9), delete from 10th onwards
+                    )
+                ).scalars().all()
+                for old in old_versions:
+                    await db.delete(old)
             f.content = inline
             f.storage_key = storage_key
             f.size_bytes = size

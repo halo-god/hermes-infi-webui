@@ -301,7 +301,7 @@ class ACPClient:
                                 break
                     if not file_content and isinstance(tool_call.get("content"), str):
                         file_content = tool_call["content"]
-                    if self.on_fs_write and edit_path:
+                    if self.on_fs_write and edit_path and file_content:
                         try:
                             import os as _os
                             rel_path = _os.path.relpath(edit_path, self.cwd)
