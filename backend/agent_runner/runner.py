@@ -449,6 +449,11 @@ class Runner:
                         "status": step["status"],
                     },
                 )
+                # Check if agent called clarify tool — bridge to confirmation_request
+                if step.get("status") == "started" and "clarify" in (step.get("title") or "").lower():
+                    await self._check_pending_clarify(
+                        conversation_id, message_id, acc
+                    )
             elif kind == "confirmation_request":
                 # Agent natively sent a confirmation_request via session/update.
                 # Store it — we'll wait for user response AFTER the prompt returns.
@@ -594,6 +599,43 @@ class Runner:
                 "text": acc["text"],
             },
         )
+
+    async def _check_pending_clarify(
+        self, conversation_id: str, message_id: str, acc: dict,
+    ) -> None:
+        """Check if the agent stored a pending clarify request in Redis.
+
+        The ACP agent's clarify_callback writes to Redis key
+        ``hermes:clarify_pending:{session_id}``.  When found, we send a
+        confirmation_request SSE so the frontend shows the modal.
+        """
+        import json as _json
+
+        pending_key = f"hermes:clarify_pending:{conversation_id}"
+        try:
+            val = await R.get_redis().get(pending_key)
+            if val:
+                await R.get_redis().delete(pending_key)
+                data = _json.loads(val)
+                clarify_id = data.get("clarify_id", str(uuid.uuid4()))
+                question = data.get("question", "需要确认")
+                options = data.get("options", ["继续", "跳过"])
+                req_payload = {
+                    "id": clarify_id,
+                    "conversation_id": conversation_id,
+                    "message_id": message_id,
+                    "question": question,
+                    "questions": [{"question": question, "options": options, "allow_free_text": True}],
+                    "options": options,
+                }
+                acc.setdefault("pending_confirmations", []).append(req_payload)
+                await R.publish_event(
+                    conversation_id,
+                    {"type": "confirmation_request", "message_id": message_id, "request": req_payload},
+                )
+                logger.info("Clarify tool detected, sent confirmation_request: %s", clarify_id)
+        except Exception:
+            logger.debug("No pending clarify request found", exc_info=True)
 
     # ── Clarification detection: scan for questions with options ──
     @staticmethod
