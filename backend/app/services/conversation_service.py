@@ -217,29 +217,23 @@ async def send_message(
         "文件名请使用有意义的名称（如 会议纪要.md、report.csv），不要使用临时路径。"
     )
     _clarification_preamble = (
-        "\n\n【确认协议】当用户的请求不明确、有歧义或需要选择时，"
-        "你必须暂停并使用 confirmation_request 工具请求用户确认。"
-        "不要直接回答，先确认。\n\n"
-        "工具参数：\n"
-        "- question: 简短描述需要确认的内容\n"
-        "- options: 选项数组，如 [\"选项A\", \"选项B\"]\n\n"
-        "如果无法使用工具，退回到以下文本格式（严格遵循）：\n"
-        "1. **问题标题** — 选项A、选项B、选项C？\n"
-        "2. **问题标题** — 选项A、选项B...？\n"
-        "3. **问题标题** — 纯文本问题？\n\n"
-        "规则：\n"
-        "- 优先使用 confirmation_request 工具\n"
-        "- 有多个选项时用顿号（、）分隔，末尾加问号\n"
-        "- 选项后加 ... 表示用户还可以自由输入\n"
-        "- 不要自行猜测用户意图，不确定就问"
+        "\n\n【强制规则：必须先确认再行动】\n"
+        "当用户的请求有以下任一情况时，你必须先调用 clarify 工具，不要直接回答：\n"
+        "- 请求模糊、有多种理解方式\n"
+        "- 需要用户选择方向、风格、范围\n"
+        "- 涉及重要决策或有风险的操作\n"
+        "- 用户输入非常简短（少于10个字）\n\n"
+        "clarify 工具用法：clarify(question=\"问题\", choices=[\"选项A\", \"选项B\", \"选项C\"])\n"
+        "choices 最多4个选项。如果不确定有哪些选项，用 open-ended 模式（不传 choices）。\n\n"
+        "违反此规则会导致用户不满。记住：先问再做。"
     )
-    # Strict mode for short prompts: force template compliance
+    # Strict mode for short prompts: force clarify call
     _strict_mode = ""
     if len(text.strip()) < 15:
         _strict_mode = (
-            "\n\n【严格模式】用户的输入非常简短。"
-            "你必须严格按照确认协议格式输出，不要添加任何开场白、解释或额外内容。"
-            "直接输出编号问题列表，不要说\"好的\"、\"请问\"等客套话。"
+            "\n\n【严格模式】用户输入非常简短，你无法确定用户意图。"
+            "你必须先调用 clarify 工具询问用户想要什么，不要直接猜测并执行。"
+            "这是强制要求，不是建议。"
         )
     prompt_text = f"{_file_write_preamble}{_clarification_preamble}{_strict_mode}\n\n{prompt_text}"
 
@@ -313,29 +307,23 @@ async def send_roundtable(
         "文件名请使用有意义的名称（如 会议纪要.md、report.csv），不要使用临时路径。"
     )
     _clarification_preamble = (
-        "\n\n【确认协议】当用户的请求不明确、有歧义或需要选择时，"
-        "你必须暂停并使用 confirmation_request 工具请求用户确认。"
-        "不要直接回答，先确认。\n\n"
-        "工具参数：\n"
-        "- question: 简短描述需要确认的内容\n"
-        "- options: 选项数组，如 [\"选项A\", \"选项B\"]\n\n"
-        "如果无法使用工具，退回到以下文本格式（严格遵循）：\n"
-        "1. **问题标题** — 选项A、选项B、选项C？\n"
-        "2. **问题标题** — 选项A、选项B...？\n"
-        "3. **问题标题** — 纯文本问题？\n\n"
-        "规则：\n"
-        "- 优先使用 confirmation_request 工具\n"
-        "- 有多个选项时用顿号（、）分隔，末尾加问号\n"
-        "- 选项后加 ... 表示用户还可以自由输入\n"
-        "- 不要自行猜测用户意图，不确定就问"
+        "\n\n【强制规则：必须先确认再行动】\n"
+        "当用户的请求有以下任一情况时，你必须先调用 clarify 工具，不要直接回答：\n"
+        "- 请求模糊、有多种理解方式\n"
+        "- 需要用户选择方向、风格、范围\n"
+        "- 涉及重要决策或有风险的操作\n"
+        "- 用户输入非常简短（少于10个字）\n\n"
+        "clarify 工具用法：clarify(question=\"问题\", choices=[\"选项A\", \"选项B\", \"选项C\"])\n"
+        "choices 最多4个选项。如果不确定有哪些选项，用 open-ended 模式（不传 choices）。\n\n"
+        "违反此规则会导致用户不满。记住：先问再做。"
     )
-    # Strict mode for short prompts: force template compliance
+    # Strict mode for short prompts: force clarify call
     _strict_mode = ""
     if len(text.strip()) < 15:
         _strict_mode = (
-            "\n\n【严格模式】用户的输入非常简短。"
-            "你必须严格按照确认协议格式输出，不要添加任何开场白、解释或额外内容。"
-            "直接输出编号问题列表，不要说\"好的\"、\"请问\"等客套话。"
+            "\n\n【严格模式】用户输入非常简短，你无法确定用户意图。"
+            "你必须先调用 clarify 工具询问用户想要什么，不要直接猜测并执行。"
+            "这是强制要求，不是建议。"
         )
     prompt_text = f"{_file_write_preamble}{_clarification_preamble}{_strict_mode}\n\n{prompt_text}"
 
