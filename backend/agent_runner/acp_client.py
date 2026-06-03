@@ -244,6 +244,29 @@ class ACPClient:
                     except Exception:  # noqa: BLE001
                         logger.exception("on_fs_write failed")
                 await self._respond(msg["id"], None)
+            elif method == "request_permission":
+                # Auto-approve edit requests for files within the workspace directory.
+                # The hermes CLI sends request_permission before write_file/patch;
+                # without approval the tool is blocked. We approve if the path is
+                # inside cwd (the workspace).
+                tool_call = params.get("toolCall") or params.get("tool_call") or {}
+                raw_input = tool_call.get("rawInput") or tool_call.get("raw_input") or {}
+                args = raw_input.get("arguments") or {}
+                edit_path = args.get("path", "")
+                approved = False
+                if edit_path:
+                    import os
+                    real_cwd = os.path.realpath(self.cwd)
+                    real_edit = os.path.realpath(os.path.expanduser(edit_path))
+                    approved = real_edit.startswith(real_cwd + os.sep) or real_edit == real_cwd
+                if approved:
+                    logger.info("Auto-approved edit: %s", edit_path)
+                await self._respond(msg["id"], {
+                    "outcome": {
+                        "outcome": "selected",
+                        "option_id": "allow_once" if approved else "deny",
+                    },
+                })
             else:
                 # Unknown agent→client request: acknowledge with null.
                 await self._respond(msg["id"], None)
