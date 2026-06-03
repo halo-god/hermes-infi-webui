@@ -211,7 +211,8 @@ async def send_message(
     # instead of just mentioning paths in text responses.
     _file_write_preamble = (
         "【文件写入规范】当你需要为用户创建、生成或导出文件时，"
-        "必须使用 fs/write_text_file 工具将文件写入工作区。"
+        "必须使用 write_file 工具将文件写入当前工作目录（cwd）。"
+        "文件路径使用相对路径（如 'README.md'、'src/main.py'），不要使用绝对路径。"
         "不要只在回复文本中说\"文件已生成\"或给出文件路径而不实际写入。"
         "文件名请使用有意义的名称（如 会议纪要.md、report.csv），不要使用临时路径。"
     )
@@ -299,7 +300,8 @@ async def send_roundtable(
     # Inject file-write instructions for roundtable agents too
     _file_write_preamble = (
         "【文件写入规范】当你需要为用户创建、生成或导出文件时，"
-        "必须使用 fs/write_text_file 工具将文件写入工作区。"
+        "必须使用 write_file 工具将文件写入当前工作目录（cwd）。"
+        "文件路径使用相对路径（如 'README.md'、'src/main.py'），不要使用绝对路径。"
         "不要只在回复文本中说\"文件已生成\"或给出文件路径而不实际写入。"
         "文件名请使用有意义的名称（如 会议纪要.md、report.csv），不要使用临时路径。"
     )
