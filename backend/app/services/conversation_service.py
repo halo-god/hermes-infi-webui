@@ -400,6 +400,17 @@ async def update_file_content(
         author=author,
     )
     db.add(ver)
+    # Keep only the latest 10 versions
+    old_versions = (
+        await db.execute(
+            select(WorkspaceFileVersion)
+            .where(WorkspaceFileVersion.file_id == f.id)
+            .order_by(WorkspaceFileVersion.version_num.desc())
+            .offset(9)  # Keep 10 (0-9), delete from 10th onwards
+        )
+    ).scalars().all()
+    for old in old_versions:
+        await db.delete(old)
     f.content = content
     f.size_bytes = len(content.encode("utf-8"))
     f.current_version += 1

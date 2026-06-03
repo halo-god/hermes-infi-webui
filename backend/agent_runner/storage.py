@@ -83,6 +83,17 @@ async def save_file(
                 author=agent_id,
             )
             db.add(ver)
+            # Keep only the latest 10 versions
+            old_versions = (
+                await db.execute(
+                    select(WorkspaceFileVersion)
+                    .where(WorkspaceFileVersion.file_id == f.id)
+                    .order_by(WorkspaceFileVersion.version_num.desc())
+                    .offset(9)  # Keep 10 (0-9), delete from 10th onwards
+                )
+            ).scalars().all()
+            for old in old_versions:
+                await db.delete(old)
             f.content = inline
             f.storage_key = storage_key
             f.size_bytes = size
