@@ -290,6 +290,25 @@ class ACPClient:
                     approved = real_edit.startswith(real_cwd + os.sep) or real_edit == real_cwd
                 if approved:
                     logger.info("Auto-approved edit: %s", edit_path)
+                    # Also save to database via on_fs_write so workspace panel can see it.
+                    # Extract content from toolCall.rawInput.arguments.content or toolCall.content
+                    file_content = args.get("content") or args.get("file_content") or ""
+                    if not file_content:
+                        for c in (tool_call.get("content") or []):
+                            if isinstance(c, dict):
+                                file_content = c.get("content") or c.get("text") or ""
+                            if file_content:
+                                break
+                    if not file_content and isinstance(tool_call.get("content"), str):
+                        file_content = tool_call["content"]
+                    if self.on_fs_write and edit_path:
+                        try:
+                            import os as _os
+                            rel_path = _os.path.relpath(edit_path, self.cwd)
+                            await self.on_fs_write(rel_path, file_content)
+                            logger.info("Saved to workspace DB: %s (%d chars)", rel_path, len(file_content))
+                        except Exception:  # noqa: BLE001
+                            logger.exception("on_fs_write after approval failed")
                 else:
                     logger.warning("Edit NOT approved. edit_path=%s cwd=%s", edit_path, self.cwd)
                 await self._respond(msg["id"], {
