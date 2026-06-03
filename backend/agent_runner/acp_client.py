@@ -233,6 +233,10 @@ class ACPClient:
         method = msg.get("method")
         params = msg.get("params") or {}
 
+        # Debug: log all incoming agent requests
+        if method and "id" in msg:
+            logger.info("ACP agent request: method=%s id=%s keys=%s", method, msg.get("id"), list(params.keys()))
+
         # Request FROM agent (needs a response).
         if method and "id" in msg:
             if method == "fs/write_text_file":
@@ -244,7 +248,7 @@ class ACPClient:
                     except Exception:  # noqa: BLE001
                         logger.exception("on_fs_write failed")
                 await self._respond(msg["id"], None)
-            elif method in ("request_permission", "session_request_permission"):
+            elif method in ("request_permission", "session_request_permission", "session/request_permission"):
                 # Auto-approve edit requests for files within the workspace directory.
                 # The hermes CLI sends request_permission before write_file/patch;
                 # without approval the tool is blocked. We approve if the path is
