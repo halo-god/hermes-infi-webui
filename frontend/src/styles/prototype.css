@@ -3334,7 +3334,7 @@ body[data-atmos="cinnabar"] {
   .ch-row.user { justify-content: flex-end; }
   .ch-row.agent { justify-content: flex-start; }
   .ch-bubble {
-    max-width: 72%; padding: 9px 14px; border-radius: 14px;
+    max-width: 85%; padding: 9px 14px; border-radius: 14px;
     font-size: 13.5px; line-height: 1.55; word-break: break-word;
   }
   .ch-row.user .ch-bubble {

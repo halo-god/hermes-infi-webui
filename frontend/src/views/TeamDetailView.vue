@@ -239,6 +239,22 @@ async function loadChannel() {
 async function sendChannelMessage() {
   const text = channelDraft.value.trim();
   if (!text || !channelConvo.value || channelSending.value) return;
+
+  // In mention mode: only trigger agent if message contains @mention
+  const hasMention = /@[^\s]+/.test(text);
+  if (channelMode.value === "mention" && !hasMention) {
+    // Save user message without triggering agent
+    try {
+      await conversationsApi.send(channelConvo.value.id, text);
+      channelDraft.value = "";
+      // Reload messages to show the new user message
+      await refreshChannelMessages();
+    } catch (e) {
+      console.error("send failed", e);
+    }
+    return;
+  }
+
   channelDraft.value = "";
   channelSending.value = true;
 
@@ -887,8 +903,8 @@ async function deleteTeam() {
                   <span class="handle">@{{ m.id }}</span>
                 </button>
               </div>
-              <button class="icon-btn" title="引用知识库" @click="toggleKnowledgePicker" :style="showKnowledgePicker ? 'color:var(--accent)' : ''"><Icon name="paperclip" :size="15" /></button>
-              <button class="icon-btn" title="上传文件" @click="channelFileInput?.click()"><Icon name="paperclip2" :size="15" /></button>
+              <button class="icon-btn" title="引用知识库" @click="toggleKnowledgePicker" :style="showKnowledgePicker ? 'color:var(--accent)' : ''"><Icon name="book" :size="15" /></button>
+              <button class="icon-btn" title="上传文件" @click="channelFileInput?.click()" style="margin-left: -4px"><Icon name="paperclip" :size="15" /></button>
               <textarea
                 ref="channelTa"
                 v-model="channelDraft"
