@@ -454,7 +454,11 @@
     padding: 10px 14px;
     border-radius: 16px 16px 4px 16px;
   }
-  .msg.agent .msg-bubble { padding-top: 2px; }
+  .msg.agent .msg-bubble {
+    background: var(--surface-raised, rgba(0,0,0,0.04));
+    padding: 10px 14px;
+    border-radius: 16px 16px 16px 4px;
+  }
   .msg-files { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
   .msg-file-chip {
     display: inline-flex; align-items: center; gap: 4px;
@@ -656,6 +660,7 @@
   }
   body.dark .send-btn { color: var(--bg-canvas); }
   body.dark .msg.user .msg-bubble { background: #2e2920; color: var(--ink); }
+  body.dark .msg.agent .msg-bubble { background: rgba(255,255,255,0.06); }
 
   /* Theme: ink (mono) */
   body.theme-ink {
