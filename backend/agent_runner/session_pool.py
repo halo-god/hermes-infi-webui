@@ -16,7 +16,7 @@ logger = logging.getLogger("hermes.pool")
 
 # Timeouts for pool operations (seconds)
 POOL_START_TIMEOUT = 30
-POOL_INIT_TIMEOUT = 30
+POOL_INIT_TIMEOUT = 60
 POOL_SESSION_TIMEOUT = 30
 
 
