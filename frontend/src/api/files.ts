@@ -7,6 +7,7 @@ export interface FileItem {
   conversation_title: string;
   size: number | null;
   created_at: string;
+  source: string;  // "upload" or "ai"
 }
 
 export const filesApi = {

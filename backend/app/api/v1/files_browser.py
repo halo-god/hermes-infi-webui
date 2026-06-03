@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.conversation import Conversation, Message
 from app.db.models.user import User
+from app.db.models.workspace import WorkspaceFile
 from app.deps import get_current_user, get_db
 
 router = APIRouter()
@@ -22,6 +23,7 @@ class FileItem(BaseModel):
     conversation_title: str
     size: int | None = None
     created_at: str
+    source: str = "upload"  # "upload" or "ai"
 
 
 @router.get("/files", response_model=list[FileItem])
@@ -29,7 +31,7 @@ async def list_all_files(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all workspace files across the user's conversations."""
+    """List all files across the user's conversations (uploads + AI-generated)."""
     # Get user's conversation IDs
     convos = (
         await db.execute(
@@ -41,7 +43,9 @@ async def list_all_files(
     if not convo_map:
         return []
 
-    # Find all messages with file attachments
+    files: list[FileItem] = []
+
+    # 1. User uploaded files (from message content.files)
     msgs = (
         await db.execute(
             select(Message).where(
@@ -51,7 +55,6 @@ async def list_all_files(
         )
     ).scalars().all()
 
-    files: list[FileItem] = []
     for msg in msgs:
         content = msg.content or {}
         file_list = content.get("files") or []
@@ -64,7 +67,32 @@ async def list_all_files(
                     conversation_title=convo_map.get(msg.conversation_id, ""),
                     size=f.get("size"),
                     created_at=msg.created_at.isoformat() if msg.created_at else "",
+                    source="upload",
                 )
             )
 
+    # 2. AI-generated workspace files
+    ws_files = (
+        await db.execute(
+            select(WorkspaceFile).where(
+                WorkspaceFile.conversation_id.in_(convo_map.keys())
+            )
+        )
+    ).scalars().all()
+
+    for wf in ws_files:
+        files.append(
+            FileItem(
+                id=str(wf.id),
+                name=wf.name,
+                conversation_id=str(wf.conversation_id),
+                conversation_title=convo_map.get(wf.conversation_id, ""),
+                size=wf.size_bytes,
+                created_at=wf.created_at.isoformat() if wf.created_at else "",
+                source="ai",
+            )
+        )
+
+    # Sort by created_at descending
+    files.sort(key=lambda f: f.created_at or "", reverse=True)
     return files

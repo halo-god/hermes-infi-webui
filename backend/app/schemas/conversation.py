@@ -94,6 +94,7 @@ class WorkspaceFileVersionOut(BaseModel):
     id: uuid.UUID
     file_id: uuid.UUID
     version_num: int
+    content: str | None = None
     size_bytes: int
     created_at: datetime
     author: str | None

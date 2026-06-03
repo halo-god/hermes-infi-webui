@@ -210,6 +210,7 @@ export interface WorkspaceFileVersion {
   id: string;
   file_id: string;
   version_num: number;
+  content?: string;
   size_bytes: number;
   created_at: string;
   author: string | null;

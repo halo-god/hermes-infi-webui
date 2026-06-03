@@ -13,6 +13,82 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ close: [] }>();
 
+// ── Folder tree support ──
+interface TreeNode {
+  name: string;
+  path: string;
+  isDir: boolean;
+  children?: TreeNode[];
+  file?: FileItem;
+}
+
+function buildTree(files: FileItem[]): TreeNode[] {
+  const root: TreeNode[] = [];
+  const dirMap = new Map<string, TreeNode>();
+
+  for (const f of files) {
+    const parts = f.name.split("/");
+    let current = root;
+    let currentPath = "";
+
+    // Create directory nodes for each path segment
+    for (let i = 0; i < parts.length - 1; i++) {
+      const dirName = parts[i];
+      currentPath = currentPath ? `${currentPath}/${dirName}` : dirName;
+
+      let dir = dirMap.get(currentPath);
+      if (!dir) {
+        dir = { name: dirName, path: currentPath, isDir: true, children: [] };
+        dirMap.set(currentPath, dir);
+        current.push(dir);
+      }
+      current = dir.children!;
+    }
+
+    // Add the file node
+    const fileName = parts[parts.length - 1];
+    current.push({ name: fileName, path: f.name, isDir: false, file: f });
+  }
+
+  // Sort: directories first, then files
+  const sortNodes = (nodes: TreeNode[]) => {
+    nodes.sort((a, b) => {
+      if (a.isDir && !b.isDir) return -1;
+      if (!a.isDir && b.isDir) return 1;
+      return a.name.localeCompare(b.name);
+    });
+    for (const n of nodes) {
+      if (n.isDir && n.children) sortNodes(n.children);
+    }
+  };
+  sortNodes(root);
+  return root;
+}
+
+const fileTree = computed(() => buildTree(props.files));
+const expandedDirs = ref<Set<string>>(new Set());
+
+function toggleDir(path: string) {
+  if (expandedDirs.value.has(path)) {
+    expandedDirs.value.delete(path);
+  } else {
+    expandedDirs.value.add(path);
+  }
+}
+
+// Auto-expand all dirs on first load
+watch(fileTree, (tree) => {
+  const expandAll = (nodes: TreeNode[]) => {
+    for (const n of nodes) {
+      if (n.isDir && n.children) {
+        expandedDirs.value.add(n.path);
+        expandAll(n.children);
+      }
+    }
+  };
+  expandAll(tree);
+}, { immediate: true });
+
 // ── Multi-tab state ──
 interface Tab { id: string; fileId: string }
 const openTabs = ref<Tab[]>([]);
@@ -237,13 +313,7 @@ async function toggleVersions() {
 }
 async function previewVer(v: WorkspaceFileVersion) {
   if (!activeFile.value) return;
-  versionsLoading.value = true;
-  try {
-    const fetched = await props.adapter.getContent(activeFile.value.id);
-    previewVersion.value = { num: v.version_num, content: fetched };
-  } finally {
-    versionsLoading.value = false;
-  }
+  previewVersion.value = { num: v.version_num, content: v.content || "" };
 }
 async function restoreVer(v: WorkspaceFileVersion) {
   if (!activeFile.value || saving.value || !props.adapter.restoreVersion) return;
@@ -347,7 +417,7 @@ function fmtDate(s: string) {
         @click="activateTab(tab.id)"
       >
         <span class="ws-tab-kind">{{ files.find(x => x.id === tab.fileId)?.kind || '?' }}</span>
-        {{ files.find(x => x.id === tab.fileId)?.name || tab.fileId }}
+        {{ (files.find(x => x.id === tab.fileId)?.name || tab.fileId).split('/').pop() }}
         <span
           v-if="newFileBadges.has(tab.fileId)"
           class="ws-tab-badge"
@@ -360,19 +430,69 @@ function fmtDate(s: string) {
     <div class="ws-body">
       <!-- File tree -->
       <div class="ws-tree">
-        <button
-          v-for="f in files"
-          :key="f.id"
-          class="ws-file"
-          :class="{ active: activeFile?.id === f.id }"
-          @click="openFile(f)"
-        >
-          <span class="kind">{{ fileExt(f) }}</span>
-          <span class="nm">{{ f.name }}</span>
-          <span v-if="newFileBadges.has(f.id)" class="ws-new-badge">NEW</span>
-          <span v-if="f.current_version !== undefined" class="ver">v{{ f.current_version }}</span>
-        </button>
-        <div v-if="!files.length" class="ws-empty">暂无文件</div>
+        <template v-if="files.length">
+          <template v-for="node in fileTree" :key="node.path">
+            <!-- Directory -->
+            <div v-if="node.isDir" class="ws-dir">
+              <button class="ws-dir-btn" @click="toggleDir(node.path)">
+                <span class="ws-dir-arrow" :class="{ expanded: expandedDirs.has(node.path) }">▶</span>
+                <Icon name="folder" :size="14" />
+                <span class="nm">{{ node.name }}</span>
+              </button>
+              <div v-if="expandedDirs.has(node.path) && node.children" class="ws-dir-children">
+                <template v-for="child in node.children" :key="child.path">
+                  <!-- Nested directory -->
+                  <div v-if="child.isDir" class="ws-dir">
+                    <button class="ws-dir-btn" @click="toggleDir(child.path)">
+                      <span class="ws-dir-arrow" :class="{ expanded: expandedDirs.has(child.path) }">▶</span>
+                      <Icon name="folder" :size="14" />
+                      <span class="nm">{{ child.name }}</span>
+                    </button>
+                    <div v-if="expandedDirs.has(child.path) && child.children" class="ws-dir-children">
+                      <button
+                        v-for="leaf in child.children.filter(c => !c.isDir)"
+                        :key="leaf.file!.id"
+                        class="ws-file"
+                        :class="{ active: activeFile?.id === leaf.file!.id }"
+                        @click="openFile(leaf.file!)"
+                      >
+                        <span class="kind">{{ fileExt(leaf.file!) }}</span>
+                        <span class="nm">{{ leaf.name }}</span>
+                        <span v-if="newFileBadges.has(leaf.file!.id)" class="ws-new-badge">NEW</span>
+                        <span v-if="leaf.file!.current_version !== undefined" class="ver">v{{ leaf.file!.current_version }}</span>
+                      </button>
+                    </div>
+                  </div>
+                  <!-- File in directory -->
+                  <button
+                    v-else
+                    class="ws-file"
+                    :class="{ active: activeFile?.id === child.file!.id }"
+                    @click="openFile(child.file!)"
+                  >
+                    <span class="kind">{{ fileExt(child.file!) }}</span>
+                    <span class="nm">{{ child.name }}</span>
+                    <span v-if="newFileBadges.has(child.file!.id)" class="ws-new-badge">NEW</span>
+                    <span v-if="child.file!.current_version !== undefined" class="ver">v{{ child.file!.current_version }}</span>
+                  </button>
+                </template>
+              </div>
+            </div>
+            <!-- Root level file -->
+            <button
+              v-else
+              class="ws-file"
+              :class="{ active: activeFile?.id === node.file!.id }"
+              @click="openFile(node.file!)"
+            >
+              <span class="kind">{{ fileExt(node.file!) }}</span>
+              <span class="nm">{{ node.name }}</span>
+              <span v-if="newFileBadges.has(node.file!.id)" class="ws-new-badge">NEW</span>
+              <span v-if="node.file!.current_version !== undefined" class="ver">v{{ node.file!.current_version }}</span>
+            </button>
+          </template>
+        </template>
+        <div v-else class="ws-empty">暂无文件</div>
       </div>
 
       <!-- Preview + Version History -->
@@ -617,6 +737,30 @@ function fmtDate(s: string) {
   font-size: 8px; font-weight: 700;
   background: var(--ok); color: #fff;
   border-radius: 3px; padding: 0 3px;
+}
+.ws-dir {
+  margin-bottom: 2px;
+}
+.ws-dir-btn {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; padding: 7px 9px;
+  border-radius: var(--r-sm);
+  color: var(--ink-soft); font-size: 12px; text-align: left;
+  cursor: pointer;
+}
+.ws-dir-btn:hover {
+  background: rgba(29,26,20,0.05); color: var(--ink);
+}
+.ws-dir-arrow {
+  font-size: 8px; color: var(--ink-mute);
+  transition: transform 150ms;
+  flex-shrink: 0;
+}
+.ws-dir-arrow.expanded {
+  transform: rotate(90deg);
+}
+.ws-dir-children {
+  padding-left: 16px;
 }
 
 .ws-content-wrap { display: flex; flex: 1; min-width: 0; overflow: hidden; }

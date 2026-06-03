@@ -232,7 +232,15 @@ async def send_message(
         "- 不要添加额外解释、示例或说明\n"
         "- 不要自行猜测用户意图"
     )
-    prompt_text = f"{_file_write_preamble}{_clarification_preamble}\n\n{prompt_text}"
+    # Strict mode for short prompts: force template compliance
+    _strict_mode = ""
+    if len(text.strip()) < 15:
+        _strict_mode = (
+            "\n\n【严格模式】用户的输入非常简短。"
+            "你必须严格按照确认协议格式输出，不要添加任何开场白、解释或额外内容。"
+            "直接输出编号问题列表，不要说\"好的\"、\"请问\"等客套话。"
+        )
+    prompt_text = f"{_file_write_preamble}{_clarification_preamble}{_strict_mode}\n\n{prompt_text}"
 
     await redis_core.clear_cancel(str(convo.id))
     await redis_core.enqueue_prompt(
@@ -319,7 +327,15 @@ async def send_roundtable(
         "- 不要添加额外解释、示例或说明\n"
         "- 不要自行猜测用户意图"
     )
-    prompt_text = f"{_file_write_preamble}{_clarification_preamble}\n\n{prompt_text}"
+    # Strict mode for short prompts: force template compliance
+    _strict_mode = ""
+    if len(text.strip()) < 15:
+        _strict_mode = (
+            "\n\n【严格模式】用户的输入非常简短。"
+            "你必须严格按照确认协议格式输出，不要添加任何开场白、解释或额外内容。"
+            "直接输出编号问题列表，不要说\"好的\"、\"请问\"等客套话。"
+        )
+    prompt_text = f"{_file_write_preamble}{_clarification_preamble}{_strict_mode}\n\n{prompt_text}"
 
     await redis_core.clear_cancel(str(convo.id))
     await redis_core.enqueue_prompt(

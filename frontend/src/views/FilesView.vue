@@ -82,6 +82,17 @@ const columns = [
     sorter: (a: FileItem, b: FileItem) => (a.size || 0) - (b.size || 0),
   },
   {
+    title: "来源",
+    key: "source",
+    width: 80,
+    render: (row: FileItem) =>
+      h(
+        NTag,
+        { size: "small", type: row.source === "ai" ? "success" : "info" },
+        () => row.source === "ai" ? "AI生成" : "上传"
+      ),
+  },
+  {
     title: "所属会话",
     key: "conversation_title",
     ellipsis: { tooltip: true },

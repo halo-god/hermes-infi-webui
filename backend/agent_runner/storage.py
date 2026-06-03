@@ -17,7 +17,7 @@ from sqlalchemy import select
 from app.config import settings
 from app.core import object_storage
 from app.db.base import async_session_maker
-from app.db.models.workspace import WorkspaceFile
+from app.db.models.workspace import WorkspaceFile, WorkspaceFileVersion
 
 _KIND_BY_EXT = {
     ".md": "md", ".markdown": "md", ".docx": "docx", ".doc": "docx",
@@ -37,7 +37,9 @@ def _kind_of(name: str) -> str:
 async def save_file(
     conversation_id: uuid.UUID, path: str, content: str, agent_id: str | None
 ) -> WorkspaceFile:
-    name = os.path.basename(path) or "untitled.txt"
+    # Preserve full relative path for folder support (e.g., "src/main.py")
+    # Normalize: remove leading ./ and /
+    name = path.lstrip("./").lstrip("/") or "untitled.txt"
     kind = _kind_of(name)
     data = content.encode("utf-8")
     size = len(data)
@@ -72,6 +74,15 @@ async def save_file(
             )
             db.add(f)
         else:
+            # Save old version before overwriting
+            ver = WorkspaceFileVersion(
+                file_id=f.id,
+                version_num=f.current_version,
+                content=f.content,
+                size_bytes=f.size_bytes,
+                author=agent_id,
+            )
+            db.add(ver)
             f.content = inline
             f.storage_key = storage_key
             f.size_bytes = size
