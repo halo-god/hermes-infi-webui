@@ -904,7 +904,7 @@ async function deleteTeam() {
                   <span class="handle">@{{ m.id }}</span>
                 </button>
               </div>
-              <button class="icon-btn" title="引用知识库" @click="toggleKnowledgePicker" :style="showKnowledgePicker ? 'color:var(--accent)' : ''"><Icon name="book" :size="15" /></button>
+              <button class="icon-btn" title="引用知识库" @click="toggleKnowledgePicker" :style="showKnowledgePicker ? 'color:var(--accent)' : ''"><Icon name="note" :size="15" /></button>
               <button class="icon-btn" title="上传文件" @click="channelFileInput?.click()" style="margin-left: -4px"><Icon name="paperclip" :size="15" /></button>
               <textarea
                 ref="channelTa"
