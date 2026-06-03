@@ -254,9 +254,22 @@ class ACPClient:
                 # without approval the tool is blocked. We approve if the path is
                 # inside cwd (the workspace).
                 tool_call = params.get("toolCall") or params.get("tool_call") or {}
+                logger.info("request_permission toolCall keys=%s", list(tool_call.keys()))
                 raw_input = tool_call.get("rawInput") or tool_call.get("raw_input") or {}
                 args = raw_input.get("arguments") or {}
                 edit_path = args.get("path", "")
+                # Also try content locations and content fields
+                if not edit_path:
+                    for loc in (tool_call.get("locations") or []):
+                        edit_path = loc.get("path") or loc.get("uri") or ""
+                        if edit_path:
+                            break
+                if not edit_path:
+                    for c in (tool_call.get("content") or []):
+                        edit_path = c.get("path") or ""
+                        if edit_path:
+                            break
+                logger.info("request_permission resolved path=%s", edit_path)
                 approved = False
                 if edit_path:
                     import os
