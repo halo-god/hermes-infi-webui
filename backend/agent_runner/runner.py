@@ -585,13 +585,10 @@ class Runner:
 
         Returns (question, options_or_questions) if detected, None otherwise.
         Supports:
-        - Multi-question template: "### Q1\n1. A\n2. B\n\n### Q2\n1. C\n2. D"
-        - Single question template: "## 确认\n1. A\n2. B"
-        - Legacy numbered lists
+        - ### template: "### Q1\n1. A\n2. B\n\n### Q2\n1. C\n2. D"
+        - Numbered with sub-bullets: "1. **Q1**\n   - A\n   - B\n2. **Q2**"
+        - Legacy numbered lists: "1. A\n2. B"
         - "A还是B" pattern
-
-        When multiple ### sections found, returns list of dicts:
-        [{"question": "Q1", "options": ["A", "B"]}, {"question": "Q2", "options": ["C", "D"]}]
         """
         import re
 
@@ -615,16 +612,52 @@ class Runner:
                     if options:
                         questions.append({"question": title, "options": options})
             if len(questions) >= 1:
-                # Extract the preamble text before first ### as the main question
                 marker = re.search(r"###", text)
                 preamble = text[: marker.start()].strip() if marker else ""
-                # Clean preamble: remove ## 确认 and 需要确认以下信息
                 preamble = re.sub(r"##\s*确认\s*", "", preamble)
                 preamble = re.sub(r"需要确认以下信息[：:]\s*", "", preamble)
                 preamble = preamble.strip()
                 return preamble or "请选择", questions
 
-        # Pattern 1: Single question template — "## 确认" or "需要确认以下信息"
+        # Pattern 1: Numbered items with sub-bullets (agent's typical format)
+        # "1. **项目类型** — 什么方向？\n   - Web全栈\n   - CLI工具\n2. **技术栈**"
+        numbered_blocks = re.finditer(
+            r"(?:^|\n)\s*(\d+)[.、)）]\s*(.+?)(?=\n\s*\d+[.、)）]|\Z)",
+            text,
+            re.DOTALL,
+        )
+        questions_from_blocks = []
+        for match in numbered_blocks:
+            block_text = match.group(2).strip()
+            # Extract question: first line (before any sub-bullets)
+            lines = block_text.split("\n")
+            question_line = lines[0].strip()
+            # Clean markdown
+            question_line = re.sub(r"\*\*([^*]+)\*\*", r"\1", question_line)
+            question_line = question_line.rstrip("？?。:：")
+            # Extract sub-bullets as options
+            options = []
+            for line in lines[1:]:
+                bullet_match = re.match(r"\s*[-*•]\s*(.+)", line)
+                if bullet_match:
+                    opt = bullet_match.group(1).strip()
+                    opt = re.sub(r"\*\*([^*]+)\*\*", r"\1", opt)
+                    opt = re.sub(r"[（(][^）)]*[）)]", "", opt).strip()
+                    opt = opt.rstrip("？?。. ")
+                    if opt:
+                        options.append(opt)
+            if question_line:
+                questions_from_blocks.append({
+                    "question": question_line,
+                    "options": options if options else [],
+                })
+        if len(questions_from_blocks) >= 2:
+            # At least 2 questions to trigger multi-step
+            preamble = re.search(r"^(.*?)(?=\n\s*\d+[.、)）])", text, re.DOTALL)
+            preamble_text = preamble.group(1).strip() if preamble else ""
+            return preamble_text or "请选择", questions_from_blocks
+
+        # Pattern 2: Single question template — "## 确认" or "需要确认以下信息"
         template_match = re.search(
             r"(?:##\s*确认|需要确认以下信息)[：:\s]*(.*)", text, re.DOTALL
         )
@@ -644,7 +677,7 @@ class Runner:
                 if len(options) >= 2:
                     return question or "请选择", options
 
-        # Pattern 2: Numbered list items (legacy format)
+        # Pattern 3: Simple numbered list (legacy)
         numbered = re.findall(r"(?:^|\n)\s*\d+[.、)）]\s*(.+?)(?=\n|$)", text)
         if len(numbered) >= 2:
             first_num = re.search(r"(?:^|\n)\s*\d+[.、)）]", text)
@@ -663,7 +696,7 @@ class Runner:
             if len(options) >= 2:
                 return question or "请选择", options
 
-        # Pattern 3: "A还是B"
+        # Pattern 4: "A还是B"
         haisi = re.search(r"(.+?)还是(.+?)[？?]?\s*$", text)
         if haisi:
             opts = [haisi.group(1).strip(), haisi.group(2).strip()]

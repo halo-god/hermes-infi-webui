@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, computed } from "vue";
+import { ref, watch, computed, nextTick } from "vue";
 import type { ConfirmationRequest } from "@/types";
 
 const props = withDefaults(
@@ -19,16 +19,13 @@ const emit = defineEmits<{
   respond: [choice: string];
 }>();
 
-// Multi-step wizard state
 const currentStep = ref(0);
 const answers = ref<string[]>([]);
+const freeText = ref("");
+const textInput = ref<HTMLInputElement | null>(null);
 
-// Determine if multi-question mode
-const isMultiQuestion = computed(() => {
-  return (props.request?.questions?.length || 0) > 0;
-});
+const isMultiQuestion = computed(() => (props.request?.questions?.length || 0) > 0);
 
-// Current question's options
 const currentOptions = computed(() => {
   if (isMultiQuestion.value && props.request?.questions) {
     return props.request.questions[currentStep.value]?.options || [];
@@ -36,7 +33,6 @@ const currentOptions = computed(() => {
   return props.request?.options || [];
 });
 
-// Current question text
 const currentQuestion = computed(() => {
   if (isMultiQuestion.value && props.request?.questions) {
     return props.request.questions[currentStep.value]?.question || "";
@@ -44,7 +40,6 @@ const currentQuestion = computed(() => {
   return props.request?.question || "";
 });
 
-// Total steps
 const totalSteps = computed(() => {
   if (isMultiQuestion.value && props.request?.questions) {
     return props.request.questions.length;
@@ -52,22 +47,28 @@ const totalSteps = computed(() => {
   return 1;
 });
 
-// Is this the last step?
 const isLastStep = computed(() => currentStep.value >= totalSteps.value - 1);
+const isFreeText = computed(() => currentOptions.value.length === 0);
 
-// Reset when request changes
 watch(
   () => props.request,
   () => {
     currentStep.value = 0;
     answers.value = [];
+    freeText.value = "";
   },
   { immediate: true }
 );
 
+watch(currentStep, () => {
+  freeText.value = "";
+  if (isFreeText.value) {
+    nextTick(() => textInput.value?.focus());
+  }
+});
+
 function selectOption(opt: string) {
   if (isMultiQuestion.value) {
-    // Record answer and advance
     answers.value[currentStep.value] = opt;
     if (isLastStep.value) {
       submitAll();
@@ -75,14 +76,17 @@ function selectOption(opt: string) {
       currentStep.value++;
     }
   } else {
-    // Single question: emit immediately
     emit("respond", opt);
   }
 }
 
+function submitFreeText() {
+  if (!freeText.value.trim()) return;
+  selectOption(freeText.value.trim());
+}
+
 function submitAll() {
   if (!props.request?.questions) return;
-  // Build summary: "Q1: A, Q2: B, Q3: C"
   const parts = props.request.questions.map((q, i) => {
     const answer = answers.value[i] || "跳过";
     return `${q.question}: ${answer}`;
@@ -91,8 +95,13 @@ function submitAll() {
 }
 
 function goBack() {
-  if (currentStep.value > 0) {
-    currentStep.value--;
+  if (currentStep.value > 0) currentStep.value--;
+}
+
+function onKeydown(e: KeyboardEvent) {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    submitFreeText();
   }
 }
 </script>
@@ -114,19 +123,14 @@ function goBack() {
             </div>
           </div>
 
-          <!-- Progress bar for multi-step -->
           <div v-if="isMultiQuestion" class="progress-bar">
-            <div
-              class="progress-fill"
-              :style="{ width: `${((currentStep + 1) / totalSteps) * 100}%` }"
-            />
+            <div class="progress-fill" :style="{ width: `${((currentStep + 1) / totalSteps) * 100}%` }" />
           </div>
 
-          <!-- Current question -->
           <div class="confirm-question">{{ currentQuestion }}</div>
 
-          <!-- Options -->
-          <div class="confirm-options">
+          <!-- Options list -->
+          <div v-if="!isFreeText" class="confirm-options">
             <button
               v-for="opt in currentOptions"
               :key="opt"
@@ -137,23 +141,30 @@ function goBack() {
             </button>
           </div>
 
-          <!-- Footer -->
+          <!-- Free text input -->
+          <div v-else class="confirm-free-input">
+            <input
+              ref="textInput"
+              v-model="freeText"
+              type="text"
+              :placeholder="`请输入 ${currentQuestion}...`"
+              class="text-input"
+              @keydown="onKeydown"
+            />
+            <button class="btn btn-primary" :disabled="!freeText.trim()" @click="submitFreeText">
+              确认
+            </button>
+          </div>
+
           <div class="confirm-footer">
             <button class="btn" @click="emit('respond', 'deny')">跳过全部</button>
-            <button
-              v-if="isMultiQuestion && currentStep > 0"
-              class="btn"
-              @click="goBack"
-            >
-              上一步
-            </button>
+            <button v-if="isMultiQuestion && currentStep > 0" class="btn" @click="goBack">上一步</button>
           </div>
         </div>
       </div>
     </Teleport>
   </template>
 
-  <!-- Classic Dialog Mode -->
   <template v-else>
     <Teleport to="body">
       <div class="confirm-overlay" @click.self="emit('close')">
@@ -200,20 +211,9 @@ function goBack() {
   gap: 14px;
   margin-bottom: 18px;
 }
-.confirm-icon {
-  font-size: 28px;
-  line-height: 1;
-}
-.confirm-title {
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--ink);
-}
-.confirm-sub {
-  font-size: 12px;
-  color: var(--ink-mute);
-  margin-top: 2px;
-}
+.confirm-icon { font-size: 28px; line-height: 1; }
+.confirm-title { font-size: 16px; font-weight: 600; color: var(--ink); }
+.confirm-sub { font-size: 12px; color: var(--ink-mute); margin-top: 2px; }
 .progress-bar {
   height: 4px;
   background: var(--rule);
@@ -261,6 +261,25 @@ function goBack() {
   background: var(--accent-tint);
   color: var(--accent-deep);
 }
+.confirm-free-input {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+.text-input {
+  flex: 1;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1.5px solid var(--rule);
+  background: var(--bg-panel);
+  color: var(--ink);
+  font-size: 13.5px;
+  outline: none;
+  transition: border-color 160ms;
+}
+.text-input:focus {
+  border-color: var(--accent);
+}
 .confirm-footer {
   display: flex;
   justify-content: flex-end;
@@ -278,7 +297,12 @@ function goBack() {
   cursor: pointer;
   transition: all 160ms;
 }
-.btn:hover {
+.btn:hover { border-color: var(--accent); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-primary {
+  background: var(--accent);
   border-color: var(--accent);
+  color: #fff;
 }
+.btn-primary:hover:not(:disabled) { opacity: 0.9; }
 </style>
