@@ -10,6 +10,7 @@ Stability features:
   - ACP timeouts: prompt 300s, start/init 30s — no infinite hangs
   - Stale reclaim: stuck pending messages auto-claimed after 60s
   - Graceful shutdown: SIGTERM/SIGINT handled, ACP subprocesses cleaned up
+  - Concurrency: up to MAX_CONCURRENT tasks processed in parallel
 """
 from __future__ import annotations
 
@@ -30,7 +31,7 @@ from app.db.base import async_session_maker
 from app.db.models.agent import Agent
 from app.db.models.conversation import Conversation, Message
 from agent_runner import discovery, storage
-from agent_runner.acp_client import ACPClient, ACPError, ACPTimeout
+from agent_runner.acp_client import ACPClient, ACPTimeout
 from agent_runner.session_pool import SessionPool
 
 logger = logging.getLogger("hermes.runner")
@@ -41,6 +42,7 @@ LOCK_TTL = 30          # seconds; must be > heartbeat interval
 HEARTBEAT_INTERVAL = 10  # refresh lock every N seconds
 STALE_THRESHOLD_MS = 120_000  # 2 minutes — reclaim stuck pending messages
 RECLAIM_INTERVAL = 30   # check for stale messages every N seconds
+MAX_CONCURRENT = 5      # max tasks processed in parallel
 
 
 class Runner:
@@ -49,6 +51,8 @@ class Runner:
         self.agents: dict[str, discovery.DiscoveredAgent] = {}
         self._shutdown = False
         self._lock_token: str | None = None
+        self._sem = asyncio.Semaphore(MAX_CONCURRENT)
+        self._active_tasks: set[asyncio.Task] = set()
 
     # ── Singleton lock ──
     async def _acquire_lock(self) -> bool:
@@ -189,8 +193,8 @@ class Runner:
 
         await self.register_agents()
         await self.ensure_group()
-        logger.info("Runner consuming %s as %s/%s",
-                    settings.acp_stream, settings.acp_group, settings.acp_consumer)
+        logger.info("Runner consuming %s as %s/%s (max_concurrent=%d)",
+                    settings.acp_stream, settings.acp_group, settings.acp_consumer, MAX_CONCURRENT)
 
         # Start background heartbeat + reclaim
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
@@ -216,24 +220,48 @@ class Runner:
                     for entry_id, fields in entries:
                         if self._shutdown:
                             break
+                        # ACK immediately — we own this message now
                         try:
-                            await self.handle(json.loads(fields["data"]))
+                            await R.get_redis().xack(
+                                settings.acp_stream, settings.acp_group, entry_id
+                            )
                         except Exception:
-                            logger.exception("handle failed for %s", entry_id)
-                        finally:
-                            try:
-                                await R.get_redis().xack(
-                                    settings.acp_stream, settings.acp_group, entry_id
-                                )
-                            except Exception:
-                                logger.warning("Failed to ACK %s", entry_id)
+                            logger.warning("Failed to ACK %s", entry_id)
+
+                        task_data = json.loads(fields["data"])
+                        task = asyncio.create_task(
+                            self._run_task(task_data, entry_id)
+                        )
+                        self._active_tasks.add(task)
+                        task.add_done_callback(self._on_task_done)
         finally:
             heartbeat_task.cancel()
             try:
                 await heartbeat_task
             except asyncio.CancelledError:
                 pass
+            # Wait for all active tasks to finish (with timeout)
+            if self._active_tasks:
+                logger.info("Waiting for %d active task(s) to finish...", len(self._active_tasks))
+                await asyncio.wait(self._active_tasks, timeout=60)
             await self._release_lock()
+
+    # ── concurrency helpers ──
+    async def _run_task(self, task_data: dict, entry_id: str) -> None:
+        """Run a single task with semaphore-based concurrency limiting."""
+        async with self._sem:
+            logger.info("Starting task %s (active=%d/%d)",
+                        entry_id, len(self._active_tasks), MAX_CONCURRENT)
+            try:
+                await self.handle(task_data)
+            except Exception:
+                logger.exception("handle failed for %s", entry_id)
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        """Clean up completed tasks from the active set."""
+        self._active_tasks.discard(task)
+        if task.exception():
+            logger.error("Task failed: %s", task.exception())
 
     # ── dispatch ──
     async def handle(self, task: dict) -> None:
