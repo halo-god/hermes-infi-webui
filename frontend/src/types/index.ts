@@ -292,7 +292,7 @@ export interface Knowledge {
   kind: string;
   size_bytes: number;
   uploaded_by_name: string | null;
-  created_at: string;
+  created_at?: string;
 }
 export interface ActivityItem {
   who: string;

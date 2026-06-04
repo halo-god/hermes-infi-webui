@@ -8,6 +8,7 @@ import Icon from "@/components/Icon.vue";
 import NewProjectModal from "@/components/NewProjectModal.vue";
 import InviteMembersModal from "@/components/InviteMembersModal.vue";
 import KnowledgeModal from "@/components/KnowledgeModal.vue";
+import KnowledgePickerModal from "@/components/KnowledgePickerModal.vue";
 import SharedAgentsModal from "@/components/SharedAgentsModal.vue";
 import ConfirmModal from "@/components/ConfirmModal.vue";
 import ProjectMembersModal from "@/components/ProjectMembersModal.vue";
@@ -389,12 +390,16 @@ function onChannelFileSelected(e: Event) {
 function toggleKnowledgePicker() {
   showKnowledgePicker.value = !showKnowledgePicker.value;
 }
-function addChannelAttachment(k: { id: string; name: string }) {
-  if (!channelAttachments.value.find((a) => a.id === k.id)) {
-    channelAttachments.value.push({ id: k.id, name: k.name });
-  }
+function onKnowledgePickerSelect(ids: string[]) {
   showKnowledgePicker.value = false;
+  for (const kid of ids) {
+    const k = team.value.knowledge.find((x) => x.id === kid);
+    if (k && !channelAttachments.value.find((a) => a.id === k.id)) {
+      channelAttachments.value.push({ id: k.id, name: k.name });
+    }
+  }
 }
+
 function removeChannelAttachment(id: string) {
   channelAttachments.value = channelAttachments.value.filter((a) => a.id !== id);
 }
@@ -414,8 +419,8 @@ function showChCard(ev: MouseEvent, msg: Message) {
 const lastKnowledgeUpdate = computed(() => {
   const items = detail.value?.knowledge;
   if (!items?.length) return "—";
-  const latest = items.reduce((a, b) => (a.created_at > b.created_at ? a : b));
-  const diff = (Date.now() - new Date(latest.created_at).getTime()) / 1000;
+  const latest = items.reduce((a, b) => ((a.created_at || "") > (b.created_at || "") ? a : b));
+  const diff = (Date.now() - new Date(latest.created_at || Date.now()).getTime()) / 1000;
   if (diff < 60) return "刚刚";
   if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
   if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
@@ -872,7 +877,7 @@ async function deleteTeam() {
           </div>
         </div>
 
-        <div class="section-card" style="display:flex;flex-direction:column;height:520px">
+        <div class="section-card ch-container">
           <div ref="channelScroller" style="flex:1;overflow-y:auto;padding:14px 18px;display:flex;flex-direction:column;gap:10px">
             <div v-if="channelLoading" style="text-align:center;color:var(--ink-mute);font-size:13px;padding:40px 0">加载中…</div>
             <div v-else-if="!channelMessages.length" style="text-align:center;color:var(--ink-mute);font-size:13px;padding:40px 0">
@@ -919,16 +924,6 @@ async function deleteTeam() {
           </div>
 
           <div style="padding:10px 14px;border-top:1px solid var(--rule-soft);display:flex;flex-direction:column;gap:6px">
-            <!-- Knowledge picker -->
-            <div v-if="showKnowledgePicker" style="position:relative">
-              <div style="background:var(--bg-panel);border:1px solid var(--rule);border-radius:8px;padding:6px;max-height:180px;overflow-y:auto;box-shadow:var(--shadow-lg)">
-                <div v-if="!team.knowledge.length" style="padding:8px;font-size:12.5px;color:var(--ink-mute)">没有知识库文件</div>
-                <button v-for="k in team.knowledge" :key="k.id" class="menu-item" style="width:100%;text-align:left;display:flex;align-items:center;gap:6px" @click="addChannelAttachment(k)">
-                  <Icon name="doc" :size="13" /><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ k.name }}</span>
-                  <span style="font-size:11px;color:var(--accent);flex-shrink:0">引用</span>
-                </button>
-              </div>
-            </div>
             <div style="position:relative;display:flex;gap:8px;align-items:flex-end">
               <!-- @mention picker -->
               <div v-if="showMentionPicker && filteredMentions.length" class="mention-picker">
@@ -1082,6 +1077,13 @@ async function deleteTeam() {
       :editing="editingKnowledge"
       @close="showKnowledgeModal = false"
       @saved="showKnowledgeModal = false; editingKnowledge = null; load()"
+    />
+    <KnowledgePickerModal
+      v-if="showKnowledgePicker"
+      :items="team.knowledge"
+      :team-id="teamId"
+      @select="onKnowledgePickerSelect"
+      @close="showKnowledgePicker = false"
     />
     <SharedAgentsModal
       v-if="showSharedAgentsModal"
