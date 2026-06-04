@@ -16,6 +16,15 @@ const collapsed = ref(false);
 const showTweaks = ref(false);
 const showSearch = ref(false);
 
+const ATMOS_CYCLE = ["letter", "cinnabar", "celadon", "night", "ink"];
+function cycleAtmos() {
+  const cur = document.body.dataset.atmos || "letter";
+  const next = ATMOS_CYCLE[(ATMOS_CYCLE.indexOf(cur) + 1) % ATMOS_CYCLE.length];
+  document.body.dataset.atmos = next;
+  const saved = JSON.parse(localStorage.getItem("hermes.tweaks") || "{}");
+  localStorage.setItem("hermes.tweaks", JSON.stringify({ ...saved, atmos: next }));
+}
+
 function onKey(e: KeyboardEvent) {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
     e.preventDefault();
@@ -44,6 +53,7 @@ function openSearch() {
 }
 
 const hermes = computed(() => chat.profiles.find((p) => p.default_agent_id === "hermes") || chat.profiles.find((p) => p.handle === "hermes"));
+const isNight = computed(() => ["night", "ink"].includes(document.body.dataset.atmos || ""));
 </script>
 
 <template>
@@ -59,6 +69,7 @@ const hermes = computed(() => chat.profiles.find((p) => p.default_agent_id === "
           ACP · {{ hermes?.name || 'Hermes Agent' }}
         </span>
         <NotificationPanel />
+        <button class="icon-btn" title="切换氣質" @click="cycleAtmos"><Icon :name="isNight ? 'sun' : 'moon'" /></button>
         <button class="icon-btn" title="调整 Tweaks" @click="showTweaks = !showTweaks"><Icon name="settings" /></button>
       </div>
       <router-view />
