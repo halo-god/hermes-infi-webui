@@ -10,6 +10,7 @@ import { adminApi } from "@/api/admin";
 import { agentsApi, type Profile, type ProfileCreate } from "@/api/agents";
 import { http } from "@/api/client";
 import { useAuthStore } from "@/stores/auth";
+import { usePresence } from "@/composables/usePresence";
 import type {
   AdminRole,
   AdminStats,
@@ -23,6 +24,7 @@ import type {
 
 const authStore = useAuthStore();
 const isSuperAdmin = computed(() => authStore.user?.role === "super_admin");
+const { queryPresence, getStatus } = usePresence();
 
 const tab = ref<"overview" | "users" | "roles" | "identity" | "audit" | "assistants" | "system">("overview");
 const stats = ref<AdminStats | null>(null);
@@ -89,6 +91,9 @@ async function load() {
 }
 async function loadUsers() {
   users.value = await adminApi.listUsers(userQ.value || undefined);
+  // Query online/offline presence for all users
+  const userIds = users.value.map((u) => u.id).filter(Boolean);
+  if (userIds.length) queryPresence(userIds);
 }
 async function loadAudit() {
   audit.value = await adminApi.audit({
@@ -582,7 +587,7 @@ async function handleImportFile(e: Event) {
         </div>
 
         <div class="users-table">
-          <div class="ut-row head"><div>用户</div><div class="col-email">邮箱</div><div>角色</div><div class="col-dept">部门</div><div>来源</div><div>状态</div><div></div></div>
+          <div class="ut-row head"><div>用户</div><div class="col-email">邮箱</div><div>角色</div><div class="col-dept">部门</div><div>来源</div><div>在线</div><div>状态</div><div></div></div>
           <div v-for="u in filteredUsers()" :key="u.id" class="ut-row">
             <div class="ut-user">
               <div class="mem-avatar" :style="{ background: u.color || '#b8852a' }">{{ u.initials || (u.name || "?").slice(0, 1) }}<span class="status" :class="u.status === 'active' ? 'online' : u.status === 'inactive' ? 'offline' : 'idle'"></span></div>
@@ -596,6 +601,7 @@ async function handleImportFile(e: Event) {
             </div>
             <div class="col-dept" style="font-size: 12px; color: var(--ink-soft)">{{ u.department || "—" }}</div>
             <div><span class="source-pill" :class="u.source"><span class="dot"></span>{{ SOURCE_LABEL[u.source] || u.source }}</span></div>
+            <div><span class="presence-cell" :class="getStatus(u.id)"><span class="dot"></span>{{ getStatus(u.id) === 'online' ? '在线' : '离线' }}</span></div>
             <div><button class="status-cell" :class="u.status" @click="toggleStatus(u)" style="background: none; border: none; cursor: pointer"><span class="dot"></span>{{ STATUS_LABEL[u.status] || u.status }}</button></div>
             <div style="display: flex; gap: 2px; justify-content: flex-end">
               <button class="icon-btn" title="切换状态" @click="toggleStatus(u)"><Icon name="logout" /></button>

@@ -399,8 +399,12 @@ function onChannelFileSelected(e: Event) {
 }
 
 function toggleKnowledgePicker() {
-  showKnowledgePicker.value = !showKnowledgePicker.value;
+  // Prevent the document click handler from immediately closing the picker
+  const willOpen = !showKnowledgePicker.value;
+  showKnowledgePicker.value = willOpen;
+  if (willOpen) pickerJustOpened = true;
 }
+let pickerJustOpened = false;
 function onKnowledgePickerSelect(ids: string[]) {
   showKnowledgePicker.value = false;
   for (const kid of ids) {
@@ -729,7 +733,7 @@ async function deleteTeam() {
                   <div class="mem-avatar" :style="{ background: m.color }">{{ m.initials }}<span class="status" :class="m.status"></span><span class="presence-dot" :class="getStatus(m.user_id)"></span></div>
                   <div class="row-text">
                     <div class="row-title">{{ m.name }} <span style="color: var(--ink-mute); font-weight: 400; font-size: 11.5px; margin-left: 4px">@{{ m.handle }}</span></div>
-                    <div class="row-sub">{{ m.last }}</div>
+                    <div class="row-sub" :style="{ color: getStatus(m.user_id) === 'online' ? '#34c759' : 'var(--ink-mute)' }">{{ getStatus(m.user_id) === 'online' ? '在线' : '离线' }}</div>
                   </div>
                   <span class="mem-role" :class="roleClass(m.role)">{{ m.role }}</span>
                 </div>
@@ -809,7 +813,7 @@ async function deleteTeam() {
               <div style="min-width: 0"><div class="nm">{{ m.name }}</div><div class="hd">@{{ m.handle }}</div></div>
             </div>
             <div><span class="mem-role" :class="roleClass(m.role)">{{ m.role }}</span></div>
-            <div style="font-size: 12px; color: var(--ink-mute)"><span class="dot-inline" :class="m.status"></span>{{ statusLabel(m.status) }}</div>
+            <div style="font-size: 12px; color: var(--ink-mute)"><span class="dot-inline" :class="getStatus(m.user_id)"></span>{{ getStatus(m.user_id) === 'online' ? '在线' : '离线' }}</div>
             <div class="col-last-active" style="font-size: 12px; color: var(--ink-mute)">{{ m.last }}</div>
             <div>
               <button v-if="(can('member.role') || can('member.remove')) && m.roleKey !== 'owner'" class="icon-btn" @click.stop="toggleMenu(m.handle, $event)"><Icon name="settings" /></button>

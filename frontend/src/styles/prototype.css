@@ -1681,6 +1681,10 @@
   .status-cell.active   .dot { background: var(--ok); }
   .status-cell.pending  .dot { background: #d9a843; }
   .status-cell.inactive .dot { background: var(--ink-faint); }
+  .presence-cell { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-soft); }
+  .presence-cell .dot { width: 7px; height: 7px; border-radius: 50%; }
+  .presence-cell.online .dot { background: #34c759; }
+  .presence-cell.offline .dot { background: var(--ink-faint); }
   .role-pill {
     display: inline-block;
     padding: 2px 9px;
