@@ -7,7 +7,7 @@ agent message row is written once on completion.
 
 Stability features:
   - Singleton lock: only one runner active at a time (Redis distributed lock)
-  - ACP timeouts: prompt 300s, start/init 30s — no infinite hangs
+  - ACP timeouts: prompt 600s, start/init 30s — no infinite hangs
   - Stale reclaim: stuck pending messages auto-claimed after 60s
   - Graceful shutdown: SIGTERM/SIGINT handled, ACP subprocesses cleaned up
   - Concurrency: up to MAX_CONCURRENT tasks processed in parallel

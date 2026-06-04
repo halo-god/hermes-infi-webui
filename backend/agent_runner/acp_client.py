@@ -26,7 +26,7 @@ logger = logging.getLogger("hermes.acp")
 START_TIMEOUT = 30       # subprocess spawn
 INIT_TIMEOUT = 30        # initialize handshake
 SESSION_TIMEOUT = 30     # session/new
-PROMPT_TIMEOUT = 300     # session/prompt (agent can think for a while)
+PROMPT_TIMEOUT = 600     # session/prompt (complex tasks with clarify rounds need more time)
 CANCEL_TIMEOUT = 5       # session/cancel (fire-and-forget)
 
 OnUpdate = Callable[[dict], Awaitable[None]]
