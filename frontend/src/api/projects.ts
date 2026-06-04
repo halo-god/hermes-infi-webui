@@ -56,4 +56,11 @@ export const projectsApi = {
   async deleteDoc(docId: string): Promise<void> {
     await http.delete(`/projects/docs/${docId}`);
   },
+  async uploadDoc(projectId: string, file: File): Promise<ProjectDoc> {
+    const form = new FormData();
+    form.append("file", file);
+    return (await http.post<ProjectDoc>(`/projects/${projectId}/docs/upload`, form, {
+      headers: { "Content-Type": "multipart/form-data" },
+    })).data;
+  },
 };

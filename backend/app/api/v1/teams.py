@@ -575,10 +575,12 @@ async def upload_doc(
         size_bytes=len(content),
     )
     doc = await svc.add_doc(db, project_id, payload, user)
-    # Store file content in object storage if available, otherwise skip
+    # Store file content in object storage if available
     try:
-        from app.core.object_storage import put_object
-        await put_object(f"project-docs/{doc.id}/{file.filename}", content)
+        import asyncio
+        from app.core import object_storage
+        storage_key = f"project-docs/{doc.id}/{file.filename}"
+        await asyncio.to_thread(object_storage.put, storage_key, content)
     except Exception:
         pass  # Graceful degradation: metadata saved even if storage fails
     return doc

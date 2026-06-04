@@ -21,7 +21,8 @@ const teamName = ref("团队");
 const members = ref<Member[]>([]);
 const docs = ref<import("@/types").ProjectDoc[]>([]);
 const convos = ref<import("@/types").ConversationBrief[]>([]);
-const newDocName = ref("");
+const docFileInput = ref<HTMLInputElement | null>(null);
+const uploadingDoc = ref(false);
 const agents = ref<Agent[]>([]);
 const editingTaskId = ref<string | null>(null);
 const editDraft = ref("");
@@ -62,12 +63,23 @@ async function load() {
   }
 }
 async function addDoc() {
-  const v = newDocName.value.trim();
-  if (!v) return;
-  const ext = v.split(".").pop() || "doc";
-  const d = await projectsApi.addDoc(projectId, { name: v, kind: ext, size_bytes: Math.round(Math.random() * 800 + 50) * 1024 });
-  docs.value.unshift(d);
-  newDocName.value = "";
+  // Trigger file picker
+  docFileInput.value?.click();
+}
+async function onDocFileSelected(e: Event) {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file || !projectId) return;
+  uploadingDoc.value = true;
+  try {
+    const doc = await projectsApi.uploadDoc(projectId, file);
+    docs.value.unshift(doc);
+  } catch {
+    alert("上传失败");
+  } finally {
+    uploadingDoc.value = false;
+    if (input) input.value = "";
+  }
 }
 async function deleteDoc(id: string) {
   if (!confirm("删除该文件？")) return;
@@ -271,9 +283,11 @@ async function removeProject() {
               </div>
               <div v-if="!docs.length" style="padding: 24px; text-align: center; color: var(--ink-mute); font-size: 12.5px">还没有文件。</div>
               <div class="task-add">
+                <input ref="docFileInput" type="file" style="display:none" @change="onDocFileSelected" />
                 <Icon name="paperclip" :size="14" style="color: var(--ink-mute)" />
-                <input class="task-add-input" v-model="newDocName" placeholder="添加文件名，例如 路演脚本.docx…" @keydown.enter="addDoc" />
-                <button v-if="newDocName.trim()" class="btn primary" style="height: 28px; padding: 0 12px" @click="addDoc">添加</button>
+                <button class="btn primary" style="height: 28px; padding: 0 12px" :disabled="uploadingDoc" @click="addDoc">
+                  {{ uploadingDoc ? "上传中…" : "上传文件" }}
+                </button>
               </div>
             </div>
           </div>
