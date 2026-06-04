@@ -23,6 +23,7 @@ export const useChatStore = defineStore("chat", () => {
   const streaming = computed(() => streamingConvoId.value !== null);
   const loading = ref(false);
   const contextTokens = ref(0);
+  const features = ref<{ followup_chips: boolean }>({ followup_chips: false });
   const pendingConfirmations = ref<ConfirmationRequest[]>([]);
   const hasMoreMessages = ref(true);
   const loadingOlder = ref(false);
@@ -51,6 +52,14 @@ export const useChatStore = defineStore("chat", () => {
     } catch {
       profiles.value = [];
     }
+  }
+
+  async function loadConfig() {
+    try {
+      const resp = await fetch("/api/v1/config");
+      const data = await resp.json();
+      features.value = data.features || { followup_chips: false };
+    } catch { /* ignore */ }
   }
 
   async function loadConversations() {
@@ -444,6 +453,8 @@ export const useChatStore = defineStore("chat", () => {
     loadingOlder,
     contextTokens,
     streamingConvoId,
+    features,
+    loadConfig,
     // Stream state (read-only exposure)
     streamConnected: stream.connected,
     streamError: stream.error,

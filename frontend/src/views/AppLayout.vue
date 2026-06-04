@@ -31,6 +31,7 @@ onMounted(() => {
   chat.loadConversations();
   chat.loadProfiles();
   chat.loadTeams();
+  chat.loadConfig();
   window.addEventListener("keydown", onKey);
   window.addEventListener("hermes:search", openSearch);
 });

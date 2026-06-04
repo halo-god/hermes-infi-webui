@@ -638,7 +638,7 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                   <button title="分享" @click="shareMessage(chat.messages[row.index].conversation_id)"><Icon name="share" :size="12" /></button>
                 </div>
                 <!-- Smart follow-up suggestion chips -->
-                <div v-if="chat.messages[row.index].role === 'agent' && chat.messages[row.index].status !== 'streaming' && chat.messages[row.index].content.text" class="followup-chips">
+                <div v-if="chat.features.followup_chips && chat.messages[row.index].role === 'agent' && chat.messages[row.index].status !== 'streaming' && chat.messages[row.index].content.text" class="followup-chips">
                   <button v-for="chip in getFollowupChips(chat.messages[row.index].content.text)" :key="chip" class="followup-chip" @click="sendFollowup(chip)">{{ chip }}</button>
                 </div>
                 <div class="msg-time">{{ fmtTime(chat.messages[row.index].created_at) }}</div>
