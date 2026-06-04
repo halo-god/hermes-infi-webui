@@ -84,6 +84,43 @@ md.renderer.rules.link_open = function (tokens: any[], idx: number, options: any
   return defaultRender(tokens, idx, options, env, self);
 };
 
+// ── Collapsible blockquote ──
+md.renderer.rules.blockquote_open = function () {
+  return '<blockquote class="collapsible-quote">';
+};
+md.renderer.rules.blockquote_close = function () {
+  return '</blockquote>';
+};
+
+// Intercept inline tokens inside blockquotes to capture first line
+const defaultInline = md.renderer.rules.inline || function (tokens: any[], idx: number, options: any, _env: any, self: any) {
+  return self.renderToken(tokens, idx, options);
+};
+md.renderer.rules.inline = function (tokens: any[], idx: number, options: any, env: any, self: any) {
+  const html = defaultInline(tokens, idx, options, env, self);
+  return html;
+};
+
+// Post-process: wrap long blockquotes with details/summary
+function postProcessBlockquotes(html: string): string {
+  return html.replace(/<blockquote class="collapsible-quote">([\s\S]*?)<\/blockquote>/g, (_match, inner) => {
+    const textContent = inner.replace(/<[^>]+>/g, "").trim();
+    const lines = textContent.split("\n").filter((l: string) => l.trim());
+    const firstLine = (lines[0] || "").slice(0, 60);
+    if (textContent.length > 120) {
+      return `<details class="quote-collapsible"><summary class="quote-summary">💬 ${md.utils.escapeHtml(firstLine)}${lines.length > 1 ? "…" : ""}</summary><blockquote class="expanded-quote">${inner}</blockquote></details>`;
+    }
+    return `<blockquote class="simple-quote">${inner}</blockquote>`;
+  });
+}
+
+// ── Knowledge reference collapse ──
+function postProcessKnowledgeRefs(html: string): string {
+  return html.replace(/【知识库:\s*([^】]+)】\s*<br\s*\/?>/g, (_match, name) => {
+    return `<div class="knowledge-ref-header">📚 知识库: ${md.utils.escapeHtml(name.trim())} <span class="knowledge-ref-hint">(已发送给AI)</span></div>`;
+  });
+}
+
 // ── Code copy button + language label ──
 const defaultFence =
   md.renderer.rules.fence ||
@@ -156,7 +193,10 @@ async function renderMermaidBlocks(html: string): Promise<string> {
 
 // ── Main export ──
 export function renderMarkdown(src: string): string {
-  return md.render(src || "");
+  let html = md.render(src || "");
+  html = postProcessBlockquotes(html);
+  html = postProcessKnowledgeRefs(html);
+  return html;
 }
 
 /**
@@ -164,7 +204,9 @@ export function renderMarkdown(src: string): string {
  * Use this in components that need diagrams.
  */
 export async function renderMarkdownAsync(src: string): Promise<string> {
-  const html = md.render(src || "");
+  let html = md.render(src || "");
+  html = postProcessBlockquotes(html);
+  html = postProcessKnowledgeRefs(html);
   return renderMermaidBlocks(html);
 }
 
@@ -177,7 +219,21 @@ if (typeof window !== "undefined") {
     if (!wrapper) return;
     const code = wrapper.querySelector("code");
     if (!code) return;
-    navigator.clipboard.writeText(code.textContent || "").then(() => {
+    const text = code.textContent || "";
+    const doCopy = () => {
+      if (navigator.clipboard && window.isSecureContext) {
+        return navigator.clipboard.writeText(text);
+      }
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.cssText = "position:fixed;left:-9999px;top:-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      return Promise.resolve();
+    };
+    doCopy().then(() => {
       btn.textContent = "✅";
       setTimeout(() => (btn.textContent = "📋"), 1500);
     });

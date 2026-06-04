@@ -5,7 +5,6 @@ import { computed, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import Icon from "@/components/Icon.vue";
-import ConfirmModal from "@/components/ConfirmModal.vue";
 import NewTeamModal from "@/components/NewTeamModal.vue";
 import { useAuthStore } from "@/stores/auth";
 import { useChatStore } from "@/stores/chat";
@@ -94,7 +93,17 @@ async function shareConvo(id: string) {
   try {
     const res = await conversationsApi.share(id);
     const url = window.location.origin + res.share_url;
-    await navigator.clipboard.writeText(url);
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(url);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = url;
+      ta.style.cssText = "position:fixed;left:-9999px;top:-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
     ns.toast("分享链接已复制到剪贴板");
   } catch (e: unknown) {
     ns.toast("分享失败：" + ((e as Error).message || "未知错误"), "error");
@@ -235,15 +244,18 @@ async function shareConvo(id: string) {
   </Teleport>
 
   <!-- Delete confirmation -->
-  <ConfirmModal
-    v-if="deleteTarget"
-    title="删除会话"
-    :message="`确认删除「${deleteTarget.title}」？此操作不可恢复。`"
-    confirm-text="删除"
-    :danger="true"
-    @close="deleteTarget = null"
-    @confirm="doDelete"
-  />
+  <Teleport to="body">
+    <div v-if="deleteTarget" class="ctx-menu-scrim" @click="deleteTarget = null">
+      <div class="delete-confirm" @click.stop>
+        <div class="delete-confirm-title">删除会话</div>
+        <div class="delete-confirm-msg">确认删除「{{ deleteTarget.title }}」？此操作不可恢复。</div>
+        <div class="delete-confirm-actions">
+          <button class="btn" @click="deleteTarget = null">取消</button>
+          <button class="btn danger-btn" @click="doDelete">删除</button>
+        </div>
+      </div>
+    </div>
+  </Teleport>
 
   <NewTeamModal v-if="showNewTeam" @close="showNewTeam = false" @created="onTeamCreated" />
 </template>
@@ -274,5 +286,44 @@ async function shareConvo(id: string) {
   border-radius: 10px;
   box-shadow: var(--shadow-md);
   padding: 4px;
+}
+.delete-confirm {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 1000;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg);
+  padding: 24px;
+  min-width: 320px;
+  max-width: 420px;
+}
+.delete-confirm-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 8px;
+}
+.delete-confirm-msg {
+  font-size: 14px;
+  color: var(--ink-soft);
+  margin-bottom: 20px;
+  line-height: 1.5;
+}
+.delete-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.danger-btn {
+  background: #dc3545 !important;
+  border-color: #dc3545 !important;
+  color: #fff !important;
+}
+.danger-btn:hover {
+  background: #c82333 !important;
 }
 </style>

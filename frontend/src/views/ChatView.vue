@@ -223,7 +223,9 @@ async function onSend(opts?: SendOptions) {
       } catch (e) { console.error('[onSend] knowledge fetch failed:', kid, e); }
     }
     if (blocks.length) {
-      text = blocks.join("\n\n") + "\n\n" + text;
+      // Wrap knowledge content in markers so it can be hidden in display but sent to AI
+      const knowledgeBlock = blocks.map(b => `<knowledge>${b}</knowledge>`).join("\n\n");
+      text = knowledgeBlock + "\n\n" + text;
       console.log('[onSend] final text length:', text.length);
     }
   }
@@ -239,7 +241,17 @@ function openFile(fid: string) {
 // ── Message actions ──
 async function copyMessage(text: string) {
   try {
-    await navigator.clipboard.writeText(text);
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.cssText = "position:fixed;left:-9999px;top:-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
     ns.toast("已复制到剪贴板");
   } catch {
     ns.toast("复制失败", "error");
@@ -285,6 +297,24 @@ const ctxK = computed(() => chat.contextTokens >= 1000 ? `${(chat.contextTokens 
 
 // ── Session export ──
 const showExport = ref(false);
+const editingTitle = ref(false);
+const titleDraft = ref("");
+
+function startEditTitle() {
+  titleDraft.value = activeConvo.value?.title || "";
+  editingTitle.value = true;
+  nextTick(() => {
+    const input = document.querySelector(".thread-title-edit") as HTMLInputElement;
+    if (input) { input.focus(); input.select(); }
+  });
+}
+async function saveTitle() {
+  editingTitle.value = false;
+  const v = titleDraft.value.trim();
+  if (!v || !chat.activeId || v === activeConvo.value?.title) return;
+  await conversationsApi.update(chat.activeId, { title: v });
+  await chat.loadConversations();
+}
 function download(blob: Blob, name: string) {
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -346,6 +376,12 @@ async function sendFollowup(text: string) {
   await onSend();
 }
 
+// ── Knowledge reference display filter ──
+function displayText(text: string): string {
+  // Hide <knowledge>...</knowledge> blocks from user display
+  return text.replace(/<knowledge>[\s\S]*?<\/knowledge>\s*/g, "").trim();
+}
+
 // ── Agent working phase display ──
 function getAgentPhase(msg: Message): string | null {
   if (msg.status !== "streaming") return null;
@@ -354,14 +390,15 @@ function getAgentPhase(msg: Message): string | null {
   const runningStep = (msg.steps || []).find(s => s.status === "running" || s.status === "started");
   if (runningStep) return `🔧 ${runningStep.title}`;
   if (msg.thinking && !hasText) return "💭 推理中…";
-  return "🧠 分析问题…";
+  return "🔍 分析问题…";
 }
 
 // ── Quote reply ──
 function quoteReply(text: string) {
   const lines = text.trim().split("\n").slice(0, 3).join("\n");
-  const truncated = lines.length > 120 ? lines.slice(0, 120) + "…" : lines;
-  draft.value = `> ${truncated.replace(/\n/g, "\n> ")}\n\n`;
+  const truncated = lines.length > 80 ? lines.slice(0, 80) + "…" : lines;
+  const summary = truncated.split("\n")[0].slice(0, 60);
+  draft.value = `<quote summary="${summary}">\n${truncated}\n</quote>\n\n`;
   nextTick(() => (document.querySelector(".dock .composer-input") as HTMLTextAreaElement)?.focus());
 }
 
@@ -455,7 +492,16 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
             <div style="flex:1;min-width:0;display:flex;align-items:flex-start;gap:10px;">
               <ConvoSeal v-if="chat.activeId" :seed="chat.activeId" :size="40" style="margin-top:2px;" />
               <div style="min-width:0;">
-                <h2 class="thread-title">{{ activeConvo?.title || "对话" }}</h2>
+                <template v-if="editingTitle">
+                  <input
+                    class="thread-title-edit"
+                    v-model="titleDraft"
+                    @keydown.enter="saveTitle"
+                    @keydown.escape="editingTitle = false"
+                    @blur="saveTitle"
+                  />
+                </template>
+                <h2 v-else class="thread-title" @click="startEditTitle" title="点击编辑标题">{{ activeConvo?.title || "对话" }}</h2>
                 <div class="thread-meta" style="margin-top:5px;">
                   <span class="agent-tag"><Icon :name="primaryProfile?.icon || 'brand'" :size="10" /> {{ primaryProfile?.name || "Hermes" }}</span>
                   <span v-if="chat.activeProfiles.length > 1" class="agent-tag" style="background:rgba(184,133,42,0.14);color:var(--accent-deep);">
@@ -611,7 +657,7 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                   </template>
                   <div v-else-if="chat.messages[row.index].role === 'agent'" class="md-body" v-html="mdSearch(chat.messages[row.index].content.text)" />
                   <template v-else>
-                    {{ chat.messages[row.index].content.text }}
+                    {{ displayText(chat.messages[row.index].content.text) }}
                     <div v-if="chat.messages[row.index].content.files?.length" class="msg-files">
                       <button v-for="f in chat.messages[row.index].content.files" :key="f.id" class="msg-file-chip" @click="openFile(f.id)">
                         <Icon name="paperclip" :size="11" /> {{ f.name }}
