@@ -261,8 +261,35 @@ async function loadChannel() {
 }
 
 async function sendChannelMessage() {
-  const text = channelDraft.value.trim();
-  if (!text || !channelConvo.value || channelSending.value) return;
+  const rawText = channelDraft.value.trim();
+  if (!channelConvo.value || channelSending.value) return;
+
+  // Inline-attach any selected knowledge items + uploaded files BEFORE mention check
+  let text = rawText;
+  if (channelAttachments.value.length) {
+    try {
+      const parts: string[] = [];
+      for (const att of channelAttachments.value) {
+        if (att.id.startsWith("blob:")) {
+          // Uploaded file: read content from blob URL
+          try {
+            const resp = await fetch(att.id);
+            const fileText = await resp.text();
+            if (fileText) parts.push(`【附件: ${att.name}】\n${fileText}`);
+          } catch { /* skip unreadable file */ }
+        } else {
+          // Knowledge item: fetch from API
+          const content = await teamsApi.knowledgeContent(teamId.value, att.id);
+          if (content) parts.push(`【知识库: ${att.name}】\n${content}`);
+        }
+      }
+      if (parts.length) text = parts.join("\n\n---\n\n") + "\n\n---\n\n" + text;
+    } catch { /* ignore */ }
+    channelAttachments.value = [];
+  }
+
+  // Allow sending if we have text OR knowledge content
+  if (!text) return;
 
   // In mention mode: only trigger agent if message contains @mention of an agent
   const mentionRegex = /@([^\s]+)/g;
@@ -288,29 +315,8 @@ async function sendChannelMessage() {
   channelDraft.value = "";
   channelSending.value = true;
 
-  // Inline-attach any selected knowledge items + uploaded files
-  let fullText = text;
-  if (channelAttachments.value.length) {
-    try {
-      const parts: string[] = [];
-      for (const att of channelAttachments.value) {
-        if (att.id.startsWith("blob:")) {
-          // Uploaded file: read content from blob URL
-          try {
-            const resp = await fetch(att.id);
-            const fileText = await resp.text();
-            if (fileText) parts.push(`【附件: ${att.name}】\n${fileText}`);
-          } catch { /* skip unreadable file */ }
-        } else {
-          // Knowledge item: fetch from API
-          const content = await teamsApi.knowledgeContent(teamId.value, att.id);
-          if (content) parts.push(`【知识库: ${att.name}】\n${content}`);
-        }
-      }
-      if (parts.length) fullText = parts.join("\n\n---\n\n") + "\n\n---\n\n" + text;
-    } catch { /* ignore */ }
-    channelAttachments.value = [];
-  }
+  // text already contains knowledge content from above
+  const fullText = text;
 
   const convoId = channelConvo.value.id;
   const token = tokenStore.access || "";
