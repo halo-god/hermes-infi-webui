@@ -535,19 +535,22 @@ class Runner:
             # The agent's clarify_callback blocks the agent thread while waiting
             # for user response. Since it can't send on_update events while
             # blocked, we must poll Redis for pending clarify requests.
+            # NOTE: agent uses ACP session_id as key, not conversation_id
+            clarify_session_id = new_session or conversation_id
             prompt_task = asyncio.create_task(client.prompt(text))
             while not prompt_task.done():
                 try:
                     await asyncio.wait_for(asyncio.shield(prompt_task), timeout=1.0)
                 except asyncio.TimeoutError:
                     pass
-                # Poll Redis for pending clarify requests
-                pending_key = f"hermes:clarify_pending:{conversation_id}"
+                # Poll Redis for pending clarify requests (agent uses session_id)
+                pending_key = f"hermes:clarify_pending:{clarify_session_id}"
                 try:
                     val = await R.get_redis().get(pending_key)
                     if val:
                         await self._handle_clarify_tool_call(
-                            conversation_id, acc["current_msg_id"], acc
+                            conversation_id, acc["current_msg_id"], acc,
+                            clarify_session_id=clarify_session_id,
                         )
                 except Exception:
                     pass
@@ -673,6 +676,7 @@ class Runner:
 
     async def _handle_clarify_tool_call(
         self, conversation_id: str, message_id: str, acc: dict,
+        clarify_session_id: str | None = None,
     ) -> None:
         """Handle agent's clarify tool call.
 
@@ -684,7 +688,9 @@ class Runner:
         """
         import json as _json
 
-        pending_key = f"hermes:clarify_pending:{conversation_id}"
+        # Agent uses ACP session_id as Redis key, not conversation_id
+        sid = clarify_session_id or conversation_id
+        pending_key = f"hermes:clarify_pending:{sid}"
         try:
             val = await R.get_redis().get(pending_key)
             if val:
@@ -705,25 +711,28 @@ class Runner:
                     conversation_id,
                     {"type": "confirmation_request", "message_id": message_id, "request": req_payload},
                 )
-                logger.info("Clarify tool detected, sent confirmation_request: %s", clarify_id)
+                logger.info("Clarify tool detected, sent confirmation_request: %s (sid=%s)", clarify_id, sid[:8])
                 acc["_clarify_handled"] = True
 
                 # Start background task to wait for user response and unblock agent
                 asyncio.ensure_future(
-                    self._wait_and_unblock_clarify(conversation_id, clarify_id)
+                    self._wait_and_unblock_clarify(conversation_id, clarify_id, clarify_session_id=sid)
                 )
         except Exception:
             logger.debug("No pending clarify request found", exc_info=True)
 
     async def _wait_and_unblock_clarify(
-        self, conversation_id: str, clarify_id: str
+        self, conversation_id: str, clarify_id: str,
+        clarify_session_id: str | None = None,
     ) -> None:
         """Wait for user response via runner's confirm pub/sub, then write back
         to clarify_callback's Redis keys to unblock the agent thread."""
         import json as _json
 
-        response_key = f"hermes:clarify_response:{conversation_id}:{clarify_id}"
-        notify_channel = f"hermes:clarify_notify:{conversation_id}"
+        # Agent uses ACP session_id for Redis keys
+        sid = clarify_session_id or conversation_id
+        response_key = f"hermes:clarify_response:{sid}:{clarify_id}"
+        notify_channel = f"hermes:clarify_notify:{sid}"
 
         try:
             # Wait for user response via runner's confirmation mechanism
