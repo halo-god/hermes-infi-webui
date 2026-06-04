@@ -155,6 +155,23 @@ async def delete_conversation(
     await svc.delete_conversation(db, convo)
 
 
+@router.post("/{conversation_id}/fork", response_model=ConversationDetail, status_code=201)
+async def fork_conversation(
+    conversation_id: uuid.UUID,
+    before_message_id: uuid.UUID = Query(...),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        fork, msgs = await svc.fork_conversation(db, conversation_id, user.id, before_message_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return ConversationDetail(
+        **ConversationOut.model_validate(fork).model_dump(),
+        messages=[MessageOut.model_validate(m) for m in msgs],
+    )
+
+
 @router.post("/{conversation_id}/share")
 async def share_conversation(
     conversation_id: uuid.UUID,

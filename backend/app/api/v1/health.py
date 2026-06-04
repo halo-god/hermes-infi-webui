@@ -34,3 +34,13 @@ async def readyz() -> dict:
 
     ready = all(v == "ok" for v in checks.values())
     return {"ready": ready, "checks": checks}
+
+
+@router.get("/config")
+async def get_config() -> dict:
+    from app.config import settings
+    return {
+        "features": {
+            "followup_chips": settings.feature_followup_chips,
+        },
+    }

@@ -128,8 +128,14 @@ export interface Agent {
 
 export interface MessageContent {
   text: string;
-  files?: Array<{ id: string; name: string; kind: string }>;
+  files?: Array<{ id: string; name: string; kind: string; diff?: string | null }>;
   [k: string]: unknown;
+}
+
+export interface PlanEntry {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+  priority: number;
 }
 
 export interface RoundtableReply {
@@ -153,6 +159,9 @@ export interface Message {
   status: "streaming" | "complete" | "cancelled" | "error";
   created_at: string;
   steps?: { title: string; status: string }[];
+  thinking?: string;
+  plan?: PlanEntry[];
+  usage?: { input_tokens: number; output_tokens: number };
 }
 
 export interface Conversation {
@@ -239,7 +248,7 @@ export type StreamEvent =
   | { type: "start"; message_id: string }
   | { type: "token"; message_id: string; delta: string }
   | { type: "tool_call"; message_id: string; title?: string; status?: string }
-  | { type: "file"; message_id: string; file_id: string; name: string; kind: string; version: number }
+  | { type: "file"; message_id: string; file_id: string; name: string; kind: string; version: number; diff?: string | null }
   | { type: "done"; message_id: string; status: string; stop_reason?: string; text?: string }
   | { type: "error"; message_id: string; detail: string }
   | { type: "rt_start"; message_id: string; agents: RtAgentMeta[] }
@@ -248,7 +257,11 @@ export type StreamEvent =
   | { type: "merge_start"; message_id: string }
   | { type: "merge_token"; message_id: string; delta: string }
   | { type: "confirmation_request"; message_id: string; request: ConfirmationRequest }
-  | { type: "confirmation_response"; message_id: string; request_id: string; choice: string };
+  | { type: "confirmation_response"; message_id: string; request_id: string; choice: string }
+  | { type: "thought"; message_id: string; delta: string }
+  | { type: "plan"; message_id: string; entries: PlanEntry[] }
+  | { type: "usage"; message_id: string; input_tokens: number; output_tokens: number }
+  | { type: "session_info"; title?: string };
 
 // ── Teams / projects / tasks (P3 backend; frontend added here) ──
 export interface Team {

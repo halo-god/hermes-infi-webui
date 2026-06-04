@@ -2,7 +2,7 @@
 /* 1:1 port of the prototype chat (hermes-app.js landing + thread), main-content
    only — the sidebar/topbar live in AppLayout. Uses the prototype CSS classes
    so it renders pixel-identical; wired to the real chat store. */
-import { computed, defineAsyncComponent, nextTick, onMounted, ref, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useVirtualizer } from "@tanstack/vue-virtual";
 import Icon from "@/components/Icon.vue";
@@ -14,7 +14,7 @@ import { useNotificationStore } from "@/stores/notifications";
 import { conversationsApi } from "@/api/conversations";
 import { teamsApi } from "@/api/teams";
 import { renderMarkdown, renderMarkdownAsync } from "@/utils/markdown";
-import type { Knowledge, WsAdapter } from "@/types";
+import type { Knowledge, Message, RoundtableReply, WsAdapter } from "@/types";
 import type { SendOptions } from "@/components/Composer.vue";
 import type { Profile } from "@/api/agents";
 
@@ -276,6 +276,154 @@ const wsAdapter = computed<WsAdapter>(() => {
     upload: (file) => conversationsApi.upload(cid!, file).then(() => undefined),
   };
 });
+
+// ── Context window ring ──
+const CTX_MAX = 200_000;
+const ctxPct = computed(() => Math.min(1, chat.contextTokens / CTX_MAX));
+const ctxColor = computed(() => ctxPct.value > 0.85 ? "var(--danger)" : ctxPct.value > 0.65 ? "#e6a817" : "var(--ok)");
+const ctxK = computed(() => chat.contextTokens >= 1000 ? `${(chat.contextTokens / 1000).toFixed(0)}k` : `${chat.contextTokens}`);
+
+// ── Session export ──
+const showExport = ref(false);
+function download(blob: Blob, name: string) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+function exportMd() {
+  const title = activeConvo.value?.title || "conversation";
+  const md_content = chat.messages.map((m) => {
+    const who = m.role === "user" ? "**用户**" : `**${primaryProfile.value?.name || "Hermes"}**`;
+    return `${who}\n\n${m.content.text || ""}`;
+  }).join("\n\n---\n\n");
+  download(new Blob([md_content], { type: "text/markdown" }), `${title}.md`);
+  showExport.value = false;
+}
+function exportJson() {
+  const title = activeConvo.value?.title || "conversation";
+  download(new Blob([JSON.stringify(chat.messages, null, 2)], { type: "application/json" }), `${title}.json`);
+  showExport.value = false;
+}
+
+// ── Conversation fork ──
+async function forkFrom(msgId: string) {
+  if (!chat.activeId) return;
+  try {
+    const forked = await conversationsApi.fork(chat.activeId, msgId);
+    await chat.loadConversations();
+    router.push({ query: { c: forked.id } });
+  } catch {
+    ns.toast("分叉失败", "error");
+  }
+}
+
+// ── File diff colorizer ──
+function colorDiff(text: string): string {
+  return text.split("\n").map((line) => {
+    if (line.startsWith("+") && !line.startsWith("+++")) return `<span class="diff-add">${line}</span>`;
+    if (line.startsWith("-") && !line.startsWith("---")) return `<span class="diff-del">${line}</span>`;
+    return `<span>${line}</span>`;
+  }).join("\n");
+}
+
+// ── Smart follow-up suggestion chips ──
+function getFollowupChips(text: string): string[] {
+  if (/```[\s\S]*```/.test(text))
+    return ["解释这段代码", "如何测试这段代码？", "有没有优化空间？"];
+  if (/^\s*\d+\.|^[-*]\s/m.test(text))
+    return ["展开第一点，详细说明", "比较这几个方案的优劣", "哪个方案最推荐，为什么？"];
+  if (/error|错误|fail|失败|exception|bug/i.test(text))
+    return ["如何具体修复这个问题？", "能给一个完整的修复示例吗？", "根本原因是什么？"];
+  if (/步骤|第.{1,3}步|how to|如何|怎么/i.test(text))
+    return ["从第一步开始，逐步引导我", "有没有更简单的方法？", "给出完整的可运行代码"];
+  return ["继续深入分析", "给一个具体的实际例子", "用要点列表总结一下"];
+}
+
+async function sendFollowup(text: string) {
+  draft.value = text;
+  await onSend();
+}
+
+// ── Agent working phase display ──
+function getAgentPhase(msg: Message): string | null {
+  if (msg.status !== "streaming") return null;
+  const hasText = (msg.content.text?.length ?? 0) > 0;
+  if (hasText) return null;
+  const runningStep = (msg.steps || []).find(s => s.status === "running" || s.status === "started");
+  if (runningStep) return `🔧 ${runningStep.title}`;
+  if (msg.thinking && !hasText) return "💭 推理中…";
+  return "🧠 分析问题…";
+}
+
+// ── Quote reply ──
+function quoteReply(text: string) {
+  const lines = text.trim().split("\n").slice(0, 3).join("\n");
+  const truncated = lines.length > 120 ? lines.slice(0, 120) + "…" : lines;
+  draft.value = `> ${truncated.replace(/\n/g, "\n> ")}\n\n`;
+  nextTick(() => (document.querySelector(".dock .composer-input") as HTMLTextAreaElement)?.focus());
+}
+
+// ── Regenerate ──
+async function regenerate(agentMsgId: string) {
+  const agentIdx = chat.messages.findIndex(m => m.id === agentMsgId);
+  if (agentIdx <= 0) return;
+  const userMsg = [...chat.messages].slice(0, agentIdx).reverse().find(m => m.role === "user");
+  if (!userMsg || !userMsg.content.text) return;
+  draft.value = userMsg.content.text;
+  await onSend();
+}
+
+// ── Roundtable progress ──
+function rtProgress(replies: RoundtableReply[]): number[] {
+  const lengths = replies.map(r => r.text.length);
+  const max = Math.max(...lengths, 1);
+  return lengths.map(l => Math.min(100, Math.round((l / max) * 100)));
+}
+
+// ── Global keyboard shortcut (⌘F → search) ──
+const showSearch = ref(false);
+const searchQuery = ref("");
+const searchMatchIndex = ref(0);
+
+const searchMatchIndices = computed(() => {
+  if (!searchQuery.value.trim()) return [];
+  const q = searchQuery.value.toLowerCase();
+  return chat.messages
+    .map((m, i) => ({ i, text: (m.content.text || "").toLowerCase() }))
+    .filter(({ text }) => text.includes(q))
+    .map(({ i }) => i);
+});
+
+function mdSearch(text: string): string {
+  const html = md(text);
+  if (!searchQuery.value.trim()) return html;
+  const q = searchQuery.value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return html.replace(new RegExp(`(${q})`, "gi"), "<mark>$1</mark>");
+}
+
+function searchNext() {
+  if (!searchMatchIndices.value.length) return;
+  searchMatchIndex.value = (searchMatchIndex.value + 1) % searchMatchIndices.value.length;
+  virtualizer.value.scrollToIndex(searchMatchIndices.value[searchMatchIndex.value], { align: "center" });
+}
+function searchPrev() {
+  if (!searchMatchIndices.value.length) return;
+  searchMatchIndex.value = (searchMatchIndex.value - 1 + searchMatchIndices.value.length) % searchMatchIndices.value.length;
+  virtualizer.value.scrollToIndex(searchMatchIndices.value[searchMatchIndex.value], { align: "center" });
+}
+
+function onGlobalKey(e: KeyboardEvent) {
+  if ((e.metaKey || e.ctrlKey) && e.key === "f" && chat.activeId) {
+    e.preventDefault();
+    showSearch.value = true;
+    nextTick(() => (document.querySelector(".msg-search-input") as HTMLInputElement)?.focus());
+  }
+  if (e.key === "Escape" && showSearch.value) { showSearch.value = false; searchQuery.value = ""; }
+}
+onMounted(() => window.addEventListener("keydown", onGlobalKey));
+onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
 </script>
 
 <template>
@@ -322,12 +470,50 @@ const wsAdapter = computed<WsAdapter>(() => {
                 </div>
               </div>
             </div>
+            <div v-if="chat.contextTokens > 0" class="ctx-ring-wrap" :title="`${chat.contextTokens.toLocaleString()} tokens used`">
+              <svg class="ctx-ring" viewBox="0 0 32 32">
+                <circle cx="16" cy="16" r="12" fill="none" stroke="var(--rule)" stroke-width="3"/>
+                <circle cx="16" cy="16" r="12" fill="none" :stroke="ctxColor" stroke-width="3"
+                  stroke-linecap="round" :stroke-dasharray="`${ctxPct * 75.4} 75.4`"
+                  stroke-dashoffset="18.85" transform="rotate(-90 16 16)"/>
+              </svg>
+              <span class="ctx-label">{{ ctxK }}</span>
+            </div>
+            <button class="thread-action" v-if="chat.messages.length" @click="showSearch = !showSearch" style="flex-shrink:0;margin-top:2px;" title="搜索消息 ⌘F">
+              <Icon name="search" />
+            </button>
             <button class="thread-action" v-if="chat.files.length" @click="showWorkspace = !showWorkspace" style="flex-shrink:0;margin-top:2px;">
               <Icon name="folder" /> 工作区 ({{ chat.files.length }})
             </button>
             <button class="thread-action" v-if="chat.messages.length >= 2" @click="showExtractModal = true" style="flex-shrink:0;margin-top:2px;" title="从对话内容自动创建项目与任务">
               <Icon name="sparkle" /> 智能创建
             </button>
+            <div v-if="chat.messages.length >= 2" style="position:relative;flex-shrink:0;margin-top:2px;">
+              <button class="thread-action" @click="showExport = !showExport"><Icon name="download" /> 导出</button>
+              <div v-if="showExport" class="export-menu" @mouseleave="showExport = false">
+                <button class="menu-item" @click="exportMd()">Markdown</button>
+                <button class="menu-item" @click="exportJson()">JSON</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Message search bar -->
+          <div v-if="showSearch" class="msg-search-bar">
+            <Icon name="search" :size="13" />
+            <input
+              class="msg-search-input"
+              v-model="searchQuery"
+              placeholder="搜索消息… (Enter 下一个)"
+              @keydown.enter="searchNext"
+              @keydown.escape="showSearch = false; searchQuery = ''"
+              autofocus
+            />
+            <span class="search-count" v-if="searchQuery">
+              {{ searchMatchIndices.length ? `${searchMatchIndex + 1} / ${searchMatchIndices.length}` : "无结果" }}
+            </span>
+            <button class="search-nav" @click="searchPrev" title="上一个"><Icon name="chevron_up" :size="11" /></button>
+            <button class="search-nav" @click="searchNext" title="下一个"><Icon name="chevron_down" :size="11" /></button>
+            <button class="search-close" @click="showSearch = false; searchQuery = ''"><Icon name="close" :size="11" /></button>
           </div>
 
           <!-- messages (virtual scroll) -->
@@ -355,6 +541,10 @@ const wsAdapter = computed<WsAdapter>(() => {
                   <span class="rt-avatar" :style="{ background: profileDisplay(profileByAgentId(r.agent_id)).color }"><Icon :name="profileDisplay(profileByAgentId(r.agent_id)).icon" :size="11" /></span>
                   <span class="rt-name">{{ profileDisplay(profileByAgentId(r.agent_id)).label }}</span>
                   <span class="rt-stance">— {{ profileDisplay(profileByAgentId(r.agent_id)).description }}</span>
+                  <span class="rt-status" :class="r.status">{{ r.status === 'streaming' ? '生成中' : '完成' }}</span>
+                </div>
+                <div v-if="chat.messages[row.index].status === 'streaming'" class="rt-progress-wrap">
+                  <div class="rt-progress-bar" :style="{ width: rtProgress(chat.messages[row.index].content.replies || [])[idx] + '%' }" :class="{ done: r.status === 'complete' }"></div>
                 </div>
                 <div class="rt-card-body">
                   <span v-if="r.status === 'streaming' && !r.text" class="typing"><span></span><span></span><span></span></span>
@@ -389,6 +579,20 @@ const wsAdapter = computed<WsAdapter>(() => {
                 <div v-if="chat.messages[row.index].role === 'agent'" class="msg-name">
                   {{ profileDisplay(profileByAgentId(chat.messages[row.index].agent_id || 'hermes')).label }}
                 </div>
+                <details v-if="chat.messages[row.index].thinking" class="msg-think" :open="chat.messages[row.index].status === 'streaming'">
+                  <summary class="think-summary">
+                    <span v-if="chat.messages[row.index].status === 'streaming'" class="think-pulse"></span>
+                    💭 思考过程
+                  </summary>
+                  <div class="think-body">{{ chat.messages[row.index].thinking }}</div>
+                </details>
+                <div v-if="chat.messages[row.index].plan?.length" class="msg-plan">
+                  <div class="plan-title">📋 执行计划</div>
+                  <div v-for="(e, i) in chat.messages[row.index].plan" :key="i" class="plan-item" :class="e.status">
+                    <span class="plan-icon">{{ e.status === 'completed' ? '✓' : e.status === 'in_progress' ? '►' : '○' }}</span>
+                    <span class="plan-text">{{ e.content }}</span>
+                  </div>
+                </div>
                 <details v-if="chat.messages[row.index].steps?.length" class="msg-steps" style="margin-bottom:6px">
                   <summary style="font-size:11.5px;color:var(--ink-mute);cursor:pointer;list-style:none">
                     <Icon name="bolt" :size="11" /> 执行了 {{ chat.messages[row.index].steps!.length }} 步
@@ -398,8 +602,14 @@ const wsAdapter = computed<WsAdapter>(() => {
                   </div>
                 </details>
                 <div class="msg-bubble">
-                  <span v-if="chat.messages[row.index].status === 'streaming' && !chat.messages[row.index].content.text" class="typing"><span></span><span></span><span></span></span>
-                  <div v-else-if="chat.messages[row.index].role === 'agent'" class="md-body" v-html="md(chat.messages[row.index].content.text)" />
+                  <template v-if="chat.messages[row.index].status === 'streaming' && !chat.messages[row.index].content.text">
+                    <div v-if="getAgentPhase(chat.messages[row.index])" class="agent-phase">
+                      <span class="phase-dot"></span>
+                      <span class="phase-text">{{ getAgentPhase(chat.messages[row.index]) }}</span>
+                    </div>
+                    <span v-else class="typing"><span></span><span></span><span></span></span>
+                  </template>
+                  <div v-else-if="chat.messages[row.index].role === 'agent'" class="md-body" v-html="mdSearch(chat.messages[row.index].content.text)" />
                   <template v-else>
                     {{ chat.messages[row.index].content.text }}
                     <div v-if="chat.messages[row.index].content.files?.length" class="msg-files">
@@ -409,13 +619,32 @@ const wsAdapter = computed<WsAdapter>(() => {
                     </div>
                   </template>
                 </div>
+                <div v-if="chat.messages[row.index].role === 'agent' && chat.messages[row.index].content.files?.length" class="msg-files" style="margin-top:6px">
+                  <div v-for="f in chat.messages[row.index].content.files" :key="f.id" class="msg-file-chip-wrap">
+                    <button class="msg-file-chip" @click="openFile(f.id)">
+                      <Icon name="paperclip" :size="11" /> {{ f.name }}
+                    </button>
+                    <details v-if="f.diff" class="file-diff">
+                      <summary style="font-size:10.5px;cursor:pointer;color:var(--ink-mute)">查看改动</summary>
+                      <pre class="diff-body" v-html="colorDiff(f.diff)"></pre>
+                    </details>
+                  </div>
+                </div>
                 <div v-if="chat.messages[row.index].role === 'agent' && chat.messages[row.index].status !== 'streaming'" class="msg-tools">
                   <button title="复制" @click="copyMessage(chat.messages[row.index].content.text)"><Icon name="copy" :size="12" /></button>
-                  <button title="重新生成"><Icon name="refresh" :size="12" /></button>
+                  <button title="重新生成" @click="regenerate(chat.messages[row.index].id)"><Icon name="refresh" :size="12" /></button>
+                  <button title="引用回复" @click="quoteReply(chat.messages[row.index].content.text)"><Icon name="quote" :size="12" /></button>
                   <button title="点赞"><Icon name="thumbs_up" :size="12" /></button>
                   <button title="分享" @click="shareMessage(chat.messages[row.index].conversation_id)"><Icon name="share" :size="12" /></button>
                 </div>
+                <!-- Smart follow-up suggestion chips -->
+                <div v-if="chat.messages[row.index].role === 'agent' && chat.messages[row.index].status !== 'streaming' && chat.messages[row.index].content.text" class="followup-chips">
+                  <button v-for="chip in getFollowupChips(chat.messages[row.index].content.text)" :key="chip" class="followup-chip" @click="sendFollowup(chip)">{{ chip }}</button>
+                </div>
                 <div class="msg-time">{{ fmtTime(chat.messages[row.index].created_at) }}</div>
+                <div v-if="chat.messages[row.index].role === 'user'" class="msg-fork-btn" @click="forkFrom(chat.messages[row.index].id)" title="从这里分叉对话">
+                  ⎇ 分叉
+                </div>
               </div>
               <div v-if="chat.messages[row.index].role === 'user'" class="msg-avatar"><Icon name="user" :size="14" /></div>
             </div>

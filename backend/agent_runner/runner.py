@@ -468,6 +468,42 @@ class Runner:
                     await self._handle_clarify_tool_call(
                         conversation_id, acc["current_msg_id"], acc
                     )
+            elif kind == "agent_thought":
+                delta = (update.get("content") or {}).get("text", "") or update.get("delta", "")
+                if delta:
+                    await R.publish_event(conversation_id, {
+                        "type": "thought",
+                        "message_id": acc["current_msg_id"],
+                        "delta": delta,
+                    })
+            elif kind == "plan":
+                raw = update.get("entries") or update.get("plan") or []
+                if isinstance(raw, list) and raw:
+                    await R.publish_event(conversation_id, {
+                        "type": "plan",
+                        "message_id": acc["current_msg_id"],
+                        "entries": [
+                            {
+                                "content": e.get("content", ""),
+                                "status": e.get("status", "pending"),
+                                "priority": e.get("priority", 0),
+                            }
+                            for e in raw if isinstance(e, dict)
+                        ],
+                    })
+            elif kind == "usage":
+                await R.publish_event(conversation_id, {
+                    "type": "usage",
+                    "message_id": acc["current_msg_id"],
+                    "input_tokens": update.get("input_tokens", 0),
+                    "output_tokens": update.get("output_tokens", 0),
+                })
+                acc["total_tokens"] = update.get("input_tokens", 0) + update.get("output_tokens", 0)
+            elif kind == "session_info":
+                new_title = update.get("title")
+                if new_title:
+                    asyncio.ensure_future(self._update_conv_title(conversation_id, new_title))
+                    await R.publish_event(conversation_id, {"type": "session_info", "title": new_title})
             elif kind == "confirmation_request":
                 # Agent natively sent a confirmation_request via session/update.
                 # Send SSE to frontend and wait for user response via background task.
@@ -500,9 +536,19 @@ class Runner:
                     pass
 
         async def on_fs_write(path: str, content: str) -> None:
+            import difflib
+            old_content = await storage.get_existing_content(uuid.UUID(conversation_id), path)
             f = await storage.save_file(
                 uuid.UUID(conversation_id), path, content, agent_id
             )
+            diff: str | None = None
+            if old_content is not None:
+                diff_lines = list(difflib.unified_diff(
+                    old_content.splitlines(keepends=True), content.splitlines(keepends=True),
+                    fromfile=f"a/{path}", tofile=f"b/{path}", n=3,
+                ))
+                if diff_lines:
+                    diff = "".join(diff_lines[:80])
             await R.publish_event(
                 conversation_id,
                 {
@@ -512,6 +558,7 @@ class Runner:
                     "name": f.name,
                     "kind": f.kind,
                     "version": f.current_version,
+                    "diff": diff,
                 },
             )
 
@@ -890,6 +937,16 @@ class Runner:
             if convo:
                 convo.acp_session_id = session_id
                 await db.commit()
+
+    async def _update_conv_title(self, conversation_id: str, title: str) -> None:
+        from sqlalchemy import update as sa_upd
+        async with async_session_maker() as db:
+            await db.execute(
+                sa_upd(Conversation)
+                .where(Conversation.id == uuid.UUID(conversation_id))
+                .values(title=title)
+            )
+            await db.commit()
 
     async def _fail(self, conversation_id: str, message_id: str, detail: str) -> None:
         await self._finalize(message_id, f"⚠ 生成失败：{detail}", "error")

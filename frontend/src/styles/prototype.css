@@ -3387,3 +3387,103 @@ body[data-atmos="cinnabar"] {
 
   /* Cancel streaming button */
   .send-btn.cancel { background: var(--danger, #c0392b) !important; color: #fff !important; opacity: 1 !important; }
+
+  /* ── Thinking / reasoning blocks ── */
+  .msg-think { margin-bottom: 8px; }
+  .think-summary { font-size: 12px; color: var(--ink-mute); cursor: pointer; list-style: none;
+                   display: flex; align-items: center; gap: 6px; }
+  .think-summary::-webkit-details-marker { display: none; }
+  .think-pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+                 animation: think-pulse 1s infinite; flex-shrink: 0; }
+  @keyframes think-pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+  .think-body { font-size: 12px; color: var(--ink-mute); font-style: italic;
+                border-left: 2px solid var(--accent-soft, #e8d5a0); padding: 4px 10px; margin-top: 4px;
+                white-space: pre-wrap; max-height: 220px; overflow-y: auto; }
+
+  /* ── Agent task plan board ── */
+  .msg-plan { margin-bottom: 8px; background: var(--bg-inset, var(--bg-hover)); border-radius: 8px; padding: 8px 12px; }
+  .plan-title { font-size: 11.5px; color: var(--ink-mute); font-weight: 600; margin-bottom: 5px; }
+  .plan-item { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 2px 0; }
+  .plan-item.completed .plan-text { text-decoration: line-through; color: var(--ink-faint); }
+  .plan-item.in_progress { color: var(--accent); font-weight: 500; }
+  .plan-icon { width: 14px; text-align: center; flex-shrink: 0; font-size: 11px; }
+
+  /* ── Inline file diff cards ── */
+  .msg-file-chip-wrap { display: flex; flex-direction: column; margin-bottom: 4px; }
+  .file-diff { margin-top: 3px; }
+  .diff-body { font-size: 10.5px; font-family: monospace; max-height: 200px; overflow: auto;
+               background: var(--bg-inset, var(--bg-hover)); border-radius: 4px; padding: 4px 8px;
+               white-space: pre; line-height: 1.4; margin: 0; }
+  .diff-body .diff-add { color: #2d7a3a; }
+  .diff-body .diff-del { color: #c0392b; }
+
+  /* ── Conversation fork button ── */
+  .msg-fork-btn { font-size: 10.5px; color: var(--ink-faint); cursor: pointer; white-space: nowrap;
+                  display: flex; align-items: center; gap: 3px; margin-top: 3px;
+                  opacity: 0; transition: opacity 0.15s; }
+  .msg:hover .msg-fork-btn { opacity: 1; }
+
+  /* ── Context window ring ── */
+  .ctx-ring-wrap { display: flex; align-items: center; gap: 4px; cursor: default; flex-shrink: 0; margin-top: 2px; }
+  .ctx-ring { width: 24px; height: 24px; }
+  .ctx-label { font-size: 10px; color: var(--ink-mute); }
+
+  /* ── Export menu ── */
+  .export-menu { position: absolute; top: 100%; right: 0; background: var(--bg-panel); border: 1px solid var(--rule);
+                 border-radius: 8px; z-index: 50; min-width: 100px; box-shadow: var(--shadow-lg); }
+  .export-menu .menu-item { display: block; width: 100%; text-align: left; padding: 8px 14px;
+                             font-size: 13px; color: var(--ink); background: none; border: none;
+                             cursor: pointer; }
+  .export-menu .menu-item:hover { background: var(--bg-hover); }
+
+
+  /* ── Smart follow-up suggestion chips ── */
+  .followup-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .followup-chip { font-size: 12px; color: var(--accent-deep, #7a5a1a); background: rgba(184,133,42,0.1);
+                   border: 1px solid rgba(184,133,42,0.25); border-radius: 20px;
+                   padding: 4px 12px; cursor: pointer; transition: all 0.15s; white-space: nowrap; }
+  .followup-chip:hover { background: rgba(184,133,42,0.2); transform: translateY(-1px);
+                          box-shadow: 0 2px 6px rgba(184,133,42,0.15); }
+
+  /* ── Agent working phase display ── */
+  .agent-phase { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+  .phase-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+               animation: think-pulse 0.8s infinite; flex-shrink: 0; }
+  .phase-text { font-size: 13px; color: var(--ink-mute); font-style: italic;
+                animation: phase-fade-in 0.3s ease; }
+  @keyframes phase-fade-in { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
+
+  /* ── Sidebar live streaming indicator ── */
+  .convo-live-ring { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+                     background: var(--ok, #2d7a3a); animation: convo-pulse 1s infinite;
+                     flex-shrink: 0; }
+  @keyframes convo-pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.5;transform:scale(0.85)} }
+  .convo-live-label { font-size: 9.5px; color: var(--ok, #2d7a3a); margin-left: auto;
+                      font-weight: 600; flex-shrink: 0; animation: convo-pulse 1s infinite; }
+
+  /* ── Roundtable per-agent progress bars ── */
+  .rt-status { margin-left: auto; font-size: 10.5px; border-radius: 10px; padding: 2px 7px; font-weight: 600; flex-shrink: 0; }
+  .rt-status.streaming { color: var(--accent); background: rgba(184,133,42,0.12);
+                          animation: think-pulse 1s infinite; }
+  .rt-status.complete { color: var(--ok, #2d7a3a); background: rgba(45,122,58,0.12); }
+  .rt-progress-wrap { height: 3px; background: var(--rule); border-radius: 2px; margin: 4px 0 6px; overflow: hidden; }
+  .rt-progress-bar { height: 100%; background: var(--accent); border-radius: 2px;
+                     transition: width 0.3s ease; min-width: 4px; }
+  .rt-progress-bar.done { background: var(--ok, #2d7a3a); }
+
+  /* ── Message search bar ── */
+  .msg-search-bar { display: flex; align-items: center; gap: 8px; padding: 8px 14px;
+                    background: var(--bg-inset, var(--bg-hover)); border-radius: 10px;
+                    margin-bottom: 12px; border: 1px solid var(--rule); }
+  .msg-search-input { flex: 1; min-width: 0; background: none; border: none; outline: none;
+                       font-size: 13px; color: var(--ink); }
+  .search-count { font-size: 11.5px; color: var(--ink-mute); flex-shrink: 0; white-space: nowrap; }
+  .search-nav { background: none; border: none; cursor: pointer; color: var(--ink-mute);
+                padding: 2px 5px; border-radius: 4px; }
+  .search-nav:hover { background: var(--bg-hover); color: var(--ink); }
+  .search-close { background: none; border: none; cursor: pointer; color: var(--ink-faint);
+                   padding: 2px 5px; border-radius: 4px; }
+  .search-close:hover { color: var(--ink); }
+
+  /* ── Search highlight marks ── */
+  mark { background: rgba(184,133,42,0.35); color: inherit; border-radius: 2px; padding: 0 1px; }

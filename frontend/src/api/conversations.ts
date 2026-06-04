@@ -97,4 +97,7 @@ export const conversationsApi = {
   async getMessages(id: string, params?: { limit?: number; before?: string }): Promise<Message[]> {
     return (await http.get<Message[]>(`/conversations/${id}/messages`, { params: params || {} })).data;
   },
+  async fork(id: string, beforeMessageId: string): Promise<ConversationDetail> {
+    return (await http.post<ConversationDetail>(`/conversations/${id}/fork?before_message_id=${beforeMessageId}`)).data;
+  },
 };

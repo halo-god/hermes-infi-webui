@@ -410,6 +410,45 @@ async def delete_conversation(db: AsyncSession, convo: Conversation) -> None:
     await db.commit()
 
 
+async def fork_conversation(
+    db: AsyncSession,
+    source_id: uuid.UUID,
+    owner_id: uuid.UUID,
+    before_message_id: uuid.UUID,
+) -> tuple[Conversation, list[Message]]:
+    """Deep-copy a conversation up to and including a given message."""
+    source = await get_conversation(db, source_id, owner_id)
+    if not source:
+        raise ValueError("conversation not found")
+    all_msgs = await get_messages(db, source_id)
+    cut = next((i for i, m in enumerate(all_msgs) if m.id == before_message_id), len(all_msgs) - 1)
+    fork = Conversation(
+        owner_id=owner_id,
+        title=f"[分支] {source.title}",
+        primary_agent_id=source.primary_agent_id,
+        profile_id=source.profile_id,
+        team_id=source.team_id,
+        project_id=source.project_id,
+    )
+    db.add(fork)
+    await db.flush()
+    copied_msgs = []
+    for m in all_msgs[: cut + 1]:
+        nm = Message(
+            conversation_id=fork.id,
+            owner_id=m.owner_id,
+            role=m.role,
+            agent_id=m.agent_id,
+            content=m.content,
+            status=m.status,
+        )
+        db.add(nm)
+        copied_msgs.append(nm)
+    await db.commit()
+    await db.refresh(fork)
+    return fork, copied_msgs
+
+
 async def update_file_content(
     db: AsyncSession, f: WorkspaceFile, content: str, author: str | None = None
 ) -> WorkspaceFile:

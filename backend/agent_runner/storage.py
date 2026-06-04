@@ -130,3 +130,19 @@ async def read_content(file: WorkspaceFile) -> str:
         data = await asyncio.to_thread(object_storage.get, file.storage_key)
         return data.decode("utf-8", "ignore")
     return ""
+
+
+async def get_existing_content(conversation_id: uuid.UUID, path: str) -> str | None:
+    """Return current content of an existing workspace file, or None."""
+    name = path.lstrip("./").lstrip("/") or "untitled.txt"
+    async with async_session_maker() as db:
+        res = await db.execute(
+            select(WorkspaceFile).where(
+                WorkspaceFile.conversation_id == conversation_id,
+                WorkspaceFile.name == name,
+            )
+        )
+        f = res.scalar_one_or_none()
+        if f is None:
+            return None
+        return await read_content(f)

@@ -168,7 +168,10 @@ async function shareConvo(id: string) {
           @click="openConvo(c.id)"
           @contextmenu="onCtxMenu($event, c.id)"
         >
-          <div class="convo-ico"><Icon :name="c.icon || 'chat'" /></div>
+          <div class="convo-ico">
+            <span v-if="c.id === chat.streamingConvoId" class="convo-live-ring"></span>
+            <Icon v-else :name="c.icon || 'chat'" />
+          </div>
           <template v-if="renamingId === c.id">
             <input
               v-model="renameVal"
@@ -182,7 +185,8 @@ async function shareConvo(id: string) {
           <template v-else>
             <div class="convo-title">{{ c.title }}</div>
           </template>
-          <Icon v-if="c.pinned" name="pin" style="width: 11px; height: 11px; color: var(--accent-deep); flex-shrink: 0" />
+          <span v-if="c.id === chat.streamingConvoId" class="convo-live-label">生成中</span>
+          <Icon v-else-if="c.pinned" name="pin" style="width: 11px; height: 11px; color: var(--accent-deep); flex-shrink: 0" />
         </div>
       </div>
 

@@ -22,6 +22,7 @@ export const useChatStore = defineStore("chat", () => {
   const streamingConvoId = ref<string | null>(null);
   const streaming = computed(() => streamingConvoId.value !== null);
   const loading = ref(false);
+  const contextTokens = ref(0);
   const pendingConfirmations = ref<ConfirmationRequest[]>([]);
   const hasMoreMessages = ref(true);
   const loadingOlder = ref(false);
@@ -66,6 +67,7 @@ export const useChatStore = defineStore("chat", () => {
     activeId.value = id;
     loading.value = true;
     hasMoreMessages.value = true;
+    contextTokens.value = 0;
     try {
       const detail = await conversationsApi.get(id);
       // Map content.tool_calls to steps for persisted messages
@@ -247,7 +249,38 @@ export const useChatStore = defineStore("chat", () => {
       }
     });
 
-    stream.on("file", () => {
+    stream.on("thought", (ev) => {
+      const m = find(ev.message_id);
+      if (m) m.thinking = (m.thinking || "") + ev.delta;
+    });
+
+    stream.on("plan", (ev) => {
+      const m = find(ev.message_id);
+      if (m) m.plan = ev.entries;
+    });
+
+    stream.on("usage", (ev) => {
+      const m = find(ev.message_id);
+      if (m) m.usage = { input_tokens: ev.input_tokens, output_tokens: ev.output_tokens };
+      contextTokens.value = ev.input_tokens + ev.output_tokens;
+    });
+
+    stream.on("session_info", (ev) => {
+      if (ev.title) {
+        const c = conversations.value.find((c) => c.id === activeId.value);
+        if (c && c.title === "新会话") c.title = ev.title;
+      }
+    });
+
+    stream.on("file", (ev) => {
+      const m = find(ev.message_id);
+      if (m) {
+        if (!m.content.files) m.content = { ...m.content, files: [] };
+        const existing = m.content.files!.find((f) => f.id === ev.file_id);
+        if (!existing) {
+          m.content.files!.push({ id: ev.file_id, name: ev.name, kind: ev.kind, diff: ev.diff });
+        }
+      }
       if (activeId.value) {
         conversationsApi.files(activeId.value).then((f) => (files.value = f)).catch(() => {});
       }
@@ -409,6 +442,8 @@ export const useChatStore = defineStore("chat", () => {
     pendingConfirmations,
     hasMoreMessages,
     loadingOlder,
+    contextTokens,
+    streamingConvoId,
     // Stream state (read-only exposure)
     streamConnected: stream.connected,
     streamError: stream.error,

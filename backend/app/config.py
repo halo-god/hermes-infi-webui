@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     # Streaming hot-path: coalesce tokens for at most N ms (0 = emit immediately).
     stream_coalesce_ms: int = 0
 
+    # ── Feature flags ──
+    feature_followup_chips: bool = False  # show smart follow-up suggestion chips after agent replies
+
     # ── Rate limiting ──
     rate_limit_per_min: int = 30  # per-user message sends / minute (default)
 
