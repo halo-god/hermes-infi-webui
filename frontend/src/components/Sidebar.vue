@@ -7,7 +7,6 @@ import { useI18n } from "vue-i18n";
 import Icon from "@/components/Icon.vue";
 import ConfirmModal from "@/components/ConfirmModal.vue";
 import NewTeamModal from "@/components/NewTeamModal.vue";
-import NewConversationModal from "@/components/NewConversationModal.vue";
 import { useAuthStore } from "@/stores/auth";
 import { useChatStore } from "@/stores/chat";
 import { useNotificationStore } from "@/stores/notifications";
@@ -22,7 +21,6 @@ const route = useRoute();
 const { theme, toggleTheme } = useTheme();
 const { t } = useI18n();
 const showNewTeam = ref(false);
-const showNewConvo = ref(false);
 
 const isAdmin = computed(() => auth.user?.role === "super_admin" || auth.user?.role === "admin");
 const onChat = computed(() => route.name === "home");
@@ -34,12 +32,12 @@ const renameVal = ref("");
 const deleteTarget = ref<{ id: string; title: string } | null>(null);
 
 async function newChat() {
-  showNewConvo.value = true;
-}
-async function onNewConvoCreated(profileId: string) {
-  showNewConvo.value = false;
-  await chat.newConversationWithProfile(profileId);
-  if (!onChat.value) router.push("/");
+  // Skip modal, use first active profile directly
+  const p = chat.profiles.find((pp) => pp.is_active);
+  if (p) {
+    await chat.newConversationWithProfile(p.id);
+    if (!onChat.value) router.push("/");
+  }
 }
 async function openConvo(id: string) {
   await chat.openConversation(id);
@@ -244,7 +242,6 @@ async function shareConvo(id: string) {
   />
 
   <NewTeamModal v-if="showNewTeam" @close="showNewTeam = false" @created="onTeamCreated" />
-  <NewConversationModal v-if="showNewConvo" @close="showNewConvo = false" @created="onNewConvoCreated" />
 </template>
 
 <style scoped>
