@@ -106,6 +106,7 @@ const greeting = computed(() => {
 });
 
 const landingProfile = computed(() => chat.profiles.find((p) => p.id === landingProfileId.value) || chat.profiles.find((p) => p.is_active) || null);
+const featuredProfiles = computed(() => chat.profiles.filter((p) => p.featured && p.is_active).slice(0, 4));
 const activeConvo = computed(() => chat.conversations.find((c) => c.id === chat.activeId));
 const primaryProfile = computed(() => {
   const aid = activeConvo.value?.primary_agent_id;
@@ -306,6 +307,10 @@ function followUp(agentId: string) {
   // Find profile by agent ID and set as landing
   const profile = profileByAgentId(agentId);
   if (profile) landingProfileId.value = profile.id;
+  (document.querySelector(".dock .composer-input") as HTMLTextAreaElement)?.focus();
+}
+async function startWithProfile(profile: Profile) {
+  landingProfileId.value = profile.id;
   (document.querySelector(".dock .composer-input") as HTMLTextAreaElement)?.focus();
 }
 
@@ -528,6 +533,25 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
       <div class="landing-inner">
         <h1 class="hello" v-html="greeting.main"></h1>
         <div class="hello-sub">{{ greeting.sub }}</div>
+
+        <!-- Featured profiles -->
+        <div v-if="featuredProfiles.length" class="featured-profiles">
+          <button
+            v-for="fp in featuredProfiles"
+            :key="fp.id"
+            class="featured-card"
+            :class="{ active: landingProfileId === fp.id }"
+            @click="startWithProfile(fp)"
+          >
+            <div class="featured-card-icon" :style="{ background: fp.color || '#b8852a' }">
+              <Icon :name="fp.icon || 'sparkle'" :size="16" />
+            </div>
+            <div class="featured-card-body">
+              <div class="featured-card-name">{{ fp.name }}</div>
+              <div class="featured-card-desc">{{ fp.desc || fp.skills?.join(' · ') || '' }}</div>
+            </div>
+          </button>
+        </div>
 
         <Composer
           v-model="draft"

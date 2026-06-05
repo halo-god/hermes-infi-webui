@@ -42,3 +42,6 @@ class Profile(UUIDPrimaryKey, Timestamps, Base):
     team_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    skills: Mapped[str | None] = mapped_column(Text, nullable=True)   # JSON array e.g. '["coding","analysis"]'
+    featured: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

@@ -14,6 +14,9 @@ export interface Profile {
   team_id: string | null;
   is_active: boolean;
   path: string | null;
+  system_prompt?: string | null;
+  skills?: string[];
+  featured?: boolean;
 }
 
 export interface ScanResult {
@@ -36,6 +39,9 @@ export interface ProfileCreate {
   default_agent_id?: string;
   default_model?: string;
   team_id?: string | null;
+  system_prompt?: string | null;
+  skills?: string[];
+  featured?: boolean;
 }
 
 export interface ProfileUpdate {
@@ -49,6 +55,9 @@ export interface ProfileUpdate {
   default_model?: string;
   team_id?: string | null;
   is_active?: boolean;
+  system_prompt?: string | null;
+  skills?: string[];
+  featured?: boolean;
 }
 
 export const agentsApi = {

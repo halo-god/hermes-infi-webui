@@ -13,7 +13,14 @@ from app.db.base import get_db
 from app.db.models.agent import Agent, Profile
 from app.db.models.user import User
 from app.deps import get_current_user
-from app.schemas.agent import AgentOut, ProfileCreate, ProfileOut, ProfileUpdate, ScanProfilesResponse
+from app.schemas.agent import (
+    AgentOut,
+    ProfileCreate,
+    ProfileExport,
+    ProfileOut,
+    ProfileUpdate,
+    ScanProfilesResponse,
+)
 
 router = APIRouter()
 
@@ -135,6 +142,13 @@ def _require_admin(user: User) -> None:
         raise HTTPException(status_code=403, detail="需要管理员权限")
 
 
+def _serialize_skills(data: dict) -> dict:
+    """Convert skills list → JSON string for DB storage."""
+    if "skills" in data and isinstance(data["skills"], list):
+        data["skills"] = json.dumps(data["skills"], ensure_ascii=False)
+    return data
+
+
 @router.post("/profiles", response_model=ProfileOut, status_code=201)
 async def create_profile(
     payload: ProfileCreate,
@@ -142,7 +156,8 @@ async def create_profile(
     db: AsyncSession = Depends(get_db),
 ):
     _require_admin(user)
-    p = Profile(**payload.model_dump())
+    data = _serialize_skills(payload.model_dump())
+    p = Profile(**data)
     db.add(p)
     await db.commit()
     await db.refresh(p)
@@ -160,7 +175,7 @@ async def update_profile(
     p = await db.get(Profile, profile_id)
     if p is None:
         raise HTTPException(status_code=404, detail="助手不存在")
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    for field, value in _serialize_skills(payload.model_dump(exclude_unset=True)).items():
         setattr(p, field, value)
     await db.commit()
     await db.refresh(p)
@@ -203,23 +218,14 @@ async def clone_profile(
         default_model=p.default_model,
         team_id=p.team_id,
         path=p.path,
+        system_prompt=p.system_prompt,
+        skills=p.skills,
+        featured=False,
     )
     db.add(clone)
     await db.commit()
     await db.refresh(clone)
     return ProfileOut.model_validate(clone)
-
-
-class ProfileExport(BaseModel):
-    """Portable profile export format."""
-    name: str
-    handle: str
-    scope: str
-    color: str
-    icon: str
-    desc: str
-    default_agent_id: str
-    default_model: str
 
 
 @router.get("/profiles/{profile_id}/export", response_model=ProfileExport)
@@ -232,6 +238,12 @@ async def export_profile(
     p = await db.get(Profile, profile_id)
     if p is None:
         raise HTTPException(status_code=404, detail="助手不存在")
+    skills: list[str] = []
+    if p.skills:
+        try:
+            skills = json.loads(p.skills)
+        except (json.JSONDecodeError, ValueError):
+            skills = []
     return ProfileExport(
         name=p.name,
         handle=p.handle,
@@ -241,6 +253,9 @@ async def export_profile(
         desc=p.desc,
         default_agent_id=p.default_agent_id,
         default_model=p.default_model,
+        system_prompt=p.system_prompt,
+        skills=skills,
+        featured=p.featured,
     )
 
 
@@ -273,6 +288,9 @@ async def import_profiles(
             desc=item.desc,
             default_agent_id=item.default_agent_id,
             default_model=item.default_model,
+            system_prompt=item.system_prompt,
+            skills=json.dumps(item.skills, ensure_ascii=False) if item.skills else None,
+            featured=item.featured,
         )
         db.add(p)
         created.append(p)

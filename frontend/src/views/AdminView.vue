@@ -324,7 +324,9 @@ const editingProfileId = ref<string | null>(null);
 const profileForm = reactive<ProfileCreate>({
   name: "", handle: "", scope: "global", color: "#b8852a",
   icon: "sparkle", desc: "", default_model: "hermes-4", team_id: null,
+  system_prompt: null, skills: [], featured: false,
 });
+const skillInput = ref("");
 const profileSaving = ref(false);
 const profileError = ref("");
 const SCOPE_LABEL: Record<string, string> = { personal: "个人", team: "团队", global: "全局" };
@@ -359,7 +361,9 @@ function openCreateProfile() {
   Object.assign(profileForm, {
     name: "", handle: "", scope: "global", color: "#b8852a",
     icon: "sparkle", desc: "", default_model: "hermes-4", team_id: null,
+    system_prompt: null, skills: [], featured: false,
   });
+  skillInput.value = "";
   profileError.value = "";
   showProfileForm.value = true;
 }
@@ -368,9 +372,21 @@ function openEditProfile(p: Profile) {
   Object.assign(profileForm, {
     name: p.name, handle: p.handle, scope: p.scope, color: p.color,
     icon: p.icon, desc: p.desc, default_model: p.default_model, team_id: p.team_id,
+    system_prompt: p.system_prompt ?? null, skills: [...(p.skills || [])], featured: p.featured ?? false,
   });
+  skillInput.value = "";
   profileError.value = "";
   showProfileForm.value = true;
+}
+function addSkill() {
+  const s = skillInput.value.trim();
+  if (s && !profileForm.skills!.includes(s)) {
+    profileForm.skills!.push(s);
+  }
+  skillInput.value = "";
+}
+function removeSkill(s: string) {
+  profileForm.skills = profileForm.skills!.filter((x) => x !== s);
 }
 async function saveProfile() {
   profileSaving.value = true;
@@ -380,7 +396,8 @@ async function saveProfile() {
       await agentsApi.updateProfile(editingProfileId.value, {
         name: profileForm.name, scope: profileForm.scope, color: profileForm.color,
         icon: profileForm.icon, desc: profileForm.desc, default_model: profileForm.default_model,
-        team_id: profileForm.team_id,
+        team_id: profileForm.team_id, system_prompt: profileForm.system_prompt,
+        skills: profileForm.skills, featured: profileForm.featured,
       });
     } else {
       await agentsApi.createProfile({ ...profileForm });
@@ -1062,6 +1079,27 @@ async function handleImportFile(e: Event) {
               </select>
             </label>
           </div>
+          <!-- system_prompt -->
+          <label style="display:block;margin-top:12px;font-size:12.5px;color:var(--ink-mute)">
+            系统提示词 (system prompt)
+            <textarea v-model="profileForm.system_prompt" rows="4" placeholder="留空则使用 agent 默认行为" style="width:100%;margin-top:4px;padding:6px 10px;border:1px solid var(--rule);border-radius:6px;font-size:13px;background:var(--bg-canvas);color:var(--ink);resize:vertical;box-sizing:border-box"></textarea>
+          </label>
+          <!-- skills chips -->
+          <label style="display:block;margin-top:12px;font-size:12.5px;color:var(--ink-mute)">
+            技能标签
+            <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">
+              <span v-for="s in profileForm.skills" :key="s" style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;background:rgba(184,133,42,0.12);color:var(--accent-deep);font-size:12px">
+                {{ s }}
+                <button type="button" style="background:none;border:none;cursor:pointer;padding:0;color:inherit;line-height:1;font-size:12px" @click="removeSkill(s)">&times;</button>
+              </span>
+              <input v-model="skillInput" placeholder="输入技能 + Enter" @keydown.enter.prevent="addSkill" style="padding:2px 8px;border:1px solid var(--rule);border-radius:999px;font-size:12px;background:var(--bg-canvas);color:var(--ink);outline:none;min-width:120px" />
+            </div>
+          </label>
+          <!-- featured toggle -->
+          <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:12.5px;color:var(--ink-mute);cursor:pointer">
+            <input type="checkbox" v-model="profileForm.featured" style="width:14px;height:14px;cursor:pointer" />
+            在首页推荐展示（featured）
+          </label>
           <div v-if="profileError" style="margin-top: 10px; font-size: 12.5px; color: var(--danger)">{{ profileError }}</div>
           <div style="margin-top: 14px; display: flex; gap: 8px">
             <button class="btn primary" :disabled="profileSaving" @click="saveProfile">{{ profileSaving ? "保存中…" : "保存" }}</button>
@@ -1079,8 +1117,15 @@ async function handleImportFile(e: Event) {
               <Icon :name="p.icon || 'sparkle'" />
             </div>
             <div style="flex:1;min-width:0">
-              <div style="font-size:13.5px;font-weight:600;color:var(--ink)">{{ p.name }} <span style="font-size:11.5px;color:var(--ink-mute);font-weight:400">@{{ p.handle }}</span></div>
+              <div style="font-size:13.5px;font-weight:600;color:var(--ink);display:flex;align-items:center;gap:6px">
+                {{ p.name }}
+                <span style="font-size:11.5px;color:var(--ink-mute);font-weight:400">@{{ p.handle }}</span>
+                <span v-if="p.featured" title="首页推荐" style="font-size:13px">&#11088;</span>
+              </div>
               <div style="font-size:12px;color:var(--ink-mute);margin-top:2px">{{ p.desc || "—" }}</div>
+              <div v-if="p.skills && p.skills.length" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">
+                <span v-for="s in p.skills" :key="s" style="padding:1px 6px;border-radius:999px;background:rgba(184,133,42,0.10);color:var(--accent-deep);font-size:11px">{{ s }}</span>
+              </div>
               <div v-if="p.path" style="font-size:10.5px;color:var(--ink-mute);margin-top:2px;font-family:var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:360px" :title="p.path">{{ p.path }}</div>
             </div>
             <span style="font-size:11px;padding:2px 8px;border-radius:999px;background:rgba(29,26,20,0.06);color:var(--ink-mute)">{{ SCOPE_LABEL[p.scope] || p.scope }}</span>

@@ -1,10 +1,11 @@
 """Agent + Profile DTOs."""
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class AgentOut(BaseModel):
@@ -36,6 +37,24 @@ class ProfileOut(BaseModel):
     team_id: uuid.UUID | None = None
     is_active: bool = True
     path: str | None = None
+    system_prompt: str | None = None
+    skills: list[str] = []
+    featured: bool = False
+
+    @field_validator("skills", mode="before")
+    @classmethod
+    def _parse_skills(cls, v: object) -> list[str]:
+        if v is None:
+            return []
+        if isinstance(v, list):
+            return v
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+                return parsed if isinstance(parsed, list) else []
+            except (json.JSONDecodeError, ValueError):
+                return []
+        return []
 
 
 class ProfileCreate(BaseModel):
@@ -48,6 +67,9 @@ class ProfileCreate(BaseModel):
     default_agent_id: str = "hermes"
     default_model: str = "hermes-4"
     team_id: uuid.UUID | None = None
+    system_prompt: str | None = None
+    skills: list[str] = []
+    featured: bool = False
 
 
 class ProfileUpdate(BaseModel):
@@ -62,6 +84,23 @@ class ProfileUpdate(BaseModel):
     team_id: uuid.UUID | None = None
     is_active: bool | None = None
     path: str | None = None
+    system_prompt: str | None = None
+    skills: list[str] | None = None
+    featured: bool | None = None
+
+
+class ProfileExport(BaseModel):
+    name: str
+    handle: str
+    scope: str
+    color: str
+    icon: str
+    desc: str
+    default_agent_id: str
+    default_model: str
+    system_prompt: str | None = None
+    skills: list[str] = []
+    featured: bool = False
 
 
 class ScanProfilesResponse(BaseModel):
