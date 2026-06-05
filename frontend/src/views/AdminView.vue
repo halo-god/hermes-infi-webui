@@ -334,22 +334,18 @@ async function loadProfiles() {
 }
 const scanErrors = ref<string[]>([]);
 const scanHermesPath = ref<string | null>(null);
-const scanHermesHome = ref<string | null>(null);
 
 async function scanAgents() {
   scanLoading.value = true;
   scanMsg.value = "";
   scanErrors.value = [];
   scanHermesPath.value = null;
-  scanHermesHome.value = null;
   try {
-    const result = await agentsApi.scanProfiles();
-    await loadProfiles();
+    const result = await agentsApi.scanAgents();
     hermesVersion.value = result.version !== "unknown" ? result.version : "";
-    scanMsg.value = result.message;
+    scanMsg.value = `发现 ${result.found} 个Agent，新增 ${result.created}，更新 ${result.updated}`;
     scanErrors.value = result.errors || [];
     scanHermesPath.value = result.hermes_path;
-    scanHermesHome.value = result.hermes_home;
   } catch (e: unknown) {
     const detail = (e as { response?: { data?: { detail?: string } } }).response?.data?.detail;
     scanMsg.value = "扫描失败";
@@ -1002,9 +998,6 @@ async function handleImportFile(e: Event) {
             <Icon name="check" :size="14" style="color: var(--ok); flex-shrink: 0" />
             <span style="font-size: 13px; color: var(--ink)">{{ scanMsg }}</span>
             <span v-if="scanHermesPath" style="margin-left: auto; font-size: 11px; color: var(--ink-mute); font-family: var(--font-mono)">{{ scanHermesPath }}</span>
-          </div>
-          <div v-if="scanHermesHome" style="padding: 6px 14px; background: var(--bg-plate); font-size: 11px; color: var(--ink-mute); font-family: var(--font-mono)">
-            profile 目录：{{ scanHermesHome }}
           </div>
           <template v-if="scanErrors.length">
             <div v-for="(e, i) in scanErrors" :key="i" style="padding: 8px 14px; display: flex; gap: 8px; align-items: flex-start; border-top: 1px solid var(--rule-soft); background: var(--bg-canvas)">

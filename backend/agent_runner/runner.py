@@ -424,6 +424,13 @@ class Runner:
         cwd = os.path.join(settings.workspace_root, conversation_id)
         os.makedirs(cwd, exist_ok=True)
 
+        # Load existing ACP session ID for resume
+        acp_session_id = None
+        async with async_session_maker() as db:
+            convo = await db.get(Conversation, uuid.UUID(conversation_id))
+            if convo and convo.acp_session_id:
+                acp_session_id = convo.acp_session_id
+
         acc = {"text": "", "cancelled": False, "current_msg_id": message_id, "tool_since_split": False}
         steps: list[dict] = []  # Collect tool_call steps for persistence
 
@@ -568,7 +575,8 @@ class Runner:
 
         try:
             client, new_session = await self.pool.get(
-                conversation_id, agent.command, cwd, on_update, on_fs_write
+                conversation_id, agent.command, cwd, on_update, on_fs_write,
+                acp_session_id=acp_session_id,
             )
             logger.info(
                 "handle_single: conv=%s msg=%s client_pid=%s new_session=%s",
@@ -584,7 +592,10 @@ class Runner:
             # blocked, we must poll Redis for pending clarify requests.
             # NOTE: agent uses ACP session_id as key, not conversation_id
             clarify_session_id = new_session or conversation_id
-            prompt_task = asyncio.create_task(client.prompt(text))
+            # Use content_blocks if available (ACP structured content), else plain text
+            content_blocks = task.get("content_blocks")
+            prompt_content = content_blocks if content_blocks else text
+            prompt_task = asyncio.create_task(client.prompt(prompt_content))
             while not prompt_task.done():
                 try:
                     await asyncio.wait_for(asyncio.shield(prompt_task), timeout=1.0)

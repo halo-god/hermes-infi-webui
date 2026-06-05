@@ -17,12 +17,12 @@ export interface Profile {
 }
 
 export interface ScanResult {
+  found: number;
   created: number;
-  message: string;
-  version: string;
-  profiles_found: number;
+  updated: number;
+  agents: Agent[];
+  version: string | null;
   hermes_path: string | null;
-  hermes_home: string | null;
   errors: string[];
 }
 
@@ -67,8 +67,8 @@ export const agentsApi = {
   async deleteProfile(id: string): Promise<void> {
     await http.delete(`/profiles/${id}`);
   },
-  async scanProfiles(): Promise<ScanResult> {
-    return (await http.post("/profiles/scan")).data;
+  async scanAgents(): Promise<ScanResult> {
+    return (await http.post("/agents/scan")).data;
   },
   async cloneProfile(id: string): Promise<Profile> {
     return (await http.post<Profile>(`/profiles/${id}/clone`)).data;

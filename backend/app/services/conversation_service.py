@@ -116,11 +116,27 @@ async def _resolve_attached_files(
 ) -> list[dict]:
     """Look up workspace files by id, write to agent workspace dir, return metadata + content.
 
-    Returns [{id, name, kind, workspace_path, content}].
-    Content is included inline so the agent sees it immediately without needing read_file.
+    Returns [{id, name, kind, workspace_path, content, size_bytes, mime_type}].
     """
     if not file_ids:
         return []
+
+    # MIME type mapping
+    MIME_MAP = {
+        "md": "text/markdown", "txt": "text/plain", "json": "application/json",
+        "csv": "text/csv", "html": "text/html", "htm": "text/html",
+        "js": "text/javascript", "ts": "text/javascript", "py": "text/x-python",
+        "go": "text/x-go", "rs": "text/x-rust", "yaml": "text/yaml",
+        "yml": "text/yaml", "toml": "text/toml", "sh": "text/x-shellscript",
+        "bash": "text/x-shellscript", "log": "text/plain", "xml": "text/xml",
+        "css": "text/css", "diff": "text/x-diff", "patch": "text/x-diff",
+        "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+        "gif": "image/gif", "webp": "image/webp", "svg": "image/svg+xml",
+        "bmp": "image/bmp", "pdf": "application/pdf",
+    }
+    IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"}
+    TEXT_EXTS = {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
+                 "yaml", "yml", "toml", "sh", "bash", "log", "xml", "css", "diff", "patch"}
 
     # Prepare workspace dir for the agent to access files
     ws_dir = None
@@ -137,15 +153,25 @@ async def _resolve_attached_files(
         f = await db.get(WorkspaceFile, fid)
         if f is not None:
             file_content = f.content or ""
+            ext = (f.kind or "").lower()
+            mime = MIME_MAP.get(ext, "application/octet-stream")
+            is_image = ext in IMAGE_EXTS
+            is_text = ext in TEXT_EXTS
+
             # Write file content to workspace so agent can read it
-            if ws_dir and file_content:
+            if ws_dir and file_content and not is_image:
                 fpath = os.path.join(ws_dir, f.name)
                 with open(fpath, "w", encoding="utf-8") as fh:
                     fh.write(file_content)
+
             result.append({
                 "id": str(f.id), "name": f.name, "kind": f.kind,
                 "workspace_path": f"attachments/{f.name}" if ws_dir and file_content else None,
                 "content": file_content,
+                "size_bytes": f.size_bytes or len(file_content),
+                "mime_type": mime,
+                "is_image": is_image,
+                "is_text": is_text,
             })
     return result
 
@@ -214,24 +240,8 @@ async def send_message(
     await db.refresh(user_msg)
     await db.refresh(agent_msg)
 
-    # Build prompt — file content inline so agent sees it immediately.
-    prompt_text = text
-    if attached:
-        parts = []
-        for f in attached:
-            content = f.get("content", "")
-            if content:
-                # Truncate very large files to avoid blowing up the prompt
-                if len(content) > 200000:
-                    content = content[:200000] + f"\n\n... [文件截断，共 {len(f.get('content', ''))} 字符]"
-                parts.append(f"【附件: {f['name']}】\n```\n{content}\n```")
-            else:
-                parts.append(f"【附件: {f['name']}】（文件内容为空）")
-        file_block = "\n\n".join(parts)
-        prompt_text = f"{text}\n\n{file_block}"
-
-    # Inject file-write instructions so agents use fs/write_text_file (ACP protocol)
-    # instead of just mentioning paths in text responses.
+    # Build prompt — use ACP content blocks for structured attachment handling.
+    # Images: ImageContentBlock (base64), Text files: Resource Link + inline fallback.
     _file_write_preamble = (
         "【文件写入规范】当你需要为用户创建、生成或导出文件时，"
         "必须使用 write_file 工具将文件写入当前工作目录（cwd）。"
@@ -252,7 +262,6 @@ async def send_message(
         "禁止在回复文本中输出 [确认] 或类似的标记格式。必须通过工具调用 clarify。\n"
         "违反此规则会导致用户不满。记住：先问再做。"
     )
-    # Strict mode for short prompts: force clarify call
     _strict_mode = ""
     if len(text.strip()) < 15:
         _strict_mode = (
@@ -260,7 +269,55 @@ async def send_message(
             "你必须先调用 clarify 工具询问用户想要什么，不要直接猜测并执行。"
             "这是强制要求，不是建议。"
         )
-    prompt_text = f"{_file_write_preamble}{_clarification_preamble}{_strict_mode}\n\n{prompt_text}"
+
+    # Build content blocks for ACP protocol
+    prompt_blocks: list[dict] = []
+
+    # Text block: preambles + user message + inline file references
+    prompt_text = text
+    if attached:
+        text_parts = []
+        for f in attached:
+            if f.get("is_image"):
+                # Images go as separate ImageContentBlock, just reference in text
+                text_parts.append(f"[图片附件: {f['name']}]")
+            else:
+                # Text files: include inline as before (fallback for agents that don't support resource_link)
+                content = f.get("content", "")
+                if content:
+                    if len(content) > 200000:
+                        content = content[:200000] + f"\n\n... [文件截断，共 {len(f.get('content', ''))} 字符]"
+                    text_parts.append(f"【附件: {f['name']}】\n```\n{content}\n```")
+                else:
+                    text_parts.append(f"【附件: {f['name']}】（文件内容为空）")
+        if text_parts:
+            prompt_text = f"{text}\n\n" + "\n\n".join(text_parts)
+
+    full_text = f"{_file_write_preamble}{_clarification_preamble}{_strict_mode}\n\n{prompt_text}"
+    prompt_blocks.append({"type": "text", "text": full_text})
+
+    # Add Resource Link blocks for attached files (agent can read from workspace)
+    for f in attached:
+        ws_path = f.get("workspace_path")
+        if ws_path and not f.get("is_image"):
+            cwd = os.path.join(settings.workspace_root, str(convo.id))
+            abs_path = os.path.join(cwd, ws_path)
+            prompt_blocks.append({
+                "type": "resource_link",
+                "uri": f"file://{abs_path}",
+                "name": f["name"],
+                "mimeType": f.get("mime_type", "application/octet-stream"),
+                "size": f.get("size_bytes", 0),
+            })
+
+    # Add ImageContentBlock for image attachments
+    for f in attached:
+        if f.get("is_image") and f.get("content"):
+            prompt_blocks.append({
+                "type": "image",
+                "mimeType": f.get("mime_type", "image/png"),
+                "data": f["content"],  # already base64 from upload
+            })
 
     await redis_core.clear_cancel(str(convo.id))
     await redis_core.enqueue_prompt(
@@ -269,7 +326,8 @@ async def send_message(
             "conversation_id": str(convo.id),
             "message_id": str(agent_msg.id),
             "agent_id": convo.primary_agent_id,
-            "text": prompt_text,
+            "text": full_text,
+            "content_blocks": prompt_blocks if len(prompt_blocks) > 1 else None,
         }
     )
     return user_msg, agent_msg

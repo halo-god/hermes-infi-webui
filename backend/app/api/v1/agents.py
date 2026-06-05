@@ -1,7 +1,8 @@
 """Agent registry (from ACP discovery) + Profile CRUD."""
 from __future__ import annotations
-
+import json
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -23,6 +24,90 @@ router = APIRouter()
 async def list_agents(db: AsyncSession = Depends(get_db)) -> list[Agent]:
     res = await db.execute(select(Agent).order_by(Agent.available.desc(), Agent.id))
     return list(res.scalars().all())
+
+
+class ScanAgentsResponse(BaseModel):
+    found: int
+    created: int
+    updated: int
+    agents: list[AgentOut]
+    version: str | None = None
+    hermes_path: str | None = None
+    errors: list[str] = []
+
+
+@router.post("/agents/scan", response_model=ScanAgentsResponse)
+async def scan_agents(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Discover ACP agents from PATH and upsert into DB."""
+    _require_admin(user)
+
+    from agent_runner.discovery import find_hermes_binary, probe_hermes_version, scan
+
+    errors: list[str] = []
+    try:
+        discovered = await scan()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"扫描失败: {exc}")
+
+    try:
+        version = await probe_hermes_version()
+    except Exception:
+        version = "unknown"
+
+    hermes_path = find_hermes_binary()
+    created = 0
+    updated = 0
+    now = datetime.now(timezone.utc)
+
+    for da in discovered:
+        existing = await db.get(Agent, da.id)
+        if existing:
+            existing.label = da.label
+            existing.kind = da.kind
+            existing.available = da.available
+            existing.official = da.official
+            existing.version = da.version
+            existing.color = da.color
+            existing.icon = da.icon
+            existing.description = da.description
+            existing.command = da.command
+            existing.last_seen_at = now
+            updated += 1
+        else:
+            agent = Agent(
+                id=da.id,
+                label=da.label,
+                kind=da.kind,
+                available=da.available,
+                official=da.official,
+                version=da.version,
+                color=da.color,
+                icon=da.icon,
+                description=da.description,
+                command=da.command,
+                last_seen_at=now,
+            )
+            db.add(agent)
+            created += 1
+
+    await db.commit()
+
+    # Re-fetch all agents for response
+    res = await db.execute(select(Agent).order_by(Agent.available.desc(), Agent.id))
+    all_agents = list(res.scalars().all())
+
+    return ScanAgentsResponse(
+        found=len(discovered),
+        created=created,
+        updated=updated,
+        agents=[AgentOut.model_validate(a) for a in all_agents],
+        version=version,
+        hermes_path=hermes_path,
+        errors=errors,
+    )
 
 
 # ── Profiles ──

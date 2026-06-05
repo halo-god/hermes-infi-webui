@@ -3,7 +3,7 @@
 Speaks JSON-RPC 2.0 over newline-delimited stdio with an agent subprocess.
 We are the *client* (editor side); the agent is the server. Supports:
 
-  client → agent (requests):  initialize, session/new, session/prompt
+  client → agent (requests):  initialize, session/new, session/load, session/resume, session/prompt
   client → agent (notify):    session/cancel
   agent  → client (notify):   session/update   (streaming chunks / tool calls)
   agent  → client (request):  fs/write_text_file  (produced files → workspace)
@@ -147,13 +147,42 @@ class ACPClient:
             raise ACPError("agent did not return a sessionId")
         return self._session_id
 
-    async def prompt(self, text: str) -> str:
-        """Run one user turn. Returns the stopReason."""
+    async def load_session(self, session_id: str, cwd: str, mcp_servers: list | None = None) -> str:
+        """Load an existing session (replays history via session/update)."""
+        res = await self._request(
+            "session/load",
+            {"sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers or []},
+            timeout=SESSION_TIMEOUT,
+        )
+        self._session_id = session_id
+        return self._session_id
+
+    async def resume_session(self, session_id: str, cwd: str, mcp_servers: list | None = None) -> str:
+        """Resume an existing session without replaying history."""
+        res = await self._request(
+            "session/resume",
+            {"sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers or []},
+            timeout=SESSION_TIMEOUT,
+        )
+        self._session_id = session_id
+        return self._session_id
+
+    async def prompt(self, content: str | list[dict]) -> str:
+        """Run one user turn. Returns the stopReason.
+
+        content can be:
+          - str: plain text prompt (backward compatible)
+          - list[dict]: mixed content blocks (text, image, resource_link, etc.)
+        """
+        if isinstance(content, str):
+            blocks = [{"type": "text", "text": content}]
+        else:
+            blocks = content
         res = await self._request(
             "session/prompt",
             {
                 "sessionId": self._session_id,
-                "prompt": [{"type": "text", "text": text}],
+                "prompt": blocks,
             },
             timeout=PROMPT_TIMEOUT,
         )

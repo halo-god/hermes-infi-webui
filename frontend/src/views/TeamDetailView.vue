@@ -364,6 +364,26 @@ async function clearChannelMessages() {
   channelMessages.value = [];
 }
 
+const creatingTopic = ref(false);
+async function createTopicFromMessage(m: Message) {
+  if (creatingTopic.value) return;
+  creatingTopic.value = true;
+  try {
+    const text = m.content.text || "";
+    const snippet = text.length > 100 ? text.slice(0, 100) + "…" : text;
+    const res = await conversationsApi.create({
+      team_id: teamId.value,
+      title: `专题: ${snippet}`,
+      first_message: `以下是从群聊中提取的讨论，请继续深入分析：\n\n> ${text}`,
+    });
+    router.push({ name: "chat", query: { c: res.id } });
+  } catch (e: any) {
+    alert(e?.response?.data?.detail || "创建失败");
+  } finally {
+    creatingTopic.value = false;
+  }
+}
+
 function onChannelInput(e: Event) {
   const text = (e.target as HTMLTextAreaElement).value;
   const cursor = (e.target as HTMLTextAreaElement).selectionStart;
@@ -896,8 +916,12 @@ async function deleteTeam() {
             <template v-for="m in channelMessages" :key="m.id">
               <!-- User message row -->
               <div v-if="m.role === 'user'" class="ch-row user" style="align-items:flex-end;gap:8px">
-                <div>
+                <div style="position:relative;max-width:75%">
                   <div class="ch-bubble" v-html="renderMarkdown(m.content.text || '')"></div>
+                  <button class="topic-btn" @click="createTopicFromMessage(m)"
+                    :disabled="creatingTopic" title="转为专题会话">
+                    <Icon name="fork" :size="12" /> 转为专题
+                  </button>
                   <div class="ch-time">{{ fmtTime(m.created_at) }}</div>
                 </div>
                 <div class="ch-av"

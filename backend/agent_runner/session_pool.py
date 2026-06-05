@@ -38,6 +38,7 @@ class SessionPool:
         cwd: str,
         on_update: OnUpdate,
         on_fs_write: OnFsWrite,
+        acp_session_id: str | None = None,
     ) -> tuple[ACPClient, str | None]:
         """Return (client, new_session_id_or_None). session id is set only when
         a fresh subprocess+session was created."""
@@ -60,12 +61,44 @@ class SessionPool:
         )
         try:
             await asyncio.wait_for(c.start(), timeout=POOL_START_TIMEOUT)
-            await asyncio.wait_for(c.initialize(), timeout=POOL_INIT_TIMEOUT)
+            init_result = await asyncio.wait_for(c.initialize(), timeout=POOL_INIT_TIMEOUT)
             if settings.hermes_acp_auth_method:
                 await asyncio.wait_for(
                     c.authenticate(settings.hermes_acp_auth_method), timeout=POOL_INIT_TIMEOUT,
                 )
-            session_id = await asyncio.wait_for(c.new_session(cwd), timeout=POOL_SESSION_TIMEOUT)
+
+            # Try to resume existing session first
+            session_id = None
+            if acp_session_id:
+                agent_caps = init_result.get("agentCapabilities", {})
+                supports_resume = bool(
+                    agent_caps.get("sessionCapabilities", {}).get("resume")
+                )
+                supports_load = bool(agent_caps.get("loadSession"))
+                if supports_resume:
+                    try:
+                        await asyncio.wait_for(
+                            c.resume_session(acp_session_id, cwd), timeout=POOL_SESSION_TIMEOUT,
+                        )
+                        session_id = None  # resumed, no new session
+                        logger.info("Resumed ACP session %s for conv %s", acp_session_id[:8], conversation_id[:8])
+                    except Exception as exc:
+                        logger.warning("Resume failed for %s: %s, falling back to new", acp_session_id[:8], exc)
+                        session_id = await asyncio.wait_for(c.new_session(cwd), timeout=POOL_SESSION_TIMEOUT)
+                elif supports_load:
+                    try:
+                        await asyncio.wait_for(
+                            c.load_session(acp_session_id, cwd), timeout=POOL_SESSION_TIMEOUT,
+                        )
+                        session_id = None
+                        logger.info("Loaded ACP session %s for conv %s", acp_session_id[:8], conversation_id[:8])
+                    except Exception as exc:
+                        logger.warning("Load failed for %s: %s, falling back to new", acp_session_id[:8], exc)
+                        session_id = await asyncio.wait_for(c.new_session(cwd), timeout=POOL_SESSION_TIMEOUT)
+                else:
+                    session_id = await asyncio.wait_for(c.new_session(cwd), timeout=POOL_SESSION_TIMEOUT)
+            else:
+                session_id = await asyncio.wait_for(c.new_session(cwd), timeout=POOL_SESSION_TIMEOUT)
         except (asyncio.TimeoutError, Exception) as exc:
             logger.error("Failed to create ACP session for %s: %s", conversation_id, exc)
             await c.stop()

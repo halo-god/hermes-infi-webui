@@ -39,6 +39,7 @@ const profiles = ref<Profile[]>([]);
 const selected = ref<Profile | null>(null);
 const stagedFiles = ref<File[]>([]);
 const stagedKnowledge = ref<{ id: string; name: string }[]>([]);
+const stagedPreviews = ref<Map<number, string>>(new Map());
 
 onMounted(async () => {
   document.addEventListener("mousedown", onDocClick);
@@ -84,6 +85,7 @@ function doSend() {
   const files = stagedFiles.value.length ? [...stagedFiles.value] : undefined;
   const kIds = stagedKnowledge.value.length ? stagedKnowledge.value.map((k) => k.id) : undefined;
   stagedFiles.value = [];
+  stagedPreviews.value = new Map();
   stagedKnowledge.value = [];
   emit("send", { profileId: selected.value?.id, webSearch: webSearch.value, deepThink: deepThink.value, stagedFiles: files, knowledgeIds: kIds });
 }
@@ -93,6 +95,13 @@ function pickProfile(p: Profile) {
 }
 function removeStagedFile(idx: number) {
   stagedFiles.value.splice(idx, 1);
+  // Rebuild preview map with shifted indices
+  const newPreviews = new Map<number, string>();
+  stagedPreviews.value.forEach((url, i) => {
+    if (i < idx) newPreviews.set(i, url);
+    else if (i > idx) newPreviews.set(i - 1, url);
+  });
+  stagedPreviews.value = newPreviews;
 }
 function removeStagedKnowledge(idx: number) {
   stagedKnowledge.value.splice(idx, 1);
@@ -124,21 +133,51 @@ function isKnowledgeSelected(id: string) {
 function onFileSelected(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0];
   if (!file) return;
+  const idx = stagedFiles.value.length;
   stagedFiles.value.push(file);
+  if (file.type.startsWith("image/")) {
+    const reader = new FileReader();
+    reader.onload = () => stagedPreviews.value.set(idx, reader.result as string);
+    reader.readAsDataURL(file);
+  }
   ns.toast(`已添加 ${file.name}`);
   if (fileInput.value) fileInput.value.value = "";
+}
+
+function onPaste(e: ClipboardEvent) {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.type.startsWith("image/")) {
+      e.preventDefault();
+      const file = item.getAsFile();
+      if (file) {
+        const idx = stagedFiles.value.length;
+        stagedFiles.value.push(file);
+        const reader = new FileReader();
+        reader.onload = () => stagedPreviews.value.set(idx, reader.result as string);
+        reader.readAsDataURL(file);
+        ns.toast("已粘贴图片");
+      }
+    }
+  }
+}
+
+function isImageFile(f: File) {
+  return f.type.startsWith("image/");
 }
 </script>
 
 <template>
   <div class="composer-wrap" ref="wrap">
-    <input ref="fileInput" type="file" style="display:none" @change="onFileSelected" />
+    <input ref="fileInput" type="file" accept="image/*,.pdf,.md,.txt,.json,.csv,.html,.js,.ts,.py,.go,.rs,.yaml,.yml,.toml,.sh,.xml,.css,.diff" style="display:none" @change="onFileSelected" />
     <!-- staged file chips -->
     <div v-if="stagedFiles.length || stagedKnowledge.length" class="staged-files">
-      <span v-for="(f, i) in stagedFiles" :key="'f'+i" class="staged-chip">
-        <Icon name="paperclip" :size="11" />
+      <span v-for="(f, i) in stagedFiles" :key="'f'+i" class="staged-chip" :class="{ 'staged-chip-image': isImageFile(f) }">
+        <img v-if="stagedPreviews.has(i)" :src="stagedPreviews.get(i)" class="staged-preview" />
+        <Icon v-else name="paperclip" :size="11" />
         <span class="staged-name">{{ f.name }}</span>
-        <button class="staged-rm" @click="removeStagedFile(i)">×</button>
+        <button class="staged-rm" @click="removeStagedFile(i)">&times;</button>
       </span>
       <span v-for="(k, i) in stagedKnowledge" :key="'k'+i" class="staged-chip" style="background: var(--accent-soft, rgba(184,133,42,0.12));">
         <Icon name="doc" :size="11" />
@@ -156,6 +195,7 @@ function onFileSelected(e: Event) {
         rows="1"
         @input="onInput"
         @keydown="onKey"
+        @paste="onPaste"
       ></textarea>
       <div class="composer-toolbar">
         <div style="position: relative">
