@@ -519,13 +519,25 @@ class Runner:
                     "output_tokens": update.get("output_tokens", 0),
                 })
                 acc["total_tokens"] = update.get("input_tokens", 0) + update.get("output_tokens", 0)
-            elif kind == "session_info":
+            elif kind == "session_info" or kind == "session_info_update":
+                # v0.16.0: session_info_update (camelCase: sessionUpdate="session_info_update")
+                # Legacy: session_info
                 new_title = update.get("title")
                 if new_title:
                     t = asyncio.create_task(self._update_conv_title(conversation_id, new_title))
                     self._bg_tasks.add(t)
                     t.add_done_callback(self._bg_tasks.discard)
                     await R.publish_event(conversation_id, {"type": "session_info", "title": new_title})
+            elif kind == "usage_update":
+                # v0.16.0: ACP native context usage (size=window, used=pressure)
+                size = update.get("size", 0)
+                used = update.get("used", 0)
+                await R.publish_event(conversation_id, {
+                    "type": "usage",
+                    "message_id": acc["current_msg_id"],
+                    "context_size": size,
+                    "context_used": used,
+                })
             elif kind == "confirmation_request":
                 # Agent natively sent a confirmation_request via session/update.
                 # Send SSE to frontend and wait for user response via background task.

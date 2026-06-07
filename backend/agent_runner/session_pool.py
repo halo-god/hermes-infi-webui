@@ -79,9 +79,16 @@ class SessionPool:
             # Try to resume existing session first
             session_id = None
             if acp_session_id:
-                agent_caps = init_result.get("agentCapabilities", {})
-                supports_resume = bool(
-                    agent_caps.get("sessionCapabilities", {}).get("resume")
+                # v0.16.0+: capabilities nested under agentCapabilities.sessionCapabilities
+                # Legacy: loadSession at top level
+                # NOTE: capability values are empty dicts {} (truthy=False), check key presence
+                agent_caps = init_result.get("agentCapabilities") or init_result.get("agent_capabilities") or {}
+                session_caps = agent_caps.get("sessionCapabilities") or agent_caps.get("session_capabilities") or {}
+                supports_resume = (
+                    "resume" in session_caps
+                    or "loadSession" in agent_caps
+                    or "load_session" in agent_caps
+                    or "loadSession" in init_result
                 )
                 if supports_resume:
                     try:

@@ -3,10 +3,12 @@
 Speaks JSON-RPC 2.0 over newline-delimited stdio with an agent subprocess.
 We are the *client* (editor side); the agent is the server. Supports:
 
-  client → agent (requests):  initialize, session/new, session/load, session/resume, session/prompt
+  client → agent (requests):  initialize, session/new, session/load, session/resume,
+                              session/prompt, session/fork, session/list,
+                              session/set_mode, session/set_model
   client → agent (notify):    session/cancel
   agent  → client (notify):   session/update   (streaming chunks / tool calls)
-  agent  → client (request):  fs/write_text_file  (produced files → workspace)
+  agent  → client (request):  fs/write_text_file, request_permission
 
 Callbacks let the runner react to streaming updates and file writes without
 this module knowing anything about Redis or the DB.
@@ -171,6 +173,41 @@ class ACPClient:
         )
         self._session_id = session_id
         return self._session_id
+
+    async def fork_session(self, session_id: str, cwd: str, mcp_servers: list | None = None) -> str:
+        """Fork (branch) an existing session into a new one with copied history."""
+        res = await self._request(
+            "session/fork",
+            {"sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers or []},
+            timeout=SESSION_TIMEOUT,
+        )
+        self._session_id = res.get("sessionId") or res.get("session_id") or ""
+        return self._session_id
+
+    async def list_sessions(self, cursor: str | None = None, cwd: str | None = None) -> dict:
+        """List available ACP sessions with optional cursor pagination and cwd filter."""
+        params: dict = {}
+        if cursor:
+            params["cursor"] = cursor
+        if cwd:
+            params["cwd"] = cwd
+        return await self._request("session/list", params, timeout=SESSION_TIMEOUT)
+
+    async def set_session_mode(self, session_id: str, mode_id: str) -> dict:
+        """Set session mode (e.g. 'default', 'accept_edits', 'dont_ask')."""
+        return await self._request(
+            "session/set_mode",
+            {"sessionId": session_id, "modeId": mode_id},
+            timeout=SESSION_TIMEOUT,
+        )
+
+    async def set_session_model(self, session_id: str, model_id: str) -> dict:
+        """Switch the model for an active session."""
+        return await self._request(
+            "session/set_model",
+            {"sessionId": session_id, "modelId": model_id},
+            timeout=SESSION_TIMEOUT,
+        )
 
     async def prompt(self, content: str | list[dict]) -> str:
         """Run one user turn. Returns the stopReason.

@@ -271,8 +271,14 @@ export const useChatStore = defineStore("chat", () => {
 
     stream.on("usage", (ev) => {
       const m = find(ev.message_id);
-      if (m) m.usage = { input_tokens: ev.input_tokens, output_tokens: ev.output_tokens };
-      contextTokens.value = ev.input_tokens + ev.output_tokens;
+      const usage: Record<string, number> = {};
+      if (ev.input_tokens != null) usage.input_tokens = ev.input_tokens;
+      if (ev.output_tokens != null) usage.output_tokens = ev.output_tokens;
+      if (ev.context_size != null) usage.context_size = ev.context_size;
+      if (ev.context_used != null) usage.context_used = ev.context_used;
+      if (m) m.usage = usage as any;
+      if (ev.context_size) contextTokens.value = ev.context_used || 0;
+      else contextTokens.value = (ev.input_tokens || 0) + (ev.output_tokens || 0);
     });
 
     stream.on("session_info", (ev) => {

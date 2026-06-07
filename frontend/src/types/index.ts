@@ -161,7 +161,7 @@ export interface Message {
   steps?: { title: string; status: string }[];
   thinking?: string;
   plan?: PlanEntry[];
-  usage?: { input_tokens: number; output_tokens: number };
+  usage?: { input_tokens: number; output_tokens: number; context_size?: number; context_used?: number };
 }
 
 export interface Conversation {
@@ -260,7 +260,7 @@ export type StreamEvent =
   | { type: "confirmation_response"; message_id: string; request_id: string; choice: string }
   | { type: "thought"; message_id: string; delta: string }
   | { type: "plan"; message_id: string; entries: PlanEntry[] }
-  | { type: "usage"; message_id: string; input_tokens: number; output_tokens: number }
+  | { type: "usage"; message_id: string; input_tokens?: number; output_tokens?: number; context_size?: number; context_used?: number }
   | { type: "session_info"; title?: string };
 
 // ── Teams / projects / tasks (P3 backend; frontend added here) ──
