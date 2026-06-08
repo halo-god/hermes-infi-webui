@@ -47,7 +47,7 @@ async function save() {
 <template>
   <ModalShell :title="'项目成员 · ' + projectName" subtitle="管理哪些团队成员可以访问此项目" :width="480" @close="$emit('close')">
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px">
-      <div style="font-size: 12.5px; color: var(--ink-mute)">
+      <div class="text-mute-sm">
         已选 {{ selected.size }} / {{ teamMembers.length }} 位成员
       </div>
       <button class="btn" style="font-size: 12px" @click="toggleAll">
@@ -66,7 +66,7 @@ async function save() {
         <div class="pm-avatar" :style="{ background: m.color || '#b8852a' }">
           {{ (m.name || '?').slice(0, 1) }}
         </div>
-        <div style="flex: 1; min-width: 0">
+        <div class="flex-1-min">
           <div class="pm-name">{{ m.name || '未命名' }}</div>
           <div class="pm-email">{{ m.email }}</div>
         </div>

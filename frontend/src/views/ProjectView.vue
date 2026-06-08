@@ -230,7 +230,7 @@ async function removeProject() {
               <Icon v-if="t.status === 'done'" name="check" :size="12" />
               <span v-else-if="t.status === 'doing'" class="half"></span>
             </button>
-            <div style="flex: 1; min-width: 0">
+            <div class="flex-1-min">
               <input v-if="editingTaskId === t.id" class="task-edit-input" v-model="editDraft" @keydown.enter="saveEditTask(t)" @blur="saveEditTask(t)" @keydown.esc="editingTaskId = null" />
               <div v-else class="task-title" :class="{ done: t.status === 'done' }">{{ t.title }}</div>
               <div class="task-meta">
@@ -245,9 +245,9 @@ async function removeProject() {
               <button class="row-act danger" title="删除" @click="deleteTask(t)"><Icon name="close" :size="13" /></button>
             </div>
           </div>
-          <div v-if="!tasks.length" style="padding: 24px; text-align: center; color: var(--ink-mute); font-size: 12.5px">还没有任务。</div>
+          <div v-if="!tasks.length" class="empty-state">还没有任务。</div>
           <div class="task-add">
-            <Icon name="plus" :size="14" style="color: var(--ink-mute)" />
+            <Icon name="plus" :size="14" class="text-mute" />
             <input class="task-add-input" v-model="newTaskTitle" placeholder="添加一个任务，回车创建…" @keydown.enter="addTask" />
             <button v-if="newTaskTitle.trim()" class="btn primary" style="height: 28px; padding: 0 12px" @click="addTask">添加</button>
           </div>
@@ -255,14 +255,14 @@ async function removeProject() {
       </div>
 
       <div class="col-grid">
-        <div style="display: flex; flex-direction: column; gap: 18px">
+        <div class="flex-col-gap">
           <div class="section-card">
             <div class="section-head">
               <div class="section-title"><Icon name="chat" /> 项目对话</div>
               <button class="section-link" @click="router.push({ path: '/', query: { project: projectId } })">新对话 <Icon name="plus" :size="11" /></button>
             </div>
             <div class="section-body">
-              <div v-if="!convos.length" style="padding: 32px; text-align: center; color: var(--ink-mute); font-size: 13px">还没有项目对话。</div>
+              <div v-if="!convos.length" class="empty-state-lg" style="padding:32px">还没有项目对话。</div>
               <div v-for="cv in convos" :key="cv.id" class="row-item" @click="router.push({ path: '/', query: { c: cv.id } })">
                 <div class="convo-ico" :style="{ background: (agentById(cv.primary_agent_id).color || '#b8852a') + '22', color: agentById(cv.primary_agent_id).color || '#b8852a' }"><Icon :name="agentById(cv.primary_agent_id).icon || 'chat'" /></div>
                 <div class="row-text"><div class="row-title">{{ cv.title }}</div><div class="row-sub">{{ agentById(cv.primary_agent_id).label }}</div></div>
@@ -274,17 +274,17 @@ async function removeProject() {
             <div class="section-body flush">
               <div v-for="d in docs" :key="d.id" class="file-row has-actions">
                 <div class="file-ico"><Icon name="doc" /></div>
-                <div style="flex: 1; min-width: 0"><div class="row-title">{{ d.name }}</div><div class="file-meta">{{ fmtSize(d.size_bytes) }} · {{ d.created_by_name || "成员" }}</div></div>
+                <div class="flex-1-min"><div class="row-title">{{ d.name }}</div><div class="file-meta">{{ fmtSize(d.size_bytes) }} · {{ d.created_by_name || "成员" }}</div></div>
                 <span class="file-kind">{{ d.kind }}</span>
                 <div class="row-actions">
                   <button class="row-act accent" title="用助手分析" @click="docToAI(d.name)"><Icon name="sparkle" :size="13" /></button>
                   <button class="row-act danger" title="删除" @click="deleteDoc(d.id)"><Icon name="close" :size="13" /></button>
                 </div>
               </div>
-              <div v-if="!docs.length" style="padding: 24px; text-align: center; color: var(--ink-mute); font-size: 12.5px">还没有文件。</div>
+              <div v-if="!docs.length" class="empty-state">还没有文件。</div>
               <div class="task-add">
                 <input ref="docFileInput" type="file" style="display:none" @change="onDocFileSelected" />
-                <Icon name="paperclip" :size="14" style="color: var(--ink-mute)" />
+                <Icon name="paperclip" :size="14" class="text-mute" />
                 <button class="btn primary" style="height: 28px; padding: 0 12px" :disabled="uploadingDoc" @click="addDoc">
                   {{ uploadingDoc ? "上传中…" : "上传文件" }}
                 </button>
@@ -293,7 +293,7 @@ async function removeProject() {
           </div>
         </div>
 
-        <div style="display: flex; flex-direction: column; gap: 18px">
+        <div class="flex-col-gap">
           <div class="section-card">
             <div class="section-head"><div class="section-title"><Icon name="sparkle" /> 项目助手</div></div>
             <div class="agent-mini-grid">

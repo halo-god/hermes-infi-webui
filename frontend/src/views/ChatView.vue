@@ -15,6 +15,7 @@ import { conversationsApi } from "@/api/conversations";
 import { teamsApi } from "@/api/teams";
 import { projectsApi } from "@/api/projects";
 import { renderMarkdown, renderMarkdownAsync } from "@/utils/markdown";
+import { fmtNum } from "@/utils/format";
 import type { Knowledge, Message, RoundtableReply, WsAdapter } from "@/types";
 import type { SendOptions } from "@/components/Composer.vue";
 import type { Profile } from "@/api/agents";
@@ -375,8 +376,8 @@ const ctxColor = computed(() => ctxPct.value > 0.85 ? "var(--danger)" : ctxPct.v
 const ctxPctLabel = computed(() => `${Math.round(ctxPct.value * 100)}%`);
 const ctxTooltip = computed(() =>
   chat.contextSize > 0
-    ? `${chat.contextTokens.toLocaleString()} / ${chat.contextSize.toLocaleString()} tokens (${ctxPctLabel.value})`
-    : `${chat.contextTokens.toLocaleString()} tokens`
+    ? `${fmtNum(chat.contextTokens)} / ${fmtNum(chat.contextSize)} tokens (${ctxPctLabel.value})`
+    : `${fmtNum(chat.contextTokens)} tokens`
 );
 
 // ── Session controls ──
@@ -688,21 +689,21 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
               </svg>
               <span class="ctx-label">{{ ctxK }}</span>
             </div>
-            <button class="thread-action" v-if="chat.messages.length" @click="showSearch = !showSearch" style="flex-shrink:0;margin-top:2px;" title="搜索消息 ⌘F">
+            <button class="thread-action text-mute-sm" v-if="chat.messages.length" @click="showSearch = !showSearch" style="flex-shrink:0;margin-top:2px" title="搜索消息 ⌘F">
               <Icon name="search" />
             </button>
-            <button class="thread-action" v-if="chat.files.length" @click="showWorkspace = !showWorkspace" style="flex-shrink:0;margin-top:2px;">
+            <button class="thread-action text-mute-sm" v-if="chat.files.length" @click="showWorkspace = !showWorkspace" style="flex-shrink:0;margin-top:2px">
               <Icon name="folder" /> 工作区 ({{ chat.files.length }})
             </button>
-            <button class="thread-action" v-if="chat.messages.length >= 2" @click="showExtractModal = true" style="flex-shrink:0;margin-top:2px;" title="从对话内容自动创建项目与任务">
+            <button class="thread-action text-mute-sm" v-if="chat.messages.length >= 2" @click="showExtractModal = true" style="flex-shrink:0;margin-top:2px" title="从对话内容自动创建项目与任务">
               <Icon name="sparkle" /> 智能创建
             </button>
             <!-- Fork session -->
-            <button class="thread-action" v-if="chat.activeId && activeConvo?.acp_session_id" @click="forkSession" :disabled="forking" style="flex-shrink:0;margin-top:2px;" title="Fork ACP session (分支历史)">
+            <button class="thread-action text-mute-sm" v-if="chat.activeId && activeConvo?.acp_session_id" @click="forkSession" :disabled="forking" style="flex-shrink:0;margin-top:2px" title="Fork ACP session (分支历史)">
               <Icon name="copy" /> {{ forking ? 'Forking…' : 'Fork' }}
             </button>
             <!-- Edit approval mode -->
-            <div v-if="chat.activeId && activeConvo?.acp_session_id" class="mode-toggle" style="flex-shrink:0;margin-top:2px;">
+            <div v-if="chat.activeId && activeConvo?.acp_session_id" class="mode-toggle text-mute-sm" style="flex-shrink:0;margin-top:2px">
               <button v-for="m in SESSION_MODES" :key="m.id" class="mode-btn" :class="{ active: sessionMode === m.id }" :title="m.desc" @click="changeSessionMode(m.id)">
                 {{ m.label }}
               </button>

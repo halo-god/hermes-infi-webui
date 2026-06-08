@@ -47,7 +47,7 @@ async function submit() {
   <ModalShell title="新建团队" subtitle="团队拥有共享的助手、知识库与项目空间" :width="640" @close="$emit('close')">
     <div class="np-identity">
       <div class="team-shield np-preview" :style="{ background: form.color, width: '56px', height: '56px', borderRadius: '14px' }"><Icon :name="form.icon" :size="24" /></div>
-      <div style="flex: 1; min-width: 0">
+      <div class="flex-1-min">
         <div class="np-name-row">
           <input class="np-input np-name" v-model="form.name" placeholder="团队名称，例如：设计组" maxlength="24" autofocus />
           <span class="np-counter">{{ form.name.length }}/24</span>
@@ -111,7 +111,7 @@ async function submit() {
 
     <template #foot>
       <span class="np-foot-hint">你将成为团队所有者</span>
-      <span style="flex: 1"></span>
+      <span class="flex-1"></span>
       <button class="btn" @click="$emit('close')">取消</button>
       <button class="btn primary" :disabled="!valid || busy" @click="submit"><Icon name="plus" /> {{ busy ? "创建中…" : "创建团队" }}</button>
     </template>

@@ -73,14 +73,14 @@ async function create() {
       <div v-if="error" style="font-size: 12.5px; color: #c0392b; padding: 8px 12px; background: #fdf0ed; border-radius: 6px">{{ error }}</div>
 
       <div v-if="teams.length > 1">
-        <label style="font-size: 12.5px; font-weight: 500; color: var(--ink-mute); display: block; margin-bottom: 4px">所属团队</label>
-        <select v-model="selectedTeamId" style="width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 13.5px; background: var(--surface); color: var(--ink); outline: none">
+        <label class="text-mute-label">所属团队</label>
+        <select v-model="selectedTeamId" class="form-input-lg">
           <option v-for="t in teams" :key="t.id" :value="t.id">{{ t.name }}</option>
         </select>
       </div>
 
       <div>
-        <label style="font-size: 12.5px; font-weight: 500; color: var(--ink-mute); display: block; margin-bottom: 4px">项目名称</label>
+        <label class="text-mute-label">项目名称</label>
         <input v-model="projectName" type="text" placeholder="项目名称"
           style="width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 13.5px; background: var(--surface); color: var(--ink); outline: none; box-sizing: border-box" />
       </div>

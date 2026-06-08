@@ -1,0 +1,89 @@
+/* ==========================================================
+   Utility classes — DRY replacements for repeated inline styles.
+   Keep alphabetised. Every class here replaces ≥3 inline uses.
+   ========================================================== */
+
+/* --- Typography --- */
+.text-mute      { color: var(--ink-mute); }
+.text-mute-sm   { font-size: 12.5px; color: var(--ink-mute); }
+.text-mute-xs   { font-size: 11px; color: var(--ink-mute); }
+.text-mute-label {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink-mute);
+  display: block;
+  margin-bottom: 4px;
+}
+.text-danger     { color: var(--danger); }
+.heading-serif   {
+  font-family: var(--font-serif);
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.mono           { font-family: var(--font-mono); }
+.code-pill {
+  font-family: var(--font-mono);
+  background: var(--rule-soft);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+/* --- Layout helpers --- */
+.flex-1          { flex: 1; }
+.flex-1-min      { flex: 1; min-width: 0; }
+.flex-between    { display: flex; justify-content: space-between; align-items: center; }
+.flex-col-gap    { display: flex; flex-direction: column; gap: 18px; }
+
+/* --- Form inputs --- */
+.form-input {
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  font-size: 13px;
+  background: var(--bg-canvas);
+  color: var(--ink);
+}
+.form-input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+.form-input-lg {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border, var(--rule));
+  border-radius: 8px;
+  font-size: 13.5px;
+  background: var(--surface, var(--bg-panel));
+  color: var(--ink);
+  outline: none;
+}
+.form-input-lg:focus {
+  border-color: var(--accent);
+}
+
+/* --- Empty state placeholder --- */
+.empty-state {
+  padding: 40px;
+  text-align: center;
+  color: var(--ink-mute);
+  font-size: 12.5px;
+}
+.empty-state-lg {
+  padding: 40px;
+  text-align: center;
+  color: var(--ink-mute);
+  font-size: 13px;
+}
+
+/* --- Info banner --- */
+.info-banner {
+  padding: 10px 14px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  background: var(--bg-panel);
+  border-radius: var(--r-sm);
+}

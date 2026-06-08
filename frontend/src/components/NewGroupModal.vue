@@ -178,7 +178,7 @@ async function create() {
 
     <template #foot>
       <button class="btn" @click="emit('close')">取消</button>
-      <span style="flex: 1"></span>
+      <span class="flex-1"></span>
       <button
         v-if="step === 'agents'"
         class="btn primary"

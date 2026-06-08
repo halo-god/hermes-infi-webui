@@ -708,7 +708,7 @@ async function deleteTeam() {
         </div>
 
         <div class="col-grid">
-          <div style="display: flex; flex-direction: column; gap: 18px">
+          <div class="flex-col-gap">
             <div class="section-card">
               <div class="section-head">
                 <div class="section-title"><Icon name="sparkle" /> 共享助手</div>
@@ -724,7 +724,7 @@ async function deleteTeam() {
             <div class="section-card">
               <div class="section-head"><div class="section-title"><Icon name="pin" /> 团队置顶</div></div>
               <div class="section-body">
-                <div v-if="!team.pinned.length" style="padding: 24px; text-align: center; color: var(--ink-mute); font-size: 12.5px">还没有置顶会话。</div>
+                <div v-if="!team.pinned.length" class="empty-state">还没有置顶会话。</div>
                 <div v-for="cv in team.pinned" :key="cv.id" class="row-item" @click="router.push({ path: '/', query: { c: cv.id } })">
                   <div class="convo-ico" :style="{ background: (agentInfo(cv.primary_agent_id).color || '#b8852a') + '22', color: agentInfo(cv.primary_agent_id).color || '#b8852a' }"><Icon :name="agentInfo(cv.primary_agent_id).icon || 'chat'" /></div>
                   <div class="row-text"><div class="row-title">{{ cv.title }}</div><div class="row-sub">{{ agentInfo(cv.primary_agent_id).label }}</div></div>
@@ -734,7 +734,7 @@ async function deleteTeam() {
             </div>
           </div>
 
-          <div style="display: flex; flex-direction: column; gap: 18px">
+          <div class="flex-col-gap">
             <div class="section-card">
               <div class="section-head">
                 <div class="section-title"><Icon name="user" /> 成员</div>
@@ -754,10 +754,10 @@ async function deleteTeam() {
             <div class="section-card">
               <div class="section-head"><div class="section-title"><Icon name="bolt" /> 最近活动</div><button class="section-link" @click="tab = 'activity'">全部 <Icon name="chevron_right" /></button></div>
               <div class="section-body flush">
-                <div v-if="!team.activity.length" style="padding: 24px; text-align: center; color: var(--ink-mute); font-size: 12.5px">暂无活动。</div>
+                <div v-if="!team.activity.length" class="empty-state">暂无活动。</div>
                 <div v-for="(a, i) in team.activity.slice(0, 5)" :key="i" class="activity-item">
                   <div class="activity-dot"><Icon :name="a.icon" /></div>
-                  <div style="flex: 1; min-width: 0"><div class="activity-text"><b>{{ a.who }}</b> {{ a.action }} <em>{{ a.target }}</em></div><div class="activity-time">{{ a.ago }}</div></div>
+                  <div class="flex-1-min"><div class="activity-text"><b>{{ a.who }}</b> {{ a.action }} <em>{{ a.target }}</em></div><div class="activity-time">{{ a.ago }}</div></div>
                 </div>
               </div>
             </div>
@@ -767,10 +767,10 @@ async function deleteTeam() {
 
       <!-- PROJECTS -->
       <template v-else-if="tab === 'projects'">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px">
+        <div class="flex-between" style="margin-bottom:14px">
           <div>
-            <div style="font-family: var(--font-serif); font-size: 22px; font-weight: 600; color: var(--ink)">项目 · {{ projects.length }}</div>
-            <div style="font-size: 12.5px; color: var(--ink-mute); margin-top: 2px">每个项目是一组对话、文件和共享助手围绕同一个目标展开。</div>
+            <div class="heading-serif">项目 · {{ projects.length }}</div>
+            <div class="text-mute-sm" style="margin-top:2px">每个项目是一组对话、文件和共享助手围绕同一个目标展开。</div>
           </div>
           <button v-if="can('project.create')" class="btn primary" @click="showNewProject = true"><Icon name="plus" /> 新建项目</button>
         </div>
@@ -810,10 +810,10 @@ async function deleteTeam() {
 
       <!-- MEMBERS -->
       <template v-else-if="tab === 'members'">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px">
+        <div class="flex-between" style="margin-bottom:14px">
           <div>
-            <div style="font-family: var(--font-serif); font-size: 22px; font-weight: 600; color: var(--ink)">所有成员 · {{ team.members.length }}</div>
-            <div style="font-size: 12.5px; color: var(--ink-mute); margin-top: 2px">管理成员角色、权限与可访问的助手。</div>
+            <div class="heading-serif">所有成员 · {{ team.members.length }}</div>
+            <div class="text-mute-sm" style="margin-top:2px">管理成员角色、权限与可访问的助手。</div>
           </div>
           <button v-if="can('member.invite')" class="btn primary" @click="showInvite = true"><Icon name="plus" /> 邀请成员</button>
         </div>
@@ -825,8 +825,8 @@ async function deleteTeam() {
               <div style="min-width: 0"><div class="nm">{{ m.name }}</div><div class="hd">@{{ m.handle }}</div></div>
             </div>
             <div><span class="mem-role" :class="roleClass(m.role)">{{ m.role }}</span></div>
-            <div style="font-size: 12px; color: var(--ink-mute)"><span class="dot-inline" :class="getStatus(m.user_id)"></span>{{ getStatus(m.user_id) === 'online' ? '在线' : '离线' }}</div>
-            <div class="col-last-active" style="font-size: 12px; color: var(--ink-mute)">{{ m.last }}</div>
+            <div class="text-mute-sm"><span class="dot-inline" :class="getStatus(m.user_id)"></span>{{ getStatus(m.user_id) === 'online' ? '在线' : '离线' }}</div>
+            <div class="col-last-active text-mute-sm">{{ m.last }}</div>
             <div>
               <button v-if="(can('member.role') || can('member.remove')) && m.roleKey !== 'owner'" class="icon-btn" @click.stop="toggleMenu(m.handle, $event)"><Icon name="settings" /></button>
             </div>
@@ -836,8 +836,8 @@ async function deleteTeam() {
 
       <!-- AGENTS -->
       <template v-else-if="tab === 'agents'">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px">
-          <div><div style="font-family: var(--font-serif); font-size: 22px; font-weight: 600; color: var(--ink)">助手 · {{ teamProfiles.length }}</div><div style="font-size: 12.5px; color: var(--ink-mute); margin-top: 2px">团队可用的助手（含全局助手）。点击可直接开启对话。</div></div>
+        <div class="flex-between" style="margin-bottom:14px">
+          <div><div class="heading-serif">助手 · {{ teamProfiles.length }}</div><div class="text-mute-sm" style="margin-top:2px">团队可用的助手（含全局助手）。点击可直接开启对话。</div></div>
           <button v-if="can('agent.manage')" class="btn primary" @click="openSharedAgentsModal"><Icon name="settings" /> 管理共享</button>
         </div>
         <div class="agents-grid" style="max-width: none">
@@ -860,12 +860,12 @@ async function deleteTeam() {
 
       <!-- KNOWLEDGE -->
       <template v-else-if="tab === 'knowledge'">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px">
-          <div><div style="font-family: var(--font-serif); font-size: 22px; font-weight: 600; color: var(--ink)">知识库 · {{ team.knowledge.length }}</div><div style="font-size: 12.5px; color: var(--ink-mute); margin-top: 2px">所有团队助手都能引用这些文件作为上下文。点击文件可预览内容。</div></div>
+        <div class="flex-between" style="margin-bottom:14px">
+          <div><div class="heading-serif">知识库 · {{ team.knowledge.length }}</div><div class="text-mute-sm" style="margin-top:2px">所有团队助手都能引用这些文件作为上下文。点击文件可预览内容。</div></div>
           <button v-if="can('knowledge.upload')" class="btn primary" @click="addKnowledge"><Icon name="paperclip" /> 上传文件</button>
         </div>
         <div class="section-card">
-          <div v-if="!team.knowledge.length" style="padding: 40px; text-align: center; color: var(--ink-mute); font-size: 13px">知识库还是空的。</div>
+          <div v-if="!team.knowledge.length" class="empty-state-lg">知识库还是空的。</div>
           <div
             v-for="f in team.knowledge"
             :key="f.id"
@@ -874,7 +874,7 @@ async function deleteTeam() {
             @click="openKnowledgeFile(f.id)"
           >
             <div class="file-ico"><Icon name="doc" /></div>
-            <div style="flex: 1; min-width: 0"><div class="row-title">{{ f.name }}</div><div class="file-meta">{{ fmtSize(f.size_bytes) }} · 由 {{ f.uploaded_by_name || "成员" }} 上传</div></div>
+            <div class="flex-1-min"><div class="row-title">{{ f.name }}</div><div class="file-meta">{{ fmtSize(f.size_bytes) }} · 由 {{ f.uploaded_by_name || "成员" }} 上传</div></div>
             <span class="file-kind">{{ f.kind }}</span>
             <div class="row-actions" @click.stop>
               <button v-if="can('knowledge.upload')" class="row-act" title="编辑元数据" @click="editKnowledge(f)"><Icon name="edit" :size="13" /></button>
@@ -906,8 +906,8 @@ async function deleteTeam() {
 
         <div class="section-card ch-container">
           <div ref="channelScroller" style="flex:1;overflow-y:auto;padding:14px 18px;display:flex;flex-direction:column;gap:10px">
-            <div v-if="channelLoading" style="text-align:center;color:var(--ink-mute);font-size:13px;padding:40px 0">加载中…</div>
-            <div v-else-if="!channelMessages.length" style="text-align:center;color:var(--ink-mute);font-size:13px;padding:40px 0">
+            <div v-if="channelLoading" class="empty-state-lg" style="padding:40px 0">加载中…</div>
+            <div v-else-if="!channelMessages.length" class="empty-state-lg" style="padding:40px 0">
               还没有消息。发送 @助手名 + 问题，或开启「始终响应」模式。
             </div>
             <template v-for="m in channelMessages" :key="m.id">
@@ -997,12 +997,12 @@ async function deleteTeam() {
 
       <!-- ACTIVITY -->
       <template v-else-if="tab === 'activity'">
-        <div style="margin-bottom: 14px"><div style="font-family: var(--font-serif); font-size: 22px; font-weight: 600; color: var(--ink)">活动日志</div><div style="font-size: 12.5px; color: var(--ink-mute); margin-top: 2px">团队内的动作，按时间倒序。</div></div>
+        <div style="margin-bottom: 14px"><div class="heading-serif">活动日志</div><div class="text-mute-sm" style="margin-top:2px">团队内的动作，按时间倒序。</div></div>
         <div class="section-card">
-          <div v-if="!team.activity.length" style="padding: 40px; text-align: center; color: var(--ink-mute); font-size: 13px">暂无活动记录。</div>
+          <div v-if="!team.activity.length" class="empty-state-lg">暂无活动记录。</div>
           <div v-for="(a, i) in team.activity" :key="i" class="activity-item">
             <div class="activity-dot"><Icon :name="a.icon" /></div>
-            <div style="flex: 1; min-width: 0"><div class="activity-text"><b>{{ a.who }}</b> {{ a.action }} <em>{{ a.target }}</em></div><div class="activity-time">{{ a.ago }}</div></div>
+            <div class="flex-1-min"><div class="activity-text"><b>{{ a.who }}</b> {{ a.action }} <em>{{ a.target }}</em></div><div class="activity-time">{{ a.ago }}</div></div>
           </div>
         </div>
       </template>
@@ -1010,18 +1010,18 @@ async function deleteTeam() {
       <!-- SETTINGS -->
       <template v-else-if="tab === 'settings'">
         <div style="margin-bottom: 14px">
-          <div style="font-family: var(--font-serif); font-size: 22px; font-weight: 600; color: var(--ink)">团队设置</div>
-          <div style="font-size: 12.5px; color: var(--ink-mute); margin-top: 2px">基本信息与内容权限。只有所有者与管理员可修改。</div>
+          <div class="heading-serif">团队设置</div>
+          <div class="text-mute-sm" style="margin-top:2px">基本信息与内容权限。只有所有者与管理员可修改。</div>
         </div>
         <div class="section-card">
           <div class="section-head"><div class="section-title">基本信息</div></div>
           <div style="padding: 18px">
             <div style="display: grid; grid-template-columns: 140px 1fr; gap: 14px 18px; font-size: 13px">
-              <div style="color: var(--ink-mute)">团队名称</div><div>{{ team.name }}</div>
-              <div style="color: var(--ink-mute)">标识符</div><div style="font-family: var(--font-mono); font-size: 12.5px">@{{ team.handle }}</div>
-              <div style="color: var(--ink-mute)">标语</div><div style="font-style: italic; font-family: var(--font-serif)">{{ team.tagline }}</div>
-              <div style="color: var(--ink-mute)">套餐</div><div>{{ team.plan }}</div>
-              <div style="color: var(--ink-mute)">创建时间</div><div>{{ team.created }}</div>
+              <div class="text-mute">团队名称</div><div>{{ team.name }}</div>
+              <div class="text-mute">标识符</div><div style="font-family: var(--font-mono); font-size: 12.5px">@{{ team.handle }}</div>
+              <div class="text-mute">标语</div><div style="font-style: italic; font-family: var(--font-serif)">{{ team.tagline }}</div>
+              <div class="text-mute">套餐</div><div>{{ team.plan }}</div>
+              <div class="text-mute">创建时间</div><div>{{ team.created }}</div>
             </div>
           </div>
         </div>
@@ -1058,11 +1058,11 @@ async function deleteTeam() {
         </div>
 
         <div class="section-card" style="margin-top: 14px">
-          <div class="section-head"><div class="section-title" style="color: var(--danger)">危险区</div></div>
+          <div class="section-head"><div class="section-title text-danger">危险区</div></div>
           <div style="padding: 16px 18px; display: flex; align-items: center; justify-content: space-between">
             <div>
               <div style="font-weight: 600; color: var(--ink)">解散团队</div>
-              <div style="font-size: 12px; color: var(--ink-mute); margin-top: 2px">将删除所有团队会话、共享助手与知识条目。不可恢复。</div>
+              <div class="text-mute-sm" style="margin-top:2px">将删除所有团队会话、共享助手与知识条目。不可恢复。</div>
             </div>
             <button class="btn" :disabled="myRole !== 'owner'" :style="myRole === 'owner' ? 'color:var(--danger);border-color:var(--danger);' : ''" @click="myRole === 'owner' && deleteTeam()">解散</button>
           </div>

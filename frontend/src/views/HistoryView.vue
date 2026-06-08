@@ -152,7 +152,7 @@ function cycleSort() {
         <div class="hi-seg">
           <button v-for="o in SCOPES" :key="o[0]" :class="{ active: scope === o[0] }" @click="scope = o[0]">{{ o[1] }}</button>
         </div>
-        <span style="flex: 1"></span>
+        <span class="flex-1"></span>
         <button class="filter-select" @click="cycleSort">排序：{{ SORT_LABEL[sortBy] }} <Icon name="chevron_down" /></button>
         <button class="filter-select" :class="{ on: selectMode }" @click="selectMode ? clearSel() : (selectMode = true)"><Icon name="check" /> {{ selectMode ? "退出选择" : "批量管理" }}</button>
       </div>
@@ -162,8 +162,8 @@ function cycleSort() {
           <span class="login-check" :class="{ on: allSelected }" @click="toggleAll"><Icon v-if="allSelected" name="check" :size="11" /></span>
           全选当前 {{ base.length }} 项
         </label>
-        <span style="flex: 1"></span>
-        <span style="font-size: 12.5px; color: var(--ink-mute)">已选 {{ selected.size }} 项</span>
+        <span class="flex-1"></span>
+        <span class="text-mute-sm">已选 {{ selected.size }} 项</span>
         <button class="btn" :disabled="!selected.size" style="color: var(--danger); border-color: var(--rule)" @click="bulkDelete"><Icon name="close" /> 删除所选</button>
       </div>
 
@@ -196,7 +196,7 @@ function cycleSort() {
             <div class="hi-actions">
               <button class="icon-btn" :title="c.pinned ? '取消置顶' : '置顶'" @click.stop="togglePin(c)"><Icon name="pin" :style="c.pinned ? { color: 'var(--accent-deep)' } : {}" /></button>
               <button class="icon-btn" title="重命名" @click.stop="startRename(c)"><Icon name="note" /></button>
-              <button class="icon-btn" title="删除" @click.stop="del(c.id)" style="color: var(--danger)"><Icon name="close" /></button>
+              <button class="icon-btn text-danger" title="删除" @click.stop="del(c.id)"><Icon name="close" /></button>
             </div>
           </div>
         </div>

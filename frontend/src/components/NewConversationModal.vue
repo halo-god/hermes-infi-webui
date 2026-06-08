@@ -32,7 +32,7 @@ function confirm() {
 
 <template>
   <ModalShell title="开始新对话" subtitle="选择一位助手" :width="520" @close="emit('close')">
-    <div v-if="loading" style="padding: 32px; text-align: center; color: var(--ink-mute); font-size: 13px">
+    <div v-if="loading" class="empty-state-lg" style="padding:32px">
       加载助手…
     </div>
 
@@ -60,7 +60,7 @@ function confirm() {
 
     <template #foot>
       <button class="btn" @click="emit('close')">取消</button>
-      <span style="flex: 1"></span>
+      <span class="flex-1"></span>
       <button class="btn primary" @click="confirm">
         开始对话 <Icon name="arrow_up" :size="12" />
       </button>

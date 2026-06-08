@@ -7,6 +7,7 @@
 import { computed, onMounted, reactive, ref } from "vue";
 import Icon from "@/components/Icon.vue";
 import { adminApi } from "@/api/admin";
+import { fmtDate } from "@/utils/format";
 import { agentsApi, type Profile, type ProfileCreate } from "@/api/agents";
 import { http } from "@/api/client";
 import { useAuthStore } from "@/stores/auth";
@@ -304,9 +305,7 @@ const activeProviderObj = computed(() => providers.value.find((p) => p.id === ac
 function teamName(id: string | null) {
   return teamsOpt.value.find((t) => t.id === id)?.name || (id ? "未知团队" : "不自动加入");
 }
-function fmtTs(ts: string) {
-  return new Date(ts).toLocaleString("zh-CN", { hour12: false });
-}
+
 const providersOn = computed(() => providers.value.filter((p) => p.enabled).length);
 
 const TABS = [
@@ -520,19 +519,19 @@ async function handleImportFile(e: Event) {
             <div class="stat-label"><Icon name="bolt" /> 当前激活</div>
             <div class="stat-value">{{ stats.active_users }}</div>
             <div class="stat-foot"><em>待激活 {{ stats.pending_users }}</em></div>
-            <div style="margin-top: 13px; font-size: 11px; color: var(--ink-mute)">状态为「激活」的账号</div>
+            <div class="text-mute-xs" style="margin-top:13px">状态为「激活」的账号</div>
           </div>
           <div class="stat">
             <div class="stat-label"><Icon name="chat" /> 累计会话</div>
             <div class="stat-value">{{ stats.conversations }}</div>
             <div class="stat-foot"><em>{{ stats.messages }} 条消息</em></div>
-            <div style="margin-top: 13px; font-size: 11px; color: var(--ink-mute)">所有团队的累计会话</div>
+            <div class="text-mute-xs" style="margin-top:13px">所有团队的累计会话</div>
           </div>
           <div class="stat">
             <div class="stat-label"><Icon name="sparkle" /> 助手 & 团队</div>
             <div class="stat-value">{{ stats.agents }}</div>
             <div class="stat-foot"><em>{{ stats.teams }} 个团队</em></div>
-            <div style="margin-top: 13px; font-size: 11px; color: var(--ink-mute)">ACP 注册的助手数量</div>
+            <div class="text-mute-xs" style="margin-top:13px">ACP 注册的助手数量</div>
           </div>
         </div>
 
@@ -556,14 +555,14 @@ async function handleImportFile(e: Event) {
             </div>
           </div>
 
-          <div style="display: flex; flex-direction: column; gap: 18px">
+          <div class="flex-col-gap">
             <div class="section-card">
               <div class="section-head"><div class="section-title"><Icon name="user" /> 角色分布</div></div>
               <div style="padding: 14px 18px">
                 <div v-for="r in roleDist" :key="r.id" style="margin-bottom: 10px">
                   <div style="display: flex; justify-content: space-between; font-size: 12.5px; margin-bottom: 4px">
                     <span style="color: var(--ink); font-weight: 500">{{ r.name }}</span>
-                    <span style="color: var(--ink-mute)">{{ r.users }} · {{ r.pct }}%</span>
+                    <span class="text-mute">{{ r.users }} · {{ r.pct }}%</span>
                   </div>
                   <div style="height: 5px; background: var(--rule); border-radius: 3px; overflow: hidden">
                     <div :style="{ width: r.pct + '%', height: '100%', background: ROLE_COLOR[r.id] }"></div>
@@ -575,12 +574,12 @@ async function handleImportFile(e: Event) {
             <div class="section-card">
               <div class="section-head"><div class="section-title"><Icon name="bolt" /> 最近活动</div></div>
               <div class="section-body flush">
-                <div v-if="!audit.length" style="padding: 24px; text-align: center; color: var(--ink-mute); font-size: 12.5px">暂无活动记录。</div>
+                <div v-if="!audit.length" class="empty-state">暂无活动记录。</div>
                 <div v-for="a in audit.slice(0, 4)" :key="a.id" class="activity-item">
                   <div class="activity-dot"><Icon :name="a.actor_name ? 'user' : 'sparkle'" /></div>
-                  <div style="flex: 1; min-width: 0">
+                  <div class="flex-1-min">
                     <div class="activity-text"><b>{{ a.actor_name || "系统" }}</b> · {{ a.action }} <em>{{ a.target }}</em></div>
-                    <div class="activity-time">{{ fmtTs(a.ts) }} · {{ a.ip || "—" }}</div>
+                    <div class="activity-time">{{ fmtDate(a.ts) }} · {{ a.ip || "—" }}</div>
                   </div>
                   <span class="au-result" :class="a.result" style="height: fit-content">{{ a.result }}</span>
                 </div>
@@ -592,10 +591,10 @@ async function handleImportFile(e: Event) {
 
       <!-- ───────────── USERS ───────────── -->
       <template v-else-if="tab === 'users'">
-        <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 14px">
+        <div class="flex-between" style="align-items:flex-end;margin-bottom:14px">
           <div>
-            <div style="font-family: var(--font-serif); font-size: 22px; font-weight: 600; color: var(--ink)">用户管理</div>
-            <div style="font-size: 12.5px; color: var(--ink-mute); margin-top: 2px">所有租户成员；本地账号、LDAP 同步和企业微信 SSO 统一在此管理。</div>
+            <div class="heading-serif">用户管理</div>
+            <div class="text-mute-sm" style="margin-top:2px">所有租户成员；本地账号、LDAP 同步和企业微信 SSO 统一在此管理。</div>
           </div>
           <button class="btn primary" @click="showCreate = !showCreate"><Icon name="plus" /> 新建用户</button>
         </div>
@@ -616,8 +615,8 @@ async function handleImportFile(e: Event) {
           <div class="filter-input"><Icon name="search" /><input v-model="userQ" placeholder="按姓名 / 邮箱搜索" @keyup.enter="loadUsers" /></div>
           <button class="filter-select" :class="{ on: sourceFilter !== 'all' }" @click="sourceFilter = nextOf(['all', 'local', 'ldap', 'wecom'], sourceFilter)">来源：{{ sourceFilter === "all" ? "全部" : SOURCE_LABEL[sourceFilter] }} <Icon name="chevron_down" /></button>
           <button class="filter-select" :class="{ on: statusFilter !== 'all' }" @click="statusFilter = nextOf(['all', 'active', 'pending', 'inactive'], statusFilter)">状态：{{ statusFilter === "all" ? "全部" : STATUS_LABEL[statusFilter] }} <Icon name="chevron_down" /></button>
-          <span style="flex: 1"></span>
-          <span style="font-size: 12px; color: var(--ink-mute)">共 {{ filteredUsers().length }} 位 · {{ users.length }} 总数</span>
+          <span class="flex-1"></span>
+          <span class="text-mute-sm">共 {{ filteredUsers().length }} 位 · {{ users.length }} 总数</span>
         </div>
 
         <div class="users-table">
@@ -646,10 +645,10 @@ async function handleImportFile(e: Event) {
 
       <!-- ───────────── ROLES (RBAC) ───────────── -->
       <template v-else-if="tab === 'roles'">
-        <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 14px">
+        <div class="flex-between" style="align-items:flex-end;margin-bottom:14px">
           <div>
-            <div style="font-family: var(--font-serif); font-size: 22px; font-weight: 600; color: var(--ink)">权限管理</div>
-            <div style="font-size: 12.5px; color: var(--ink-mute); margin-top: 2px">基于角色（RBAC）。系统角色不可删除。团队内容权限在各团队「设置 · 内容权限」中配置。</div>
+            <div class="heading-serif">权限管理</div>
+            <div class="text-mute-sm" style="margin-top:2px">基于角色（RBAC）。系统角色不可删除。团队内容权限在各团队「设置 · 内容权限」中配置。</div>
           </div>
         </div>
 
@@ -701,10 +700,10 @@ async function handleImportFile(e: Event) {
 
       <!-- ───────────── IDENTITY ───────────── -->
       <template v-else-if="tab === 'identity'">
-        <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 14px">
+        <div class="flex-between" style="align-items:flex-end;margin-bottom:14px">
           <div>
-            <div style="font-family: var(--font-serif); font-size: 22px; font-weight: 600; color: var(--ink)">身份与连接器</div>
-            <div style="font-size: 12.5px; color: var(--ink-mute); margin-top: 2px">集中管理 LDAP / AD 域、企业微信 SSO 及其他身份源。用户身份信息会按映射规则同步进 Hermes。</div>
+            <div class="heading-serif">身份与连接器</div>
+            <div class="text-mute-sm" style="margin-top:2px">集中管理 LDAP / AD 域、企业微信 SSO 及其他身份源。用户身份信息会按映射规则同步进 Hermes。</div>
           </div>
         </div>
 
@@ -712,7 +711,7 @@ async function handleImportFile(e: Event) {
           <button v-for="p in providers" :key="p.id" class="ip-card" :class="{ active: activeProvider === p.id, disabled: !p.enabled }" @click="activeProvider = p.id">
             <div class="ip-card-head">
               <div class="ip-logo" :style="{ background: providerColor(p.id) }">{{ providerLetter(p.id) }}</div>
-              <div style="flex: 1; min-width: 0">
+              <div class="flex-1-min">
                 <div class="ip-name">{{ p.label }}</div>
                 <div class="ip-meta">{{ p.enabled ? "已配置 · 直绑认证" : "尚未启用" }}</div>
               </div>
@@ -726,7 +725,7 @@ async function handleImportFile(e: Event) {
         <div class="ip-detail" v-if="activeProviderObj">
           <div class="ip-detail-head">
             <div class="ip-logo" :style="{ background: providerColor(activeProvider), width: '44px', height: '44px', borderRadius: '11px' }">{{ providerLetter(activeProvider) }}</div>
-            <div style="flex: 1">
+            <div class="flex-1">
               <div style="font-family: var(--font-serif); font-size: 20px; font-weight: 600; color: var(--ink)">{{ activeProviderObj.label }}</div>
               <div style="font-size: 11.5px; color: var(--ink-mute); margin-top: 2px">{{ providerSubtitle(activeProvider) }}</div>
             </div>
@@ -788,7 +787,7 @@ async function handleImportFile(e: Event) {
                   <div class="lbl">用户 DN 模板</div>
                   <div class="val">
                     <input class="cfg-input" v-model="ldap.config['user_dn_template']" placeholder="uid={username},ou=people,dc=company,dc=com" />
-                    <div style="margin-top:4px;font-size:11px;color:var(--ink-mute)"><code style="font-family:var(--font-mono)">{username}</code> 将被替换为登录用户名</div>
+                    <div class="text-mute-xs" style="margin-top:4px"><code class="mono">{username}</code> 将被替换为登录用户名</div>
                   </div>
                 </div>
 
@@ -806,7 +805,7 @@ async function handleImportFile(e: Event) {
                   <div class="lbl">用户搜索过滤器</div>
                   <div class="val">
                     <input class="cfg-input" v-model="ldap.config['search_filter']" placeholder="(uid={username})" />
-                    <div style="margin-top:4px;font-size:11px;color:var(--ink-mute)">常见格式：<code style="font-family:var(--font-mono)">(uid={username})</code> 或 <code style="font-family:var(--font-mono)">(sAMAccountName={username})</code>（AD）</div>
+                    <div class="text-mute-xs" style="margin-top:4px">常见格式：<code class="mono">(uid={username})</code> 或 <code class="mono">(sAMAccountName={username})</code>（AD）</div>
                   </div>
                 </div>
               </div>
@@ -824,7 +823,7 @@ async function handleImportFile(e: Event) {
                   <div class="lbl">邮箱域补全</div>
                   <div class="val">
                     <input class="cfg-input short" v-model="ldap.config['email_domain']" placeholder="company.com" />
-                    <div style="margin-top:4px;font-size:11px;color:var(--ink-mute)">当 LDAP 无邮箱属性时，用 <code style="font-family:var(--font-mono)">username@{域}</code> 生成</div>
+                    <div class="text-mute-xs" style="margin-top:4px">当 LDAP 无邮箱属性时，用 <code class="mono">username@{域}</code> 生成</div>
                   </div>
                 </div>
               </div>
@@ -840,7 +839,7 @@ async function handleImportFile(e: Event) {
                     {{ ldapTestResult.ok ? "✓" : "✗" }} {{ ldapTestResult.message }}
                   </span>
                 </div>
-                <div style="margin-top:8px;font-size:11px;color:var(--ink-mute)">
+                <div class="text-mute-xs" style="margin-top:8px">
                   先保存配置再测试；测试仅验证服务器连通性和服务账号绑定，不验证普通用户凭证。
                 </div>
               </div>
@@ -906,7 +905,7 @@ async function handleImportFile(e: Event) {
                   <div class="lbl">回调地址</div>
                   <div class="val">
                     <input class="cfg-input" v-model="wecom.config['redirect_uri']" placeholder="https://hermes.company.com/api/v1/auth/wecom/callback" />
-                    <div style="margin-top:4px;font-size:11px;color:var(--ink-mute)">需要与企业微信后台「可信域名」保持一致，路径为 <code style="font-family:var(--font-mono)">/api/v1/auth/wecom/callback</code></div>
+                    <div class="text-mute-xs" style="margin-top:4px">需要与企业微信后台「可信域名」保持一致，路径为 <code class="mono">/api/v1/auth/wecom/callback</code></div>
                   </div>
                 </div>
               </div>
@@ -922,7 +921,7 @@ async function handleImportFile(e: Event) {
                     {{ wecomTestResult.ok ? "✓" : "✗" }} {{ wecomTestResult.message }}
                   </span>
                 </div>
-                <div style="margin-top:8px;font-size:11px;color:var(--ink-mute)">
+                <div class="text-mute-xs" style="margin-top:8px">
                   验证会向企业微信 API 请求 access_token；成功则说明企业ID和密钥配置正确。
                 </div>
               </div>
@@ -955,10 +954,10 @@ async function handleImportFile(e: Event) {
 
       <!-- ───────────── AUDIT ───────────── -->
       <template v-else-if="tab === 'audit'">
-        <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 14px">
+        <div class="flex-between" style="align-items:flex-end;margin-bottom:14px">
           <div>
-            <div style="font-family: var(--font-serif); font-size: 22px; font-weight: 600; color: var(--ink)">审计日志</div>
-            <div style="font-size: 12.5px; color: var(--ink-mute); margin-top: 2px">所有后台操作与登录事件都会被记录，按时间倒序。</div>
+            <div class="heading-serif">审计日志</div>
+            <div class="text-mute-sm" style="margin-top:2px">所有后台操作与登录事件都会被记录，按时间倒序。</div>
           </div>
           <div style="display: flex; align-items: center; gap: 8px">
             <button class="btn" :class="{ primary: auditAutoRefresh }" title="每 15 秒自动刷新" @click="toggleAutoRefresh">
@@ -975,19 +974,19 @@ async function handleImportFile(e: Event) {
             @click="resultFilter = nextOf(['all', 'ok', 'fail', 'partial'], resultFilter); loadAudit()">
             结果：{{ { all: "全部", ok: "成功", fail: "失败", partial: "部分成功" }[resultFilter] }} <Icon name="chevron_down" />
           </button>
-          <span style="font-size: 12px; color: var(--ink-mute)">从</span>
+          <span class="text-mute-sm">从</span>
           <input type="date" class="filter-select" v-model="auditDateFrom" style="padding: 0 10px; height: 34px" @change="loadAudit" />
-          <span style="font-size: 12px; color: var(--ink-mute)">至</span>
+          <span class="text-mute-sm">至</span>
           <input type="date" class="filter-select" v-model="auditDateTo" style="padding: 0 10px; height: 34px" @change="loadAudit" />
-          <span style="flex: 1"></span>
-          <span style="font-size: 12px; color: var(--ink-mute)">{{ filteredAudit.length }} / {{ audit.length }} 条</span>
+          <span class="flex-1"></span>
+          <span class="text-mute-sm">{{ filteredAudit.length }} / {{ audit.length }} 条</span>
         </div>
 
         <div class="audit-table">
           <div class="au-row head"><div>时间戳</div><div>操作者</div><div>动作</div><div class="col-target">目标</div><div>结果</div><div class="col-ip">IP</div></div>
-          <div v-if="!filteredAudit.length" style="padding: 32px; text-align: center; color: var(--ink-mute); font-size: 13px">暂无符合条件的记录。</div>
+          <div v-if="!filteredAudit.length" class="empty-state-lg" style="padding:32px">暂无符合条件的记录。</div>
           <div v-for="a in filteredAudit" :key="a.id" class="au-row">
-            <div class="au-ts">{{ fmtTs(a.ts) }}</div>
+            <div class="au-ts">{{ fmtDate(a.ts) }}</div>
             <div class="au-actor">{{ a.actor_name || "系统" }}</div>
             <div style="font-family: var(--font-mono); font-size: 11.5px">{{ a.action }}</div>
             <div class="col-target">
@@ -1013,10 +1012,10 @@ async function handleImportFile(e: Event) {
       <!-- ───────────── SYSTEM ───────────── -->
       <!-- ───────────── ASSISTANTS ───────────── -->
       <template v-else-if="tab === 'assistants'">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px">
+        <div class="flex-between" style="margin-bottom:14px">
           <div>
-            <div style="font-family: var(--font-serif); font-size: 22px; font-weight: 600; color: var(--ink)">助手管理</div>
-            <div style="font-size: 12.5px; color: var(--ink-mute); margin-top: 2px">配置助手别名、图标与默认模型，用户在新建会话时即可看到。</div>
+            <div class="heading-serif">助手管理</div>
+            <div class="text-mute-sm" style="margin-top:2px">配置助手别名、图标与默认模型，用户在新建会话时即可看到。</div>
           </div>
           <div style="display: flex; gap: 8px; align-items: center">
             <span v-if="hermesVersion" style="font-size: 11.5px; color: var(--ink-mute); font-family: var(--font-mono); padding: 3px 8px; background: var(--bg-plate); border-radius: 5px">{{ hermesVersion }}</span>
@@ -1035,7 +1034,7 @@ async function handleImportFile(e: Event) {
 
         <!-- Scan result banner -->
         <div v-if="scanMsg || scanErrors.length" style="margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 1px solid var(--rule)">
-          <div v-if="scanMsg" style="padding: 10px 14px; display: flex; gap: 10px; align-items: center; background: var(--bg-panel)">
+          <div v-if="scanMsg" class="info-banner">
             <Icon name="check" :size="14" style="color: var(--ok); flex-shrink: 0" />
             <span style="font-size: 13px; color: var(--ink)">{{ scanMsg }}</span>
             <span v-if="scanHermesPath" style="margin-left: auto; font-size: 11px; color: var(--ink-mute); font-family: var(--font-mono)">{{ scanHermesPath }}</span>
@@ -1046,17 +1045,17 @@ async function handleImportFile(e: Event) {
               <span style="font-size: 12px; color: var(--ink-soft); line-height: 1.5">{{ e }}</span>
             </div>
             <div style="padding: 8px 14px; background: var(--bg-plate); border-top: 1px solid var(--rule-soft); font-size: 11.5px; color: var(--ink-mute)">
-              Docker 用户：在 <code style="font-family: var(--font-mono); background: var(--rule-soft); padding: 1px 4px; border-radius: 3px">.env</code> 中设置
-              <code style="font-family: var(--font-mono); background: var(--rule-soft); padding: 1px 4px; border-radius: 3px">HERMES_BIN=/path/to/hermes</code> 和
-              <code style="font-family: var(--font-mono); background: var(--rule-soft); padding: 1px 4px; border-radius: 3px">HERMES_HOME=/mounted/.hermes</code>，
-              并在 <code style="font-family: var(--font-mono); background: var(--rule-soft); padding: 1px 4px; border-radius: 3px">compose.yaml</code> 中取消注释 volumes 挂载，然后重启服务。
+              Docker 用户：在 <code class="code-pill">.env</code> 中设置
+              <code class="code-pill">HERMES_BIN=/path/to/hermes</code> 和
+              <code class="code-pill">HERMES_HOME=/mounted/.hermes</code>，
+              并在 <code class="code-pill">compose.yaml</code> 中取消注释 volumes 挂载，然后重启服务。
             </div>
           </template>
         </div>
 
         <!-- Profiles scan result banner -->
         <div v-if="scanProfilesMsg || scanProfilesErrors.length" style="margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 1px solid var(--rule)">
-          <div v-if="scanProfilesMsg" style="padding: 10px 14px; display: flex; gap: 10px; align-items: center; background: var(--bg-panel)">
+          <div v-if="scanProfilesMsg" class="info-banner">
             <Icon name="sparkle" :size="14" style="color: var(--ok); flex-shrink: 0" />
             <span style="font-size: 13px; color: var(--ink)">{{ scanProfilesMsg }}</span>
           </div>
@@ -1074,56 +1073,56 @@ async function handleImportFile(e: Event) {
             {{ editingProfileId ? "编辑助手" : "新建助手" }}
           </div>
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px">
-            <label style="font-size: 12.5px; color: var(--ink-mute)">
+            <label class="text-mute-sm">
               显示名称 *
-              <input v-model="profileForm.name" placeholder="例：写作助手" style="width:100%;margin-top:4px;padding:6px 10px;border:1px solid var(--rule);border-radius:6px;font-size:13px;background:var(--bg-canvas);color:var(--ink)" />
+              <input v-model="profileForm.name" placeholder="例：写作助手" class="form-input" />
             </label>
-            <label style="font-size: 12.5px; color: var(--ink-mute)">
+            <label class="text-mute-sm">
               标识符 (handle){{ editingProfileId ? '' : ' *' }}
-              <input v-model="profileForm.handle" placeholder="例：writing-assistant" :disabled="!!editingProfileId" style="width:100%;margin-top:4px;padding:6px 10px;border:1px solid var(--rule);border-radius:6px;font-size:13px;background:var(--bg-canvas);color:var(--ink)" />
+              <input v-model="profileForm.handle" placeholder="例：writing-assistant" :disabled="!!editingProfileId" class="form-input" />
             </label>
-            <label style="font-size: 12.5px; color: var(--ink-mute)">
+            <label class="text-mute-sm">
               简介
-              <input v-model="profileForm.desc" placeholder="助手描述" style="width:100%;margin-top:4px;padding:6px 10px;border:1px solid var(--rule);border-radius:6px;font-size:13px;background:var(--bg-canvas);color:var(--ink)" />
+              <input v-model="profileForm.desc" placeholder="助手描述" class="form-input" />
             </label>
-            <label style="font-size: 12.5px; color: var(--ink-mute)">
+            <label class="text-mute-sm">
               默认模型
-              <input v-model="profileForm.default_model" placeholder="hermes-4" style="width:100%;margin-top:4px;padding:6px 10px;border:1px solid var(--rule);border-radius:6px;font-size:13px;background:var(--bg-canvas);color:var(--ink);font-family:var(--font-mono)" />
+              <input v-model="profileForm.default_model" placeholder="hermes-4" class="form-input mono" />
             </label>
-            <label style="font-size: 12.5px; color: var(--ink-mute)">
+            <label class="text-mute-sm">
               图标名称
-              <input v-model="profileForm.icon" placeholder="sparkle" style="width:100%;margin-top:4px;padding:6px 10px;border:1px solid var(--rule);border-radius:6px;font-size:13px;background:var(--bg-canvas);color:var(--ink)" />
+              <input v-model="profileForm.icon" placeholder="sparkle" class="form-input" />
             </label>
-            <label style="font-size: 12.5px; color: var(--ink-mute)">
+            <label class="text-mute-sm">
               颜色
               <div style="display:flex;gap:6px;margin-top:4px;align-items:center">
                 <input type="color" v-model="profileForm.color" style="width:36px;height:34px;border:1px solid var(--rule);border-radius:6px;cursor:pointer;padding:2px" />
-                <input v-model="profileForm.color" style="flex:1;padding:6px 10px;border:1px solid var(--rule);border-radius:6px;font-size:13px;background:var(--bg-canvas);color:var(--ink);font-family:var(--font-mono)" />
+                <input v-model="profileForm.color" class="form-input mono" style="flex:1;margin-top:0" />
               </div>
             </label>
-            <label style="font-size: 12.5px; color: var(--ink-mute)">
+            <label class="text-mute-sm">
               范围
-              <select v-model="profileForm.scope" style="width:100%;margin-top:4px;padding:6px 10px;border:1px solid var(--rule);border-radius:6px;font-size:13px;background:var(--bg-canvas);color:var(--ink)">
+              <select v-model="profileForm.scope" class="form-input">
                 <option value="personal">个人</option>
                 <option value="global">全局</option>
                 <option value="team">团队</option>
               </select>
             </label>
-            <label v-if="profileForm.scope === 'team'" style="font-size: 12.5px; color: var(--ink-mute)">
+            <label v-if="profileForm.scope === 'team'" class="text-mute-sm">
               关联团队
-              <select v-model="profileForm.team_id" style="width:100%;margin-top:4px;padding:6px 10px;border:1px solid var(--rule);border-radius:6px;font-size:13px;background:var(--bg-canvas);color:var(--ink)">
+              <select v-model="profileForm.team_id" class="form-input">
                 <option :value="null">不关联</option>
                 <option v-for="t in teamsOpt" :key="t.id" :value="t.id">{{ t.name }}</option>
               </select>
             </label>
           </div>
           <!-- system_prompt -->
-          <label style="display:block;margin-top:12px;font-size:12.5px;color:var(--ink-mute)">
+          <label class="text-mute-sm" style="display:block;margin-top:12px">
             系统提示词 (system prompt)
-            <textarea v-model="profileForm.system_prompt" rows="4" placeholder="留空则使用 agent 默认行为" style="width:100%;margin-top:4px;padding:6px 10px;border:1px solid var(--rule);border-radius:6px;font-size:13px;background:var(--bg-canvas);color:var(--ink);resize:vertical;box-sizing:border-box"></textarea>
+            <textarea v-model="profileForm.system_prompt" rows="4" placeholder="留空则使用 agent 默认行为" class="form-input" style="resize:vertical"></textarea>
           </label>
           <!-- skills chips -->
-          <label style="display:block;margin-top:12px;font-size:12.5px;color:var(--ink-mute)">
+          <label class="text-mute-sm" style="display:block;margin-top:12px">
             技能标签
             <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">
               <span v-for="s in profileForm.skills" :key="s" style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;background:rgba(184,133,42,0.12);color:var(--accent-deep);font-size:12px">
@@ -1147,7 +1146,7 @@ async function handleImportFile(e: Event) {
 
         <!-- Profile list -->
         <div class="section-card">
-          <div v-if="!profiles.length" style="padding: 40px; text-align: center; color: var(--ink-mute); font-size: 13px">
+          <div v-if="!profiles.length" class="empty-state-lg">
             还没有助手。点击「扫描 Agent」自动生成，或手动「新建助手」。
           </div>
           <div v-for="p in profiles" :key="p.id" style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--rule-soft)">
@@ -1178,8 +1177,8 @@ async function handleImportFile(e: Event) {
 
       <template v-else-if="tab === 'system' && settings">
         <div style="margin-bottom: 14px">
-          <div style="font-family: var(--font-serif); font-size: 22px; font-weight: 600; color: var(--ink)">系统设置</div>
-          <div style="font-size: 12.5px; color: var(--ink-mute); margin-top: 2px">租户级配置：品牌、模型网关、容量配额。</div>
+          <div class="heading-serif">系统设置</div>
+          <div class="text-mute-sm" style="margin-top:2px">租户级配置：品牌、模型网关、容量配额。</div>
         </div>
         <div class="col-grid">
           <div class="section-card">
@@ -1211,11 +1210,11 @@ async function handleImportFile(e: Event) {
         </div>
 
         <div class="section-card" style="margin-top: 18px; border-color: color-mix(in srgb, var(--danger) 30%, var(--rule))">
-          <div class="section-head"><div class="section-title" style="color: var(--danger)">危险区</div></div>
+          <div class="section-head"><div class="section-title text-danger">危险区</div></div>
           <div style="padding: 14px 18px; display: flex; justify-content: space-between; align-items: center">
             <div>
               <div style="font-weight: 600; color: var(--ink)">迁移到独立部署</div>
-              <div style="font-size: 12px; color: var(--ink-mute); margin-top: 2px">导出全部租户数据并切换到本地化部署，过程中服务会中断 ~15 分钟。</div>
+              <div class="text-mute-sm" style="margin-top:2px">导出全部租户数据并切换到本地化部署，过程中服务会中断 ~15 分钟。</div>
             </div>
             <button class="btn" style="color: var(--danger); border-color: var(--danger)" disabled title="需在独立部署环境中执行">开始迁移</button>
           </div>

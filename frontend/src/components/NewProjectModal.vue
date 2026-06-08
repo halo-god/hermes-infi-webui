@@ -92,7 +92,7 @@ async function submit() {
   <ModalShell :title="isEdit ? '编辑项目' : '新建项目'" :subtitle="isEdit ? '修改项目信息' : ('在「' + teamName + '」团队下创建一个新项目')" :width="640" @close="$emit('close')">
     <div class="np-identity">
       <div class="proj-icon np-preview" :style="{ background: form.color }"><Icon :name="form.icon" /></div>
-      <div style="flex: 1; min-width: 0">
+      <div class="flex-1-min">
         <div class="np-name-row">
           <input class="np-input np-name" v-model="form.name" placeholder="项目名称" maxlength="32" autofocus />
           <span class="np-counter">{{ form.name.length }}/32</span>
@@ -166,7 +166,7 @@ async function submit() {
 
     <template #foot>
       <span class="np-foot-hint">项目会立即在团队主页显示</span>
-      <span style="flex: 1"></span>
+      <span class="flex-1"></span>
       <button class="btn" @click="$emit('close')">取消</button>
       <button class="btn primary" :disabled="!valid || busy" @click="submit"><Icon name="plus" /> {{ busy ? "创建中…" : "创建项目" }}</button>
     </template>

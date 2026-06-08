@@ -131,17 +131,17 @@ async function saveNotifyPrefs() {
         <div class="section-card">
           <div class="section-head"><div class="section-title">基本资料</div></div>
           <div style="padding: 18px; display: grid; grid-template-columns: 140px 1fr; gap: 14px 18px; align-items: center; font-size: 13px">
-            <div style="color: var(--ink-mute)">姓名</div>
+            <div class="text-mute">姓名</div>
             <input class="cfg-input" v-model="form.name" />
-            <div style="color: var(--ink-mute)">用户名</div>
+            <div class="text-mute">用户名</div>
             <input class="cfg-input" v-model="form.handle" />
-            <div style="color: var(--ink-mute)">职位</div>
+            <div class="text-mute">职位</div>
             <input class="cfg-input" v-model="form.title" />
-            <div style="color: var(--ink-mute)">部门</div>
+            <div class="text-mute">部门</div>
             <input class="cfg-input" v-model="form.department" />
-            <div style="color: var(--ink-mute)">简介</div>
+            <div class="text-mute">简介</div>
             <textarea class="cfg-input" style="height: 64px; padding-top: 8px" v-model="form.bio"></textarea>
-            <div style="color: var(--ink-mute)">头像颜色</div>
+            <div class="text-mute">头像颜色</div>
             <div class="up-swatches">
               <button v-for="c in COLORS" :key="c" class="up-sw" :class="{ active: form.color === c }" :style="{ background: c }" @click="form.color = c"></button>
             </div>
@@ -160,13 +160,13 @@ async function saveNotifyPrefs() {
         <div class="section-card" style="margin-top: 16px">
           <div class="section-head"><div class="section-title">语言与时区</div></div>
           <div style="padding: 18px; display: grid; grid-template-columns: 140px 1fr; gap: 14px 18px; align-items: center; font-size: 13px">
-            <div style="color: var(--ink-mute)">界面语言</div>
+            <div class="text-mute">界面语言</div>
             <select class="cfg-input" style="height: 34px">
               <option value="zh">中文（简体）</option>
               <option value="en">English</option>
             </select>
-            <div style="color: var(--ink-mute)">时区</div>
-            <input class="cfg-input" value="Asia/Shanghai (UTC+8)" readonly style="color: var(--ink-mute)" />
+            <div class="text-mute">时区</div>
+            <input class="cfg-input text-mute" value="Asia/Shanghai (UTC+8)" readonly />
           </div>
         </div>
       </template>
@@ -194,24 +194,24 @@ async function saveNotifyPrefs() {
           <div class="section-body flush">
             <div v-for="s in sessions" :key="s.id" class="row-item" style="padding: 12px 16px">
               <Icon name="globe" style="color: var(--ink-mute); flex-shrink: 0" />
-              <div style="flex: 1; min-width: 0">
+              <div class="flex-1-min">
                 <div style="font-size: 13px; font-weight: 500; color: var(--ink)">
                   {{ s.device }}
                   <span v-if="s.current" style="margin-left: 6px; font-size: 10.5px; background: var(--accent-tint); color: var(--accent-deep); border-radius: 4px; padding: 1px 5px; font-weight: 600">当前</span>
                 </div>
                 <div style="font-size: 11.5px; color: var(--ink-mute); margin-top: 2px">{{ s.ip }} · {{ relTime(s.ts) }}</div>
               </div>
-              <button v-if="!s.current" class="btn" style="color: var(--danger)" @click="revokeSession(s.id)">撤销</button>
+              <button v-if="!s.current" class="btn text-danger" @click="revokeSession(s.id)">撤销</button>
             </div>
           </div>
         </div>
 
         <div class="section-card" style="margin-top: 16px; border-color: color-mix(in srgb, var(--danger) 25%, var(--rule))">
-          <div class="section-head"><div class="section-title" style="color: var(--danger)">危险操作</div></div>
+          <div class="section-head"><div class="section-title text-danger">危险操作</div></div>
           <div style="padding: 18px; display: flex; align-items: center; justify-content: space-between; gap: 12px">
             <div>
               <div style="font-size: 13px; font-weight: 500; color: var(--ink)">修改密码</div>
-              <div style="font-size: 12px; color: var(--ink-mute); margin-top: 2px">需要验证当前密码。</div>
+              <div class="text-mute-sm" style="margin-top:2px">需要验证当前密码。</div>
             </div>
             <button class="btn">修改密码</button>
           </div>
@@ -258,7 +258,7 @@ async function saveNotifyPrefs() {
 
         <div v-if="notifyDirty" style="margin-top: 16px; display: flex; align-items: center; gap: 12px">
           <button class="btn primary" :disabled="notifySaving" @click="saveNotifyPrefs">{{ notifySaving ? "保存中…" : "保存偏好" }}</button>
-          <span style="font-size: 12px; color: var(--ink-mute)">有未保存的更改</span>
+          <span class="text-mute-sm">有未保存的更改</span>
         </div>
       </template>
 

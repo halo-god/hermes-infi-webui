@@ -90,32 +90,32 @@ async function save() {
       </div>
 
       <div>
-        <label style="font-size: 12.5px; font-weight: 500; color: var(--ink-mute); display: block; margin-bottom: 4px">文件名称</label>
+        <label class="text-mute-label">文件名称</label>
         <input
           v-model="form.name"
           type="text"
           placeholder="如 品牌指南.pdf"
-          style="width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 13.5px; background: var(--surface); color: var(--ink); outline: none"
+          class="form-input-lg"
           @keydown.enter="save"
         />
       </div>
       <div style="display: flex; gap: 12px">
-        <div style="flex: 1">
-          <label style="font-size: 12.5px; font-weight: 500; color: var(--ink-mute); display: block; margin-bottom: 4px">文件类型</label>
+        <div class="flex-1">
+          <label class="text-mute-label">文件类型</label>
           <select
             v-model="form.kind"
-            style="width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 13.5px; background: var(--surface); color: var(--ink); outline: none"
+            class="form-input-lg"
           >
             <option v-for="k in KINDS" :key="k" :value="k">{{ k.toUpperCase() }}</option>
           </select>
         </div>
-        <div v-if="!selectedFile && !editing" style="flex: 1">
-          <label style="font-size: 12.5px; font-weight: 500; color: var(--ink-mute); display: block; margin-bottom: 4px">文件大小 (字节)</label>
+        <div v-if="!selectedFile && !editing" class="flex-1">
+          <label class="text-mute-label">文件大小 (字节)</label>
           <input
             v-model.number="form.size_bytes"
             type="number"
             placeholder="留空自动生成"
-            style="width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 13.5px; background: var(--surface); color: var(--ink); outline: none"
+            class="form-input-lg"
           />
         </div>
         <div v-if="selectedFile" style="flex: 1; display: flex; flex-direction: column; justify-content: flex-end">

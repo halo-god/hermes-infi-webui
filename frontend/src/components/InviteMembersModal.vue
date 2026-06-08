@@ -125,7 +125,7 @@ const EXPIRES = [{ id: "1d", label: "1 天" }, { id: "7d", label: "7 天" }, { i
       <div class="inv-email-foot">
         <span v-if="parsedEmails.length" class="inv-parsed"><Icon name="check" /> 识别到 {{ parsedEmails.length }} 个有效邮箱</span>
         <span v-else class="inv-parsed empty">输入邮箱后会自动识别</span>
-        <span style="flex: 1"></span>
+        <span class="flex-1"></span>
         <button class="btn primary" :disabled="!parsedEmails.length || sending" @click="sendInvites"><Icon name="arrow_up" /> {{ sending ? "发送中…" : "发送邀请" }}</button>
       </div>
       <div v-if="result" style="font-size: 12.5px; color: var(--ink-soft); margin-top: 8px">{{ result }}</div>
@@ -134,7 +134,7 @@ const EXPIRES = [{ id: "1d", label: "1 天" }, { id: "7d", label: "7 天" }, { i
     <div v-else class="inv-pane">
       <div class="inv-sso-row">
         <div class="inv-sso-icon" style="background: #3a7a2a; color: white">W</div>
-        <div style="flex: 1; min-width: 0">
+        <div class="flex-1-min">
           <div class="inv-sso-nm">企业微信 SSO <span v-if="sso.wecom.on" class="inv-sso-on">同步中</span><span v-else class="inv-sso-off">已停用</span></div>
           <div class="inv-sso-ds">今日已自动加入 {{ sso.wecom.syncedToday ?? "—" }} 人 · 部门映射：{{ sso.wecom.deptAuto }}</div>
         </div>
@@ -142,7 +142,7 @@ const EXPIRES = [{ id: "1d", label: "1 天" }, { id: "7d", label: "7 天" }, { i
       </div>
       <div class="inv-sso-row">
         <div class="inv-sso-icon" style="background: #3a6da1; color: white">L</div>
-        <div style="flex: 1; min-width: 0">
+        <div class="flex-1-min">
           <div class="inv-sso-nm">LDAP / AD <span v-if="sso.ldap.on" class="inv-sso-on">同步中</span><span v-else class="inv-sso-off">已停用</span></div>
           <div class="inv-sso-ds" style="font-family: var(--font-mono); font-size: 11px">today: +{{ sso.ldap.syncedToday ?? "—" }} · filter: {{ sso.ldap.filter }}</div>
         </div>
@@ -150,7 +150,7 @@ const EXPIRES = [{ id: "1d", label: "1 天" }, { id: "7d", label: "7 天" }, { i
       </div>
       <div class="inv-sso-row">
         <div class="inv-sso-icon" style="background: #6a3aa1; color: white">F</div>
-        <div style="flex: 1; min-width: 0">
+        <div class="flex-1-min">
           <div class="inv-sso-nm">飞书 SSO <span class="inv-sso-off">未配置</span></div>
           <div class="inv-sso-ds">在「后台 · 身份连接器」中完成配置后启用</div>
         </div>
@@ -160,7 +160,7 @@ const EXPIRES = [{ id: "1d", label: "1 天" }, { id: "7d", label: "7 天" }, { i
 
     <template #foot>
       <span class="np-foot-hint">邮箱邀请会把已注册用户直接加入团队</span>
-      <span style="flex: 1"></span>
+      <span class="flex-1"></span>
       <button class="btn" @click="$emit('close')">关闭</button>
     </template>
   </ModalShell>

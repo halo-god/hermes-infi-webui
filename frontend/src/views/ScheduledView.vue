@@ -40,7 +40,7 @@ const tasks = [
             >
               <Icon :name="agentById(t.agent).icon || 'sparkle'" :size="14" />
             </div>
-            <div style="flex: 1; min-width: 0">
+            <div class="flex-1-min">
               <div style="font-weight: 600; color: var(--ink); font-size: 13.5px">{{ t.name }}</div>
               <div style="font-size: 11.5px; color: var(--ink-mute); margin-top: 3px">
                 由 {{ agentById(t.agent).label }} 执行 · 下次：{{ t.next }}
