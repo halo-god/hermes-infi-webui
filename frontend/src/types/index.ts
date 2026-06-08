@@ -192,6 +192,7 @@ export interface ConversationDetail extends Conversation {
 export interface GroupMember {
   id: string;
   user_id: string | null;
+  user_name?: string;
   agent_id: string | null;
   role: "admin" | "member";
   joined_at: string;

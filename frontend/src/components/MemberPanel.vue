@@ -125,10 +125,10 @@ watch(() => props.conversationId, load);
           <template v-if="expandedSections.has('human')">
             <div v-for="m in humanMembers" :key="m.id" class="mp-item">
               <div class="mp-avatar mp-avatar-human">
-                {{ (m.user_id || '?')[0]?.toUpperCase() }}
+                {{ (m.user_name || m.user_id || '?')[0]?.toUpperCase() }}
               </div>
               <div class="mp-info">
-                <div class="mp-name">{{ m.user_id || '未知用户' }}</div>
+                <div class="mp-name">{{ m.user_name || m.user_id?.slice(0, 8) || '未知用户' }}</div>
                 <div class="mp-sub">{{ m.role === 'admin' ? '管理员' : '成员' }}</div>
               </div>
             </div>
@@ -163,13 +163,16 @@ watch(() => props.conversationId, load);
 
 <style scoped>
 .mp-panel {
-  width: 220px;
-  flex-shrink: 0;
+  position: absolute;
+  top: 0; right: 0; bottom: 0;
+  width: 240px;
+  background: var(--bg-side);
   border-left: 1px solid var(--rule);
-  background: var(--bg-panel);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  box-shadow: -20px 0 40px -20px rgba(29,26,20,0.18);
+  z-index: 10;
 }
 /* Header — matches .ws-head */
 .mp-head {

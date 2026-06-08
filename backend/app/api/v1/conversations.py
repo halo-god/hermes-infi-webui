@@ -820,7 +820,17 @@ async def get_members(
     if convo.type != "group":
         raise HTTPException(status_code=400, detail="该会话不是群聊")
     members = await svc.get_group_members(db, conversation_id)
-    return [GroupMemberOut.model_validate(m).model_dump() for m in members]
+    # Enrich with user names
+    from app.db.models.user import User as UserModel
+    result = []
+    for m in members:
+        data = GroupMemberOut.model_validate(m).model_dump()
+        if m.user_id:
+            u = await db.get(UserModel, m.user_id)
+            if u:
+                data["user_name"] = u.display_name or u.email or str(m.user_id)[:8]
+        result.append(data)
+    return result
 
 
 @router.post("/{conversation_id}/members", status_code=201)
