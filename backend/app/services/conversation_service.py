@@ -445,7 +445,7 @@ async def send_roundtable(
             "system_prompt": system_prompt,
         }
     )
-    return user_msg, agent_msg
+    return user_msg, rt_msg
 
 
 async def dispatch(
