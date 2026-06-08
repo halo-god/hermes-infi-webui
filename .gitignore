@@ -2,11 +2,14 @@ node_modules/
 __pycache__/
 *.pyc
 .env
+.env.local
+.env.*.local
 .venv/
 venv/
 dist/
 build/
 .DS_Store
+._.DS_Store
 *.egg-info/
 .minio_data/
 __MACOSX/
