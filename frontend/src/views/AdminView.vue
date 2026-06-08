@@ -344,7 +344,7 @@ async function scanAgents() {
   scanHermesPath.value = null;
   try {
     const result = await agentsApi.scanAgents();
-    hermesVersion.value = result.version !== "unknown" ? result.version : "";
+    hermesVersion.value = result.version && result.version !== "unknown" ? result.version : "";
     scanMsg.value = `发现 ${result.found} 个Agent，新增 ${result.created}，更新 ${result.updated}`;
     scanErrors.value = result.errors || [];
     scanHermesPath.value = result.hermes_path;

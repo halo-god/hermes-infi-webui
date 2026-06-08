@@ -574,9 +574,6 @@ function roleClass(r: string) {
   if (r.includes("管理")) return "admin";
   return "";
 }
-function statusLabel(s: string) {
-  return ({ online: "在线", idle: "离开", offline: "离线" } as Record<string, string>)[s] || s;
-}
 function shade(hex: string, percent: number) {
   const c = hex.replace("#", "");
   const r = parseInt(c.slice(0, 2), 16);
