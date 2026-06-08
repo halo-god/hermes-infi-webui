@@ -3,6 +3,7 @@ import { tokenStore } from "./client";
 import type {
   Conversation,
   ConversationDetail,
+  GroupMember,
   Message,
   WorkspaceFile,
   WorkspaceFileVersion,
@@ -108,5 +109,37 @@ export const conversationsApi = {
   },
   async setSessionModel(id: string, modelId: string): Promise<void> {
     await http.put(`/conversations/${id}/session/model`, { model_id: modelId });
+  },
+
+  // ── Group chat ──
+  async createGroup(title: string, memberUserIds: string[], memberAgentIds: string[], teamId?: string): Promise<Conversation & { members: GroupMember[] }> {
+    return (await http.post(`/conversations/group`, {
+      title,
+      member_user_ids: memberUserIds,
+      member_agent_ids: memberAgentIds,
+      team_id: teamId || null,
+    })).data;
+  },
+  async listGroups(): Promise<Conversation[]> {
+    return (await http.get(`/conversations/groups`)).data;
+  },
+  async getMembers(id: string): Promise<GroupMember[]> {
+    return (await http.get(`/conversations/${id}/members`)).data;
+  },
+  async addMember(id: string, userId?: string, agentId?: string): Promise<void> {
+    await http.post(`/conversations/${id}/members`, {
+      user_id: userId || null,
+      agent_id: agentId || null,
+    });
+  },
+  async removeMember(id: string, memberId: string): Promise<void> {
+    await http.delete(`/conversations/${id}/members/${memberId}`);
+  },
+  async sendWithMentions(id: string, text: string, mentions: string[], fileIds?: string[]): Promise<SendResponse> {
+    return (await http.post<SendResponse>(`/conversations/${id}/messages`, {
+      text,
+      mentions,
+      attached_file_ids: fileIds || [],
+    })).data;
   },
 };

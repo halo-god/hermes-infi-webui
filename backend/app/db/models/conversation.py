@@ -1,9 +1,10 @@
-"""Conversation + Message models."""
+"""Conversation + Message + GroupMember models."""
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -25,6 +26,8 @@ class Conversation(UUIDPrimaryKey, Timestamps, Base):
     project_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("projects.id", ondelete="SET NULL"), index=True
     )
+    type: Mapped[str] = mapped_column(String(16), default="personal", nullable=False)
+    # "personal" = 个人1:1对话, "group" = 群聊（多人+多Agent）
     primary_agent_id: Mapped[str] = mapped_column(String(64), default="hermes")
     active_agent_ids: Mapped[list] = mapped_column(JSONB, default=lambda: ["hermes"])
     profile_id: Mapped[str | None] = mapped_column(String(64))
@@ -33,11 +36,16 @@ class Conversation(UUIDPrimaryKey, Timestamps, Base):
     pinned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     visibility: Mapped[str] = mapped_column(String(16), default="private", nullable=False)
     is_channel: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # description: Mapped[str | None] = mapped_column(Text)  # 群聊描述，后续版本启用
 
     messages: Mapped[list["Message"]] = relationship(
         back_populates="conversation",
         cascade="all, delete-orphan",
         order_by="Message.created_at",
+    )
+    group_members: Mapped[list["GroupMember"]] = relationship(
+        back_populates="conversation",
+        cascade="all, delete-orphan",
     )
 
 
@@ -52,12 +60,37 @@ class Message(UUIDPrimaryKey, Timestamps, Base):
     owner_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
-    role: Mapped[str] = mapped_column(String(16), nullable=False)  # user | agent | roundtable
+    role: Mapped[str] = mapped_column(String(16), nullable=False)  # user | agent | roundtable | system
     agent_id: Mapped[str | None] = mapped_column(String(64))
     # {text, markdown?, tool_calls?, merged?, replies?}
     content: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     status: Mapped[str] = mapped_column(String(16), default="complete", nullable=False)
     tokens_in: Mapped[int] = mapped_column(Integer, default=0)
     tokens_out: Mapped[int] = mapped_column(Integer, default=0)
+    mentions: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # 提及的Agent列表 ["hermes", "coder"]，用于追踪@mention
 
     conversation: Mapped["Conversation"] = relationship(back_populates="messages")
+
+
+class GroupMember(UUIDPrimaryKey, Timestamps, Base):
+    """群聊成员：人类或Agent。"""
+    __tablename__ = "group_members"
+
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        index=True,
+    )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True
+    )
+    agent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    role: Mapped[str] = mapped_column(String(16), default="member", nullable=False)
+    # "admin" = 群主, "member" = 普通成员
+    joined_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    last_read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    conversation: Mapped["Conversation"] = relationship(back_populates="group_members")

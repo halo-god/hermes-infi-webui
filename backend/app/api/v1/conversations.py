@@ -32,6 +32,9 @@ from app.schemas.conversation import (
     ConversationOut,
     ConversationUpdate,
     ConfirmRequest,
+    GroupCreate,
+    AddMemberRequest,
+    GroupMemberOut,
     MessageOut,
     SendMessageRequest,
     SendMessageResponse,
@@ -219,10 +222,22 @@ async def send_message(
     if not await ratelimit.allow_send(str(user.id)):
         raise HTTPException(status_code=429, detail="发送过于频繁，请稍后再试")
     metrics.MESSAGES.inc()
-    user_msg, agent_msg = await svc.dispatch(
-        db, convo, payload.text, attached_file_ids=payload.attached_file_ids, owner_id=user.id,
-        skip_agent=payload.skip_agent,
-    )
+
+    # Group chat: route via @mentions
+    if convo.type == "group":
+        user_msg, agent_msg = await svc.dispatch_group(
+            db, convo, payload.text, payload.mentions,
+            attached_file_ids=payload.attached_file_ids,
+            owner_id=user.id,
+        )
+    else:
+        user_msg, agent_msg = await svc.dispatch(
+            db, convo, payload.text,
+            attached_file_ids=payload.attached_file_ids,
+            owner_id=user.id,
+            skip_agent=payload.skip_agent,
+        )
+
     return SendMessageResponse(
         user_message=MessageOut.model_validate(user_msg),
         agent_message=MessageOut.model_validate(agent_msg) if agent_msg else None,
@@ -721,3 +736,88 @@ async def set_session_model(
     if resp.get("error"):
         raise HTTPException(status_code=502, detail=f"Runner 未响应: {resp['error']}")
     return {"ok": True, "model_id": body.model_id}
+
+
+# ── Group chat endpoints ────────────────────────────────────────────────
+
+
+@router.post("/group", status_code=201)
+async def create_group(
+    payload: GroupCreate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """创建群聊。"""
+    convo = await svc.create_group(
+        db, user.id,
+        title=payload.title,
+        member_user_ids=payload.member_user_ids,
+        member_agent_ids=payload.member_agent_ids,
+        team_id=payload.team_id,
+    )
+    members = await svc.get_group_members(db, convo.id)
+    return {
+        **ConversationOut.model_validate(convo).model_dump(),
+        "members": [GroupMemberOut.model_validate(m).model_dump() for m in members],
+    }
+
+
+@router.get("/groups", response_model=list)
+async def list_groups(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """列出用户参与的所有群聊。"""
+    convos = await svc.list_group_conversations(db, user.id)
+    return [ConversationOut.model_validate(c).model_dump() for c in convos]
+
+
+@router.get("/{conversation_id}/members")
+async def get_members(
+    conversation_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """获取群聊成员列表。"""
+    convo = await _require_convo(db, conversation_id, user)
+    if convo.type != "group":
+        raise HTTPException(status_code=400, detail="该会话不是群聊")
+    members = await svc.get_group_members(db, conversation_id)
+    return [GroupMemberOut.model_validate(m).model_dump() for m in members]
+
+
+@router.post("/{conversation_id}/members", status_code=201)
+async def add_member(
+    conversation_id: uuid.UUID,
+    payload: AddMemberRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """添加群聊成员。"""
+    convo = await _require_convo(db, conversation_id, user)
+    if convo.type != "group":
+        raise HTTPException(status_code=400, detail="该会话不是群聊")
+    if not payload.user_id and not payload.agent_id:
+        raise HTTPException(status_code=422, detail="必须指定 user_id 或 agent_id")
+    await svc.add_group_member(
+        db, conversation_id,
+        user_id=payload.user_id,
+        agent_id=payload.agent_id,
+        role=payload.role,
+    )
+    return {"ok": True}
+
+
+@router.delete("/{conversation_id}/members/{member_id}", status_code=204)
+async def remove_member(
+    conversation_id: uuid.UUID,
+    member_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """移除群聊成员。"""
+    convo = await _require_convo(db, conversation_id, user)
+    if convo.type != "group":
+        raise HTTPException(status_code=400, detail="该会话不是群聊")
+    # member_id could be user_id — try removing by user_id
+    await svc.remove_group_member(db, conversation_id, user_id=member_id)

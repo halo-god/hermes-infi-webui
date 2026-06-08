@@ -21,7 +21,18 @@ async def list_conversations(
     q: str | None = None,
     pinned_only: bool = False,
 ) -> list[Conversation]:
-    stmt = select(Conversation).where(Conversation.owner_id == owner_id)
+    from app.db.models.conversation import GroupMember
+
+    # Personal conversations (owned) + group conversations (member of)
+    group_subq = (
+        select(GroupMember.conversation_id)
+        .where(GroupMember.user_id == owner_id)
+        .scalar_subquery()
+    )
+    stmt = select(Conversation).where(
+        (Conversation.owner_id == owner_id)
+        | ((Conversation.type == "group") & Conversation.id.in_(group_subq))
+    )
     if pinned_only:
         stmt = stmt.where(Conversation.pinned.is_(True))
     if q:
@@ -49,10 +60,14 @@ async def bulk_delete(
 async def get_conversation(
     db: AsyncSession, conversation_id: uuid.UUID, owner_id: uuid.UUID
 ) -> Conversation | None:
+    from app.db.models.conversation import GroupMember
+
     res = await db.execute(
         select(Conversation).where(
             Conversation.id == conversation_id,
-            (Conversation.owner_id == owner_id) | Conversation.is_channel.is_(True),
+            (Conversation.owner_id == owner_id)
+            | Conversation.is_channel.is_(True)
+            | Conversation.type == "group",  # group members can access
         )
     )
     return res.scalar_one_or_none()
@@ -584,3 +599,320 @@ async def restore_file_version(
     if ver is None:
         return f
     return await update_file_content(db, f, ver.content or "", author=author)
+
+
+# ── Group chat service functions ──────────────────────────────────────────
+
+
+async def create_group(
+    db: AsyncSession,
+    owner_id: uuid.UUID,
+    *,
+    title: str,
+    member_user_ids: list[uuid.UUID] | None = None,
+    member_agent_ids: list[str] | None = None,
+    team_id: uuid.UUID | None = None,
+) -> Conversation:
+    """创建群聊，自动添加成员。"""
+    from app.db.models.conversation import GroupMember
+
+    agent_ids = member_agent_ids or ["hermes"]
+    convo = Conversation(
+        title=title,
+        owner_id=owner_id,
+        type="group",
+        primary_agent_id=agent_ids[0],
+        active_agent_ids=agent_ids,
+        team_id=team_id,
+        visibility="private" if not team_id else "team",
+    )
+    db.add(convo)
+    await db.flush()  # get convo.id
+
+    # Add creator as admin
+    db.add(GroupMember(
+        conversation_id=convo.id,
+        user_id=owner_id,
+        role="admin",
+    ))
+
+    # Add other human members
+    for uid in (member_user_ids or []):
+        if uid != owner_id:
+            db.add(GroupMember(
+                conversation_id=convo.id,
+                user_id=uid,
+                role="member",
+            ))
+
+    # Add agent members
+    for aid in agent_ids:
+        db.add(GroupMember(
+            conversation_id=convo.id,
+            agent_id=aid,
+            role="member",
+        ))
+
+    await db.commit()
+    await db.refresh(convo)
+    return convo
+
+
+async def get_group_members(
+    db: AsyncSession,
+    conversation_id: uuid.UUID,
+) -> list:
+    """获取群聊成员列表。"""
+    from app.db.models.conversation import GroupMember
+    res = await db.execute(
+        select(GroupMember)
+        .where(GroupMember.conversation_id == conversation_id)
+        .order_by(GroupMember.joined_at)
+    )
+    return list(res.scalars().all())
+
+
+async def add_group_member(
+    db: AsyncSession,
+    conversation_id: uuid.UUID,
+    *,
+    user_id: uuid.UUID | None = None,
+    agent_id: str | None = None,
+    role: str = "member",
+):
+    """添加群聊成员。"""
+    from app.db.models.conversation import GroupMember
+
+    if not user_id and not agent_id:
+        raise ValueError("必须指定 user_id 或 agent_id")
+
+    # Check if already exists
+    existing = await db.execute(
+        select(GroupMember).where(
+            GroupMember.conversation_id == conversation_id,
+            GroupMember.user_id == user_id,
+            GroupMember.agent_id == agent_id,
+        )
+    )
+    if existing.scalar_one_or_none():
+        return  # already a member
+
+    member = GroupMember(
+        conversation_id=conversation_id,
+        user_id=user_id,
+        agent_id=agent_id,
+        role=role,
+    )
+    db.add(member)
+
+    # Update active_agent_ids if it's an agent
+    if agent_id:
+        convo = await db.get(Conversation, conversation_id)
+        if convo and agent_id not in (convo.active_agent_ids or []):
+            convo.active_agent_ids = (convo.active_agent_ids or []) + [agent_id]
+
+    await db.commit()
+
+
+async def remove_group_member(
+    db: AsyncSession,
+    conversation_id: uuid.UUID,
+    *,
+    user_id: uuid.UUID | None = None,
+    agent_id: str | None = None,
+):
+    """移除群聊成员。"""
+    from app.db.models.conversation import GroupMember
+
+    stmt = select(GroupMember).where(
+        GroupMember.conversation_id == conversation_id,
+    )
+    if user_id:
+        stmt = stmt.where(GroupMember.user_id == user_id)
+    elif agent_id:
+        stmt = stmt.where(GroupMember.agent_id == agent_id)
+    else:
+        return
+
+    res = await db.execute(stmt)
+    member = res.scalar_one_or_none()
+    if member:
+        await db.delete(member)
+
+        # Update active_agent_ids if it's an agent
+        if agent_id:
+            convo = await db.get(Conversation, conversation_id)
+            if convo:
+                convo.active_agent_ids = [
+                    a for a in (convo.active_agent_ids or []) if a != agent_id
+                ]
+
+        await db.commit()
+
+
+async def list_group_conversations(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+) -> list[Conversation]:
+    """列出用户参与的所有群聊。"""
+    from app.db.models.conversation import GroupMember
+
+    stmt = (
+        select(Conversation)
+        .join(GroupMember, GroupMember.conversation_id == Conversation.id)
+        .where(
+            Conversation.type == "group",
+            GroupMember.user_id == user_id,
+        )
+        .order_by(Conversation.updated_at.desc())
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def is_group_member(
+    db: AsyncSession,
+    conversation_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> bool:
+    """检查用户是否是群聊成员。"""
+    from app.db.models.conversation import GroupMember
+
+    res = await db.execute(
+        select(GroupMember).where(
+            GroupMember.conversation_id == conversation_id,
+            GroupMember.user_id == user_id,
+        )
+    )
+    return res.scalar_one_or_none() is not None
+
+
+async def resolve_mentions(
+    db: AsyncSession,
+    conversation_id: uuid.UUID,
+    mentions: list[str],
+) -> list[str]:
+    """将 @mention 文本解析为 agent_id 列表。"""
+    if not mentions:
+        return []
+
+    # @all → all agents in the group
+    if "__all__" in mentions:
+        members = await get_group_members(db, conversation_id)
+        return [m.agent_id for m in members if m.agent_id]
+
+    # Get group's agent members
+    members = await get_group_members(db, conversation_id)
+    group_agents = [m.agent_id for m in members if m.agent_id]
+
+    resolved = []
+    for mention in mentions:
+        # Direct match
+        if mention in group_agents:
+            resolved.append(mention)
+            continue
+
+        # Match by profile name
+        from sqlalchemy import or_
+        res = await db.execute(
+            select(Profile).where(
+                Profile.is_active.is_(True),
+                or_(
+                    Profile.name == mention,
+                    Profile.handle == mention,
+                    Profile.default_agent_id == mention,
+                ),
+            )
+        )
+        profile = res.scalar_one_or_none()
+        if profile and profile.default_agent_id in group_agents:
+            resolved.append(profile.default_agent_id)
+            continue
+
+        # Fuzzy: prefix match on name
+        for agent_id in group_agents:
+            res2 = await db.execute(
+                select(Profile).where(
+                    Profile.default_agent_id == agent_id,
+                    Profile.is_active.is_(True),
+                )
+            )
+            p = res2.scalar_one_or_none()
+            if p and (mention in p.name or p.name.startswith(mention)):
+                resolved.append(agent_id)
+                break
+
+    return list(set(resolved))  # deduplicate
+
+
+async def dispatch_group(
+    db: AsyncSession,
+    convo: Conversation,
+    text: str,
+    mentions: list[str],
+    attached_file_ids: list[str] | None = None,
+    owner_id: uuid.UUID | None = None,
+) -> tuple[Message, Message | None]:
+    """群聊消息路由：按 mentions 决定走人→人 / 人→机 / 圆桌。"""
+    resolved = await resolve_mentions(db, convo.id, mentions)
+
+    if not resolved:
+        # 人→人模式：只存消息，不触发Agent
+        user_msg = Message(
+            conversation_id=convo.id,
+            owner_id=owner_id,
+            role="user",
+            content={"text": text},
+            mentions=[],
+            status="complete",
+        )
+        db.add(user_msg)
+        if convo.title == "新会话":
+            convo.title = text[:40]
+        await db.commit()
+        await db.refresh(user_msg)
+        return user_msg, None
+
+    if len(resolved) == 1:
+        # 人→机模式：单Agent
+        user_msg = Message(
+            conversation_id=convo.id,
+            owner_id=owner_id,
+            role="user",
+            content={"text": text},
+            mentions=resolved,
+            status="complete",
+        )
+        db.add(user_msg)
+        if convo.title == "新会话":
+            convo.title = text[:40]
+        await db.commit()
+        await db.refresh(user_msg)
+
+        # Route to single agent
+        system_prompt = None
+        if convo.profile_id:
+            profile = await db.get(Profile, convo.profile_id)
+            if profile:
+                system_prompt = profile.system_prompt or None
+
+        _, agent_msg = await send_message(
+            db, convo, text,
+            attached_file_ids=attached_file_ids,
+            owner_id=owner_id,
+            system_prompt=system_prompt,
+        )
+        return user_msg, agent_msg
+
+    # 圆桌模式：多Agent并行
+    system_prompt = None
+    if convo.profile_id:
+        profile = await db.get(Profile, convo.profile_id)
+        if profile:
+            system_prompt = profile.system_prompt or None
+
+    return await send_roundtable(
+        db, convo, text, resolved,
+        attached_file_ids=attached_file_ids,
+        owner_id=owner_id,
+        system_prompt=system_prompt,
+    )

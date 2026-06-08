@@ -17,6 +17,30 @@ class ConversationCreate(BaseModel):
     first_message: str | None = None
 
 
+class GroupCreate(BaseModel):
+    """创建群聊请求。"""
+    title: str = Field(min_length=1, max_length=200)
+    member_user_ids: list[uuid.UUID] = Field(default_factory=list)
+    member_agent_ids: list[str] = Field(default_factory=list)
+    team_id: uuid.UUID | None = None
+
+
+class GroupMemberOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    user_id: uuid.UUID | None = None
+    agent_id: str | None = None
+    role: str
+    joined_at: datetime
+
+
+class AddMemberRequest(BaseModel):
+    user_id: uuid.UUID | None = None
+    agent_id: str | None = None
+    role: str = "member"
+
+
 class ConversationUpdate(BaseModel):
     title: str | None = None
     pinned: bool | None = None
@@ -32,6 +56,7 @@ class MessageOut(BaseModel):
     agent_id: str | None
     content: dict
     status: str
+    mentions: list[str] | None = None
     created_at: datetime
 
 
@@ -41,6 +66,7 @@ class ConversationOut(BaseModel):
     id: uuid.UUID
     title: str
     icon: str | None
+    type: str = "personal"
     primary_agent_id: str
     active_agent_ids: list[str]
     profile_id: str | None
@@ -62,6 +88,7 @@ class SendMessageRequest(BaseModel):
     text: str = Field(min_length=1, max_length=100000)
     attached_file_ids: list[str] = Field(default_factory=list)
     skip_agent: bool = False
+    mentions: list[str] = Field(default_factory=list)
 
 
 class SetAgentsRequest(BaseModel):

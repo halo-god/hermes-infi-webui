@@ -356,7 +356,7 @@ export const useChatStore = defineStore("chat", () => {
   async function send(
     text: string,
     agentId = "hermes",
-    opts?: { profileId?: string; webSearch?: boolean; deepThink?: boolean; stagedFiles?: File[] },
+    opts?: { profileId?: string; webSearch?: boolean; deepThink?: boolean; stagedFiles?: File[]; mentions?: string[] },
   ) {
     if (!activeId.value) await newConversation(agentId);
     const id = activeId.value!;
@@ -370,9 +370,44 @@ export const useChatStore = defineStore("chat", () => {
       } catch { /* upload failure is non-fatal */ }
     }
 
-    const passOpts = { profileId: opts?.profileId, webSearch: opts?.webSearch, deepThink: opts?.deepThink, fileIds };
-    if (activeAgents.value.length > 1) await sendRoundtable(id, text, passOpts);
-    else await sendSingle(id, text, passOpts);
+    // Check if this is a group conversation
+    const activeConvo = conversations.value.find((c) => c.id === id);
+    const isGroup = activeConvo?.type === "group";
+
+    if (isGroup && opts?.mentions?.length) {
+      // Group chat with @mentions: use sendWithMentions
+      closeStream();
+      streamingConvoId.value = id;
+      const res = await conversationsApi.sendWithMentions(id, text, opts.mentions, fileIds);
+      handleSendResponse(res);
+    } else if (isGroup && !opts?.mentions?.length) {
+      // Group chat without mentions: pure human-to-human, skip agent
+      closeStream();
+      streamingConvoId.value = id;
+      const res = await conversationsApi.sendWithMentions(id, text, [], fileIds);
+      handleSendResponse(res);
+    } else {
+      // Personal conversation: existing logic
+      const passOpts = { profileId: opts?.profileId, webSearch: opts?.webSearch, deepThink: opts?.deepThink, fileIds };
+      if (activeAgents.value.length > 1) await sendRoundtable(id, text, passOpts);
+      else await sendSingle(id, text, passOpts);
+    }
+  }
+
+  function handleSendResponse(res: { user_message: Message; agent_message: Message | null }) {
+    // Ensure user message is in the list
+    if (!messages.value.find((m) => m.id === res.user_message.id)) {
+      messages.value.push(res.user_message);
+    }
+    if (res.agent_message) {
+      if (!messages.value.find((m) => m.id === res.agent_message!.id)) {
+        messages.value.push(res.agent_message);
+      }
+      if (res.agent_message.status === "streaming") {
+        streamingConvoId.value = activeId.value;
+      }
+    }
+    refreshAfterTurn();
   }
 
   function isActivelyStreaming(id: string) {

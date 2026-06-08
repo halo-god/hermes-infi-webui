@@ -153,10 +153,11 @@ export interface Message {
   id: string;
   conversation_id: string;
   owner_id: string | null;
-  role: "user" | "agent" | "roundtable";
+  role: "user" | "agent" | "roundtable" | "system";
   agent_id: string | null;
   content: MessageContent & Partial<RoundtableContent>;
   status: "streaming" | "complete" | "cancelled" | "error";
+  mentions?: string[] | null;
   created_at: string;
   steps?: { title: string; status: string }[];
   thinking?: string;
@@ -168,6 +169,7 @@ export interface Conversation {
   id: string;
   title: string;
   icon: string | null;
+  type?: "personal" | "group";
   primary_agent_id: string;
   active_agent_ids: string[];
   profile_id: string | null;
@@ -184,6 +186,14 @@ export interface Conversation {
 
 export interface ConversationDetail extends Conversation {
   messages: Message[];
+}
+
+export interface GroupMember {
+  id: string;
+  user_id: string | null;
+  agent_id: string | null;
+  role: "admin" | "member";
+  joined_at: string;
 }
 
 // Generic file item usable by both WorkspacePanel and KnowledgePanel.
