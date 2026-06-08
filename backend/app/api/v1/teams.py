@@ -485,6 +485,26 @@ async def upload_knowledge(
                  "yaml", "yml", "toml", "sh", "log", "xml", "css", "diff", "patch"}
     if ext in TEXT_EXTS:
         content = raw.decode("utf-8", "ignore")
+    elif ext == "pdf":
+        try:
+            import fitz
+            doc = fitz.open(stream=raw, filetype="pdf")
+            content = "\n".join(str(page.get_text()) for page in doc)
+            doc.close()
+        except Exception:
+            import base64
+            content = base64.b64encode(raw).decode("ascii")
+    elif ext in ("xlsx", "xls"):
+        try:
+            import io, pandas as pd
+            dfs = pd.read_excel(io.BytesIO(raw), sheet_name=None)
+            parts = []
+            for sheet_name, df in dfs.items():
+                parts.append(f"[Sheet: {sheet_name}]\n{df.to_string(index=False)}")
+            content = "\n\n".join(parts)
+        except Exception:
+            import base64
+            content = base64.b64encode(raw).decode("ascii")
     else:
         import base64
         content = base64.b64encode(raw).decode("ascii")
