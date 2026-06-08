@@ -832,7 +832,7 @@
   }
   .team-tab.active .pill { background: var(--accent-tint); color: var(--accent-deep); }
 
-  .team-body { padding: 24px 0 60px; width: 100%; }
+  .team-body { padding: 24px 40px 60px; width: 100%; max-width: 1200px; margin: 0 auto; }
 
   .stat-grid {
     display: grid;
