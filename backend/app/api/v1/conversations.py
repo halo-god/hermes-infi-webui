@@ -138,6 +138,16 @@ async def create_conversation(
     )
 
 
+@router.get("/groups", response_model=list)
+async def list_groups(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """列出用户参与的所有群聊。"""
+    convos = await svc.list_group_conversations(db, user.id)
+    return [ConversationOut.model_validate(c).model_dump() for c in convos]
+
+
 @router.get("/{conversation_id}", response_model=ConversationDetail)
 async def get_conversation(
     conversation_id: uuid.UUID,
@@ -799,16 +809,6 @@ async def create_group(
     }
 
 
-@router.get("/groups", response_model=list)
-async def list_groups(
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """列出用户参与的所有群聊。"""
-    convos = await svc.list_group_conversations(db, user.id)
-    return [ConversationOut.model_validate(c).model_dump() for c in convos]
-
-
 @router.get("/{conversation_id}/members")
 async def get_members(
     conversation_id: uuid.UUID,
@@ -828,7 +828,7 @@ async def get_members(
         if m.user_id:
             u = await db.get(UserModel, m.user_id)
             if u:
-                data["user_name"] = u.display_name or u.email or str(m.user_id)[:8]
+                data["user_name"] = u.email or str(m.user_id)[:8]
         result.append(data)
     return result
 
