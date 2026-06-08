@@ -67,7 +67,7 @@ async def get_conversation(
             Conversation.id == conversation_id,
             (Conversation.owner_id == owner_id)
             | Conversation.is_channel.is_(True)
-            | Conversation.type == "group",  # group members can access
+            | (Conversation.type == "group"),  # group members can access
         )
     )
     return res.scalar_one_or_none()
