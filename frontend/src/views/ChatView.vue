@@ -340,20 +340,10 @@ const ctxTooltip = computed(() =>
 // ── Session controls ──
 const forking = ref(false);
 const sessionMode = ref<string>((activeConvo.value as any)?.session_mode || "ask");
-const sessionModel = ref("");
-const showModelPicker = ref(false);
-
 const SESSION_MODES = [
   { id: "ask", label: "Ask", desc: "编辑需确认" },
   { id: "accept_edits", label: "Accept", desc: "自动审批工作区" },
   { id: "dont_ask", label: "Auto", desc: "全自动" },
-];
-const MODEL_PRESETS = [
-  { id: "", label: "默认" },
-  { id: "openrouter:anthropic/claude-sonnet-4", label: "Claude Sonnet" },
-  { id: "openrouter:openai/gpt-4o", label: "GPT-4o" },
-  { id: "openrouter:google/gemini-2.5-pro", label: "Gemini Pro" },
-  { id: "openrouter:deepseek/deepseek-chat", label: "DeepSeek" },
 ];
 
 async function forkSession() {
@@ -378,14 +368,7 @@ async function changeSessionMode(mode: string) {
   } catch { /* revert on error */ }
 }
 
-async function changeSessionModel(modelId: string) {
-  if (!chat.activeId) return;
-  sessionModel.value = modelId;
-  showModelPicker.value = false;
-  try {
-    await conversationsApi.setSessionModel(chat.activeId, modelId);
-  } catch { /* ignore */ }
-}
+
 const ctxK = computed(() => chat.contextTokens >= 1000 ? `${(chat.contextTokens / 1000).toFixed(0)}k` : `${chat.contextTokens}`);
 
 // ── Session export ──
@@ -682,17 +665,7 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                 {{ m.label }}
               </button>
             </div>
-            <!-- Model switcher -->
-            <div v-if="chat.activeId && activeConvo?.acp_session_id" style="position:relative;flex-shrink:0;margin-top:2px;">
-              <button class="thread-action model-btn" @click="showModelPicker = !showModelPicker" :title="sessionModel || '默认模型'">
-                <Icon name="bolt" /> {{ sessionModel ? MODEL_PRESETS.find(m => m.id === sessionModel)?.label || sessionModel.split(':').pop() : 'Model' }}
-              </button>
-              <div v-if="showModelPicker" class="model-dropdown" @mousedown.stop>
-                <button v-for="mp in MODEL_PRESETS" :key="mp.id" class="menu-item" :class="{ active: sessionModel === mp.id }" @click="changeSessionModel(mp.id)">
-                  {{ mp.label }}
-                </button>
-              </div>
-            </div>
+
             <div v-if="chat.messages.length >= 2" style="position:relative;flex-shrink:0;margin-top:2px;">
               <button class="thread-action" @click="showExport = !showExport"><Icon name="download" /> 导出</button>
               <div v-if="showExport" class="export-menu" @mouseleave="showExport = false">
