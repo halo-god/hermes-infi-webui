@@ -871,27 +871,122 @@ class Runner:
             },
         )
 
+    # ── Clarify strategy helpers ──
+
+    def _classify_clarify_risk(self, question: str, options: list[str]) -> str:
+        """Risk classification for clarify questions.
+
+        Returns one of: "low" | "medium" | "high"
+        """
+        q_lower = question.lower()
+        opts_lower = [opt.lower() for opt in options]
+        combined = f"{q_lower} {' '.join(opts_lower)}"
+
+        # High risk: destructive or irreversible operations
+        high_risk = [
+            "删除", "覆盖", "执行", "停止", "取消", "购买",
+            "remove", "delete", "execute", "run", "stop", "cancel",
+            "buy", "purchase", "overwrite", "drop", "truncate",
+            "rm -", "format", "destroy", "kill", "sudo",
+        ]
+        for kw in high_risk:
+            if kw in combined:
+                return "high"
+
+        # Medium risk: state-changing but non-destructive
+        medium_risk = [
+            "生成", "创建", "修改", "配置", "部署", "写入", "安装",
+            "generate", "create", "modify", "configure", "deploy",
+            "write", "install", "update", "upgrade", "push", "commit",
+            "merge", "发布", "上线", "重启", "reboot", "restart",
+        ]
+        for kw in medium_risk:
+            if kw in combined:
+                return "medium"
+
+        # Low risk: confirmation-type or informational
+        low_patterns = [
+            "继续", "下一步", "确认", "好的", "开始", "是", "ok",
+            "yes", "proceed", "continue", "next", "confirm", "start",
+            "go ahead", "sure", "没问题", "可以", "确定",
+            "advance", "forward", "行", "中", "对", "嗯",
+        ]
+        for p in low_patterns:
+            if p in q_lower or any(p in opt for opt in opts_lower):
+                return "low"
+
+        # Heuristic: yes/no or OK/Cancel pairs are low-risk
+        if len(options) <= 2:
+            yes_no = {"是", "否", "yes", "no", "ok", "cancel", "跳过", "好的", "不用", "不"}
+            if all(any(w in opt.lower() for w in yes_no) for opt in options):
+                return "low"
+
+        return "medium"
+
+    async def _auto_resolve_clarify(
+        self, sid: str, pending_key: str, choice: str | None = None
+    ) -> bool:
+        """Auto-resolve a clarify request without user interaction.
+
+        Reads the pending request, writes the chosen option back to Redis,
+        and publishes the notify event to unblock the agent thread.
+
+        Returns True if successfully resolved.
+        """
+        import json as _json
+
+        val = await R.get_redis().get(pending_key)
+        if not val:
+            return False
+
+        try:
+            data = _json.loads(val)
+            options = data.get("options") or ["继续", "跳过"]
+            resolved = choice if choice is not None else (options[0] if options else "继续")
+            clarify_id = data.get("clarify_id", "")
+
+            response_key = f"hermes:clarify_response:{sid}:{clarify_id}"
+            notify_channel = f"hermes:clarify_notify:{sid}"
+
+            pipe = R.get_redis().pipeline()
+            pipe.delete(pending_key)
+            pipe.set(response_key, resolved, ex=60)
+            pipe.publish(notify_channel, clarify_id)
+            await pipe.execute()
+
+            logger.info(
+                "Auto-resolved clarify for sid=%s strategy=%s choice=%s",
+                sid[:8], settings.clarify_strategy, resolved,
+            )
+            return True
+        except Exception:
+            logger.exception("Failed to auto-resolve clarify for sid=%s", sid[:8])
+            return False
+
     async def _handle_clarify_tool_call(
         self, conversation_id: str, message_id: str, acc: dict,
         clarify_session_id: str | None = None,
     ) -> None:
-        """Handle agent's clarify tool call.
+        """Handle agent's clarify tool call with configurable strategy.
 
-        1. Read pending request from Redis (written by clarify_callback)
-        2. Send confirmation_request SSE to frontend
-        3. Start background task to wait for user response
-        4. When user responds, write back to clarify_callback's Redis keys
-           to unblock the agent thread
+        Strategies:
+          - disabled / auto_first : auto-resolve immediately (no UI)
+          - smart                 : risk-based (low=auto, medium/high=modal)
+          - interactive           : always pop confirmation modal (legacy)
         """
         import json as _json
 
-        # Agent uses ACP session_id as Redis key, not conversation_id
         sid = clarify_session_id or conversation_id
         pending_key = f"hermes:clarify_pending:{sid}"
+        strategy = (settings.clarify_strategy or "smart").strip().lower()
 
-        # Retry: agent writes pending_key synchronously right before blocking,
-        # but the tool_call event may arrive at the runner *before* the Redis
-        # write is visible (network / GIL race). Poll briefly instead of giving up.
+        # ── Fast path: fully automatic strategies ──
+        if strategy in ("disabled", "auto_first"):
+            if await self._auto_resolve_clarify(sid, pending_key):
+                acc["_clarify_handled"] = True
+            return
+
+        # ── Retry read: agent writes pending_key right before blocking ──
         val = None
         for _ in range(8):  # 8 × 100ms = 800ms window
             val = await R.get_redis().get(pending_key)
@@ -904,11 +999,31 @@ class Runner:
             return
 
         try:
-            await R.get_redis().delete(pending_key)
             data = _json.loads(val)
             clarify_id = data.get("clarify_id", str(uuid.uuid4()))
             question = data.get("question", "需要确认")
             options = data.get("options") or ["继续", "跳过"]
+
+            # ── Smart strategy: risk-based routing ──
+            if strategy == "smart":
+                risk = self._classify_clarify_risk(question, options)
+                if risk == "low":
+                    await R.get_redis().delete(pending_key)
+                    response_key = f"hermes:clarify_response:{sid}:{clarify_id}"
+                    notify_channel = f"hermes:clarify_notify:{sid}"
+                    r = R.get_redis()
+                    await r.set(response_key, options[0] if options else "继续", ex=60)
+                    await r.publish(notify_channel, clarify_id)
+                    logger.info(
+                        "Smart clarify: LOW risk, auto-resolved for sid=%s (choice=%s)",
+                        sid[:8], options[0] if options else "继续",
+                    )
+                    acc["_clarify_handled"] = True
+                    return
+                # medium / high fall through to interactive modal
+
+            # ── Interactive modal (legacy, or smart medium/high) ──
+            await R.get_redis().delete(pending_key)
             req_payload = {
                 "id": clarify_id,
                 "conversation_id": conversation_id,

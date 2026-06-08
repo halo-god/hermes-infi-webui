@@ -63,6 +63,12 @@ class Settings(BaseSettings):
 
     # ── Feature flags ──
     feature_followup_chips: bool = False  # show smart follow-up suggestion chips after agent replies
+    # clarify strategy: interactive | smart | auto_first | disabled
+    #   interactive = always pop confirmation modal (legacy)
+    #   smart       = risk-based auto-decision (low=auto, medium/high=modal)
+    #   auto_first  = always auto-select first option
+    #   disabled    = suppress clarify tool calls entirely (auto-resolve with first option)
+    clarify_strategy: str = Field(default="smart")
 
     # ── Rate limiting ──
     rate_limit_per_min: int = 30  # per-user message sends / minute (default)
