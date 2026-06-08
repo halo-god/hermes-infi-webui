@@ -828,7 +828,7 @@ async def get_members(
         if m.user_id:
             u = await db.get(UserModel, m.user_id)
             if u:
-                data["user_name"] = u.email or str(m.user_id)[:8]
+                data["user_name"] = u.name or u.email or str(m.user_id)[:8]
         result.append(data)
     return result
 
