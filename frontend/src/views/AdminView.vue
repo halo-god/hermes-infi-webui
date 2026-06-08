@@ -336,6 +336,9 @@ async function loadProfiles() {
 }
 const scanErrors = ref<string[]>([]);
 const scanHermesPath = ref<string | null>(null);
+const scanProfilesLoading = ref(false);
+const scanProfilesMsg = ref("");
+const scanProfilesErrors = ref<string[]>([]);
 
 async function scanAgents() {
   scanLoading.value = true;
@@ -354,6 +357,24 @@ async function scanAgents() {
     scanErrors.value = [detail || "服务器返回错误，请检查后端日志"];
   } finally {
     scanLoading.value = false;
+  }
+}
+
+async function scanProfilesFn() {
+  scanProfilesLoading.value = true;
+  scanProfilesMsg.value = "";
+  scanProfilesErrors.value = [];
+  try {
+    const result = await agentsApi.scanProfiles();
+    scanProfilesMsg.value = result.message || `新增 ${result.created} 个助手，发现 ${result.profiles_found} 个 Profile`;
+    scanProfilesErrors.value = result.errors || [];
+    await loadProfiles();
+  } catch (e: unknown) {
+    const detail = (e as { response?: { data?: { detail?: string } } }).response?.data?.detail;
+    scanProfilesMsg.value = "扫描失败";
+    scanProfilesErrors.value = [detail || "服务器返回错误，请检查后端日志"];
+  } finally {
+    scanProfilesLoading.value = false;
   }
 }
 function openCreateProfile() {
@@ -1002,6 +1023,9 @@ async function handleImportFile(e: Event) {
             <button class="btn" :disabled="scanLoading" @click="scanAgents">
               <Icon name="refresh" :size="13" /> {{ scanLoading ? "扫描中…" : "扫描 Agent" }}
             </button>
+            <button class="btn" :disabled="scanProfilesLoading" @click="scanProfilesFn">
+              <Icon name="sparkle" :size="13" /> {{ scanProfilesLoading ? "扫描中…" : "扫描 Profiles" }}
+            </button>
             <button class="btn" @click="exportAllProfiles"><Icon name="download" :size="13" /> 导出全部</button>
             <button class="btn" @click="() => importFileRef?.click()"><Icon name="upload" :size="13" /> 导入</button>
             <input ref="importFileRef" type="file" accept=".json" style="display:none" @change="handleImportFile" />
@@ -1026,6 +1050,20 @@ async function handleImportFile(e: Event) {
               <code style="font-family: var(--font-mono); background: var(--rule-soft); padding: 1px 4px; border-radius: 3px">HERMES_BIN=/path/to/hermes</code> 和
               <code style="font-family: var(--font-mono); background: var(--rule-soft); padding: 1px 4px; border-radius: 3px">HERMES_HOME=/mounted/.hermes</code>，
               并在 <code style="font-family: var(--font-mono); background: var(--rule-soft); padding: 1px 4px; border-radius: 3px">compose.yaml</code> 中取消注释 volumes 挂载，然后重启服务。
+            </div>
+          </template>
+        </div>
+
+        <!-- Profiles scan result banner -->
+        <div v-if="scanProfilesMsg || scanProfilesErrors.length" style="margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 1px solid var(--rule)">
+          <div v-if="scanProfilesMsg" style="padding: 10px 14px; display: flex; gap: 10px; align-items: center; background: var(--bg-panel)">
+            <Icon name="sparkle" :size="14" style="color: var(--ok); flex-shrink: 0" />
+            <span style="font-size: 13px; color: var(--ink)">{{ scanProfilesMsg }}</span>
+          </div>
+          <template v-if="scanProfilesErrors.length">
+            <div v-for="(e, i) in scanProfilesErrors" :key="i" style="padding: 8px 14px; display: flex; gap: 8px; align-items: flex-start; border-top: 1px solid var(--rule-soft); background: var(--bg-canvas)">
+              <Icon name="alert_circle" :size="13" style="color: var(--warn); flex-shrink: 0; margin-top: 1px" />
+              <span style="font-size: 12px; color: var(--ink-soft); line-height: 1.5">{{ e }}</span>
             </div>
           </template>
         </div>

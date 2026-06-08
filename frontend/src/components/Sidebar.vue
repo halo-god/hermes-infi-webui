@@ -173,7 +173,7 @@ async function shareConvo(id: string) {
       </div>
 
       <div class="side-label">
-        📢 群聊
+        群聊
         <button title="创建群聊" @click="showNewGroup = true">+</button>
       </div>
       <div class="convo-list" style="margin-bottom: 8px">

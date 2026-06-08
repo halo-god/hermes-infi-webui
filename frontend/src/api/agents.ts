@@ -29,6 +29,16 @@ export interface ScanResult {
   errors: string[];
 }
 
+export interface ScanProfilesResult {
+  created: number;
+  message: string;
+  version: string | null;
+  profiles_found: number;
+  hermes_path: string | null;
+  hermes_home: string | null;
+  errors: string[];
+}
+
 export interface ProfileCreate {
   name: string;
   handle: string;
@@ -78,6 +88,9 @@ export const agentsApi = {
   },
   async scanAgents(): Promise<ScanResult> {
     return (await http.post("/agents/scan")).data;
+  },
+  async scanProfiles(): Promise<ScanProfilesResult> {
+    return (await http.post("/profiles/scan")).data;
   },
   async cloneProfile(id: string): Promise<Profile> {
     return (await http.post<Profile>(`/profiles/${id}/clone`)).data;

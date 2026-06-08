@@ -82,6 +82,7 @@ function onDocClick(e: MouseEvent) {
 
 const personal = computed(() => profiles.value.filter((p) => p.scope === "personal"));
 const team = computed(() => profiles.value.filter((p) => p.scope === "team"));
+const globalProfiles = computed(() => profiles.value.filter((p) => p.scope === "global"));
 const pillLabel = computed(() => selected.value?.name || props.agent?.label || "Hermes");
 const pillColor = computed(() => selected.value?.color || props.agent?.color || "#b8852a");
 const pillModel = computed(() => selected.value?.default_model || props.agent?.model || "ACP");
@@ -339,6 +340,15 @@ function isImageFile(f: File) {
               <div class="profile-meta"><div class="profile-name">{{ p.name }} <span class="profile-handle">@{{ p.handle }}</span></div><div class="profile-desc">{{ p.desc }}</div></div>
               <span class="profile-tag">{{ p.default_model }}</span>
             </button>
+            <template v-if="globalProfiles.length">
+              <div class="menu-sep"></div>
+              <div class="menu-label">全局 Profile</div>
+              <button v-for="p in globalProfiles" :key="p.id" class="menu-item profile-item" :class="{ active: selected?.id === p.id }" @click="pickProfile(p)">
+                <span class="profile-avatar" :style="{ background: p.color }"><Icon :name="p.icon" /></span>
+                <div class="profile-meta"><div class="profile-name">{{ p.name }} <span class="profile-handle">@{{ p.handle }}</span></div><div class="profile-desc">{{ p.desc }}</div></div>
+                <span class="profile-tag">{{ p.default_model }}</span>
+              </button>
+            </template>
             <div class="menu-foot-acp"><Icon name="bolt" /> 通过 ACP · v1 协议建立会话</div>
           </div>
         </div>
