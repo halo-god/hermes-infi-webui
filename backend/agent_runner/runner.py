@@ -533,7 +533,7 @@ class Runner:
                 acp_session_id = convo.acp_session_id
                 session_mode = convo.session_mode
 
-        acc = {"text": "", "cancelled": False, "current_msg_id": message_id, "tool_since_split": False, "thinking": "", "plan": None}
+        acc = {"text": "", "cancelled": False, "current_msg_id": message_id, "tool_since_split": False, "thinking": "", "plan": None, "files": []}
         steps: list[dict] = []  # Collect tool_call steps for persistence
 
         async def on_update(update: dict) -> None:
@@ -666,6 +666,16 @@ class Runner:
                 ))
                 if diff_lines:
                     diff = "".join(diff_lines[:80])
+            # Track file for persistence in message content
+            file_entry = {"id": str(f.id), "name": f.name, "kind": f.kind, "version": f.current_version}
+            if diff:
+                file_entry["diff"] = diff
+            # Update or append (dedup by file id)
+            existing = [i for i, fi in enumerate(acc["files"]) if fi["id"] == file_entry["id"]]
+            if existing:
+                acc["files"][existing[0]] = file_entry
+            else:
+                acc["files"].append(file_entry)
             await R.publish_event(
                 conversation_id,
                 {
@@ -850,7 +860,7 @@ class Runner:
                     except Exception:
                         logger.warning("Regex fallback confirmation timed out")
 
-        await self._finalize(acc["current_msg_id"], acc["text"], status, steps, acc.get("thinking") or "", acc.get("plan"))
+        await self._finalize(acc["current_msg_id"], acc["text"], status, steps, acc.get("thinking") or "", acc.get("plan"), acc.get("files"))
         await R.clear_cancel(conversation_id)
         await R.publish_event(
             conversation_id,
@@ -1188,6 +1198,7 @@ class Runner:
     async def _finalize(
         self, message_id: str, text: str, status: str, steps: list[dict] | None = None,
         thinking: str | None = None, plan: list[dict] | None = None,
+        files: list[dict] | None = None,
     ) -> None:
         async with async_session_maker() as db:
             msg = await db.get(Message, uuid.UUID(message_id))
@@ -1199,6 +1210,8 @@ class Runner:
                     content["thinking"] = thinking
                 if plan:
                     content["plan"] = plan
+                if files:
+                    content["files"] = files
                 msg.content = content
                 msg.status = status
                 # touch the conversation's updated_at
