@@ -1,9 +1,10 @@
 """File browser: aggregate file listing across conversations."""
 from __future__ import annotations
 
+import asyncio
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File as FastApiFile, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +13,8 @@ from app.db.models.conversation import Conversation, Message
 from app.db.models.user import User
 from app.db.models.workspace import WorkspaceFile
 from app.deps import get_current_user, get_db
+from app.core import object_storage
+from app.config import settings
 
 router = APIRouter()
 
@@ -19,11 +22,13 @@ router = APIRouter()
 class FileItem(BaseModel):
     id: str
     name: str
-    conversation_id: str
-    conversation_title: str
+    conversation_id: str | None = None
+    conversation_title: str | None = None
     size: int | None = None
     created_at: str
     source: str = "upload"  # "upload" or "ai"
+    kind: str | None = None
+    storage_key: str | None = None
 
 
 @router.get("/files", response_model=list[FileItem])
@@ -35,7 +40,10 @@ async def list_all_files(
     # Get user's conversation IDs
     convos = (
         await db.execute(
-            select(Conversation).where(Conversation.owner_id == user.id)
+            select(Conversation).where(
+                Conversation.owner_id == user.id,
+                Conversation.title != "__file_storage__",
+            )
         )
     ).scalars().all()
 
@@ -96,3 +104,148 @@ async def list_all_files(
     # Sort by created_at descending
     files.sort(key=lambda f: f.created_at or "", reverse=True)
     return files
+
+
+@router.get("/files/standalone", response_model=list[FileItem])
+async def list_standalone_files(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List user's standalone uploaded files (not tied to active conversations)."""
+    storage_convo = (
+        await db.execute(
+            select(Conversation).where(
+                Conversation.owner_id == user.id,
+                Conversation.title == "__file_storage__",
+            )
+        )
+    ).scalars().first()
+
+    if not storage_convo:
+        return []
+
+    ws_files = (
+        await db.execute(
+            select(WorkspaceFile).where(
+                WorkspaceFile.conversation_id == storage_convo.id
+            )
+        )
+    ).scalars().all()
+
+    return [
+        FileItem(
+            id=str(wf.id),
+            name=wf.name,
+            size=wf.size_bytes,
+            created_at=wf.created_at.isoformat() if wf.created_at else "",
+            source="upload",
+            kind=wf.kind,
+            storage_key=wf.storage_key,
+        )
+        for wf in ws_files
+    ]
+
+
+@router.post("/files/upload", response_model=FileItem, status_code=201)
+async def upload_standalone_file(
+    file: UploadFile = FastApiFile(...),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload a file without requiring a conversation. Files are stored in user's personal space."""
+    import re as _re
+    name = _re.sub(r"[^\w.\-\u4e00-\u9fff]", "_", file.filename or "upload").strip("_. ") or "upload"
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"
+    TEXT_EXTS = {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
+                 "yaml", "yml", "toml", "sh", "bash", "log", "xml", "css", "diff", "patch"}
+
+    raw = await file.read()
+    content: str | None = None
+    storage_key: str | None = None
+
+    # Store to MinIO if available, else inline
+    if settings.storage_backend == "minio":
+        storage_key = f"standalone/{user.id}/{uuid.uuid4().hex}/{name}"
+        await asyncio.to_thread(object_storage.put, storage_key, raw, file.content_type or "application/octet-stream")
+    else:
+        if ext in TEXT_EXTS:
+            content = raw.decode("utf-8", "ignore")
+        else:
+            import base64
+            content = base64.b64encode(raw).decode("ascii")
+
+    # Create a "virtual" conversation for standalone files if not exists
+    # Actually, let's use a special conversation_id = NULL approach
+    # But WorkspaceFile requires conversation_id, so we need to handle this differently
+    # Let's create a dedicated "File Storage" conversation per user
+    from sqlalchemy import and_
+    storage_convo = (
+        await db.execute(
+            select(Conversation).where(
+                and_(
+                    Conversation.owner_id == user.id,
+                    Conversation.title == "__file_storage__",
+                )
+            )
+        )
+    ).scalars().first()
+
+    if not storage_convo:
+        storage_convo = Conversation(
+            owner_id=user.id,
+            title="__file_storage__",
+            primary_agent_id="hermes",
+        )
+        db.add(storage_convo)
+        await db.flush()
+
+    wf = WorkspaceFile(
+        conversation_id=storage_convo.id,
+        name=name,
+        kind=ext,
+        content=content,
+        storage_key=storage_key,
+        size_bytes=len(raw),
+        created_by_agent=None,
+    )
+    db.add(wf)
+    await db.commit()
+    await db.refresh(wf)
+
+    return FileItem(
+        id=str(wf.id),
+        name=wf.name,
+        size=wf.size_bytes,
+        created_at=wf.created_at.isoformat() if wf.created_at else "",
+        source="upload",
+        kind=wf.kind,
+        storage_key=wf.storage_key,
+    )
+
+
+@router.delete("/files/{file_id}")
+async def delete_standalone_file(
+    file_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a standalone file."""
+    wf = (await db.execute(select(WorkspaceFile).where(WorkspaceFile.id == file_id))).scalars().first()
+    if not wf:
+        raise HTTPException(404, "File not found")
+
+    # Verify ownership through conversation
+    convo = (await db.execute(select(Conversation).where(Conversation.id == wf.conversation_id))).scalars().first()
+    if not convo or convo.owner_id != user.id:
+        raise HTTPException(403, "Not authorized")
+
+    # Delete from MinIO if stored there
+    if wf.storage_key:
+        try:
+            await asyncio.to_thread(object_storage.delete, wf.storage_key)
+        except Exception:
+            pass
+
+    await db.delete(wf)
+    await db.commit()
+    return {"status": "ok"}

@@ -14,4 +14,17 @@ export const filesApi = {
   async listAll(): Promise<FileItem[]> {
     return (await http.get<FileItem[]>("/files")).data;
   },
+  async listStandalone(): Promise<FileItem[]> {
+    return (await http.get<FileItem[]>("/files/standalone")).data;
+  },
+  async upload(file: File): Promise<FileItem> {
+    const form = new FormData();
+    form.append("file", file);
+    return (await http.post<FileItem>("/files/upload", form, {
+      headers: { "Content-Type": "multipart/form-data" },
+    })).data;
+  },
+  async remove(fileId: string): Promise<void> {
+    await http.delete(`/files/${fileId}`);
+  },
 };

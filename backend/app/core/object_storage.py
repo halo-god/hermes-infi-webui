@@ -75,5 +75,11 @@ def presigned_url(key: str, expires: int = 3600) -> str:
     return _get_client().generate_presigned_url(
         "get_object",
         Params={"Bucket": settings.minio_bucket, "Key": key},
-        ExpiresIn=expires,
+        Expires=expires,
     )
+
+
+def delete(key: str) -> None:
+    """Delete an object from storage."""
+    _ensure_bucket()
+    _get_client().delete_object(Bucket=settings.minio_bucket, Key=key)

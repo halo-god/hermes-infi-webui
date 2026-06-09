@@ -231,9 +231,7 @@ async function submit() {
             {{ busy ? "登录中…" : "登 录" }}
           </button>
 
-          <div v-if="activeTab === 'local'" class="login-note">
-            演示账号：<b>admin@hermes.io</b> / <b>Hermes@2026</b>
-          </div>
+          <!-- Demo credentials removed for production -->
         </form>
 
         <!-- WeCom OAuth -->
