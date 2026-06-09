@@ -12,6 +12,7 @@ import ConvoSeal from "@/components/ConvoSeal.vue";
 import { useChatStore } from "@/stores/chat";
 import { useNotificationStore } from "@/stores/notifications";
 import { conversationsApi } from "@/api/conversations";
+import { filesApi } from "@/api/files";
 import { teamsApi } from "@/api/teams";
 import { projectsApi } from "@/api/projects";
 import { renderMarkdown, renderMarkdownAsync } from "@/utils/markdown";
@@ -332,6 +333,22 @@ async function onSend(opts?: SendOptions) {
       const knowledgeBlock = blocks.map(b => `<knowledge>${b}</knowledge>`).join("\n\n");
       text = knowledgeBlock + "\n\n" + text;
       console.log('[onSend] final text length:', text.length);
+    }
+  }
+  // Prepend referenced file content inline
+  if (opts?.attachedFileIds?.length) {
+    const fileBlocks: string[] = [];
+    for (const fid of opts.attachedFileIds) {
+      try {
+        const fileContent = await filesApi.content(fid);
+        if (fileContent?.content) {
+          fileBlocks.push(`【文件: ${fileContent.name}】\n${fileContent.content}`);
+        }
+      } catch (e) { console.error('[onSend] file fetch failed:', fid, e); }
+    }
+    if (fileBlocks.length) {
+      const fileBlock = fileBlocks.map(b => `<file>${b}</file>`).join("\n\n");
+      text = fileBlock + "\n\n" + text;
     }
   }
   await chat.send(text, landingProfile.value?.default_agent_id || "hermes", opts);

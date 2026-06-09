@@ -397,7 +397,7 @@ export const useChatStore = defineStore("chat", () => {
       handleSendResponse(res);
     } else {
       // Personal conversation: existing logic
-      const passOpts = { profileId: opts?.profileId, webSearch: opts?.webSearch, deepThink: opts?.deepThink, fileIds };
+      const passOpts = { profileId: opts?.profileId, fileIds };
       if (activeAgents.value.length > 1) await sendRoundtable(id, text, passOpts);
       else await sendSingle(id, text, passOpts);
     }
@@ -424,7 +424,7 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   /** Single agent: open SSE, register handlers, then POST. */
-  async function sendSingle(id: string, text: string, opts?: { profileId?: string; webSearch?: boolean; deepThink?: boolean; fileIds?: string[] }) {
+  async function sendSingle(id: string, text: string, opts?: { profileId?: string; fileIds?: string[] }) {
     closeStream();
     streamingConvoId.value = id;
     registerStreamHandlers();
@@ -438,7 +438,7 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   /** Roundtable: bidirectional WebSocket — send + stream over one socket. */
-  async function sendRoundtable(id: string, text: string, opts?: { profileId?: string; webSearch?: boolean; deepThink?: boolean; fileIds?: string[] }) {
+  async function sendRoundtable(id: string, text: string, opts?: { profileId?: string; fileIds?: string[] }) {
     closeStream();
     streamingConvoId.value = id;
     registerStreamHandlers();

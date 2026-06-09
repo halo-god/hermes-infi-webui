@@ -27,4 +27,7 @@ export const filesApi = {
   async remove(fileId: string): Promise<void> {
     await http.delete(`/files/${fileId}`);
   },
+  async content(fileId: string): Promise<{ id: string; name: string; kind: string; content: string | null; size: number | null }> {
+    return (await http.get(`/files/${fileId}/content`)).data;
+  },
 };

@@ -5,6 +5,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import Icon from "@/components/Icon.vue";
 import ProfileListItem from "@/components/ProfileListItem.vue";
 import { agentsApi, type Profile } from "@/api/agents";
+import { filesApi, type FileItem } from "@/api/files";
 import { useNotificationStore } from "@/stores/notifications";
 
 const ns = useNotificationStore();
@@ -25,10 +26,9 @@ const props = defineProps<{
 }>();
 export interface SendOptions {
   profileId?: string;
-  webSearch?: boolean;
-  deepThink?: boolean;
   stagedFiles?: File[];
   knowledgeIds?: string[];
+  attachedFileIds?: string[];
   mentions?: string[];
 }
 
@@ -40,8 +40,9 @@ const fileInput = ref<HTMLInputElement | null>(null);
 const showProfile = ref(false);
 const showAttach = ref(false);
 const showKnowledgePicker = ref(false);
-const webSearch = ref(false);
-const deepThink = ref(false);
+const showFilePicker = ref(false);
+const standaloneFiles = ref<FileItem[]>([]);
+const stagedFileRefs = ref<{ id: string; name: string }[]>([]);
 const profiles = ref<Profile[]>([]);
 const selected = ref<Profile | null>(null);
 const stagedFiles = ref<File[]>([]);
@@ -106,6 +107,7 @@ function onDocClick(e: MouseEvent) {
     showProfile.value = false;
     showAttach.value = false;
     showKnowledgePicker.value = false;
+    showFilePicker.value = false;
   }
 }
 
@@ -150,6 +152,7 @@ function onKey(e: KeyboardEvent) {
 function doSend() {
   const files = stagedFiles.value.length ? [...stagedFiles.value] : undefined;
   const kIds = stagedKnowledge.value.length ? stagedKnowledge.value.map((k) => k.id) : undefined;
+  const fIds = stagedFileRefs.value.length ? stagedFileRefs.value.map((f) => f.id) : undefined;
 
   // Extract @mentions from text
   const mentions = [...mentionMentions.value];
@@ -158,7 +161,8 @@ function doSend() {
   stagedFiles.value = [];
   stagedPreviews.value = new Map();
   stagedKnowledge.value = [];
-  emit("send", { profileId: selected.value?.id, webSearch: webSearch.value, deepThink: deepThink.value, stagedFiles: files, knowledgeIds: kIds, mentions });
+  stagedFileRefs.value = [];
+  emit("send", { profileId: selected.value?.id, stagedFiles: files, knowledgeIds: kIds, attachedFileIds: fIds, mentions });
 }
 
 function selectMention(agent: { agent_id: string; name: string }) {
@@ -215,6 +219,33 @@ function triggerUpload() {
 function openKnowledgePicker() {
   showAttach.value = false;
   showKnowledgePicker.value = true;
+}
+
+async function openFilePicker() {
+  showAttach.value = false;
+  try {
+    standaloneFiles.value = await filesApi.listStandalone();
+  } catch {
+    standaloneFiles.value = [];
+  }
+  showFilePicker.value = true;
+}
+
+function toggleFileRef(item: FileItem) {
+  const idx = stagedFileRefs.value.findIndex((f) => f.id === item.id);
+  if (idx >= 0) {
+    stagedFileRefs.value.splice(idx, 1);
+  } else {
+    stagedFileRefs.value.push({ id: item.id, name: item.name });
+  }
+}
+
+function isFileSelected(id: string) {
+  return stagedFileRefs.value.some((f) => f.id === id);
+}
+
+function removeStagedFileRef(idx: number) {
+  stagedFileRefs.value.splice(idx, 1);
 }
 
 function toggleKnowledge(item: { id: string; name: string }) {
@@ -275,7 +306,7 @@ function isImageFile(f: File) {
   <div class="composer-wrap" ref="wrap">
     <input ref="fileInput" type="file" accept="image/*,.pdf,.md,.txt,.json,.csv,.html,.js,.ts,.py,.go,.rs,.yaml,.yml,.toml,.sh,.xml,.css,.diff" style="display:none" @change="onFileSelected" />
     <!-- staged file chips -->
-    <div v-if="stagedFiles.length || stagedKnowledge.length" class="staged-files">
+    <div v-if="stagedFiles.length || stagedKnowledge.length || stagedFileRefs.length" class="staged-files">
       <span v-for="(f, i) in stagedFiles" :key="'f'+i" class="staged-chip" :class="{ 'staged-chip-image': isImageFile(f) }">
         <img v-if="stagedPreviews.has(i)" :src="stagedPreviews.get(i)" class="staged-preview" />
         <Icon v-else name="paperclip" :size="11" />
@@ -285,7 +316,12 @@ function isImageFile(f: File) {
       <span v-for="(k, i) in stagedKnowledge" :key="'k'+i" class="staged-chip" style="background: var(--accent-soft, rgba(184,133,42,0.12));">
         <Icon name="doc" :size="11" />
         <span class="staged-name">{{ k.name }}</span>
-        <button class="staged-rm" @click="removeStagedKnowledge(i)">×</button>
+        <button class="staged-rm" @click="removeStagedKnowledge(i)">&times;</button>
+      </span>
+      <span v-for="(f, i) in stagedFileRefs" :key="'fr'+i" class="staged-chip" style="background: rgba(58,109,161,0.12);">
+        <Icon name="folder" :size="11" />
+        <span class="staged-name">{{ f.name }}</span>
+        <button class="staged-rm" @click="removeStagedFileRef(i)">&times;</button>
       </span>
     </div>
     <div class="composer">
@@ -322,11 +358,34 @@ function isImageFile(f: File) {
             <button class="menu-item" @click="triggerUpload">
               <Icon name="paperclip" /><span class="m-name">上传本地文件</span>
             </button>
+            <button class="menu-item" @click="openFilePicker">
+              <Icon name="folder" /><span class="m-name">引用文件管理文件</span>
+            </button>
             <button class="menu-item" @click="openKnowledgePicker" :disabled="!knowledgeItems?.length">
               <Icon name="doc" /><span class="m-name">引用知识库</span>
               <span v-if="knowledgeItems?.length" style="margin-left:auto;font-size:11px;color:var(--ink-mute)">{{ knowledgeItems.length }}</span>
             </button>
-            <button class="menu-item" @click="showAttach = false"><Icon name="globe" /><span class="m-name">粘贴网页链接</span></button>
+          </div>
+          <!-- file picker -->
+          <div v-if="showFilePicker" class="menu" style="bottom: 120%; left: 0; min-width: 260px; max-height: 240px; overflow-y: auto;">
+            <div class="menu-label">选择文件管理中的文件</div>
+            <div v-if="!standaloneFiles.length" style="padding: 12px; font-size: 12px; color: var(--ink-mute); text-align: center;">
+              暂无文件，请先到文件管理上传
+            </div>
+            <button
+              v-for="item in standaloneFiles"
+              :key="item.id"
+              class="menu-item"
+              :class="{ active: isFileSelected(item.id) }"
+              @click="toggleFileRef(item)"
+            >
+              <Icon name="paperclip" :size="13" />
+              <span class="m-name">{{ item.name }}</span>
+              <span style="margin-left:auto;font-size:11px;color:var(--ink-mute)">{{ item.size ? (item.size < 1024 ? item.size + 'B' : (item.size/1024).toFixed(1) + 'KB') : '' }}</span>
+              <Icon v-if="isFileSelected(item.id)" name="check" :size="12" style="margin-left:4px;color:var(--accent)" />
+            </button>
+            <div class="menu-sep"></div>
+            <button class="menu-item" style="color:var(--accent)" @click="showFilePicker = false">确定 ({{ stagedFileRefs.length }} 已选)</button>
           </div>
           <!-- knowledge picker -->
           <div v-if="showKnowledgePicker && knowledgeItems?.length" class="menu" style="bottom: 120%; left: 0; min-width: 260px; max-height: 240px; overflow-y: auto;">
@@ -346,8 +405,6 @@ function isImageFile(f: File) {
             <button class="menu-item" style="color:var(--accent)" @click="showKnowledgePicker = false">确定 ({{ stagedKnowledge.length }} 已选)</button>
           </div>
         </div>
-        <button class="composer-tool" :class="{ active: webSearch }" title="网页搜索" @click="webSearch = !webSearch"><Icon name="globe" /> 联网</button>
-        <button class="composer-tool" :class="{ active: deepThink }" title="思考模式" @click="deepThink = !deepThink"><Icon name="sparkle" /> 深思</button>
         <span class="composer-spacer"></span>
         <div style="position: relative">
           <button class="model-pick" :class="{ locked: profileLocked }" :title="profileLocked ? '助手已锁定，创建新会话可切换' : '切换助手'" @click="!profileLocked && (showProfile = !showProfile)">

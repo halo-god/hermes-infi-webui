@@ -223,6 +223,35 @@ async def upload_standalone_file(
     )
 
 
+@router.get("/files/{file_id}/content")
+async def get_file_content(
+    file_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get content of a standalone file by ID."""
+    wf = (await db.execute(select(WorkspaceFile).where(WorkspaceFile.id == file_id))).scalars().first()
+    if not wf:
+        raise HTTPException(404, "File not found")
+
+    # Verify ownership through conversation
+    convo = (await db.execute(select(Conversation).where(Conversation.id == wf.conversation_id))).scalars().first()
+    if not convo or convo.owner_id != user.id:
+        raise HTTPException(403, "Not authorized")
+
+    content = None
+    if wf.content:
+        content = wf.content
+    elif wf.storage_key:
+        try:
+            raw = await asyncio.to_thread(object_storage.get, wf.storage_key)
+            content = raw.decode("utf-8", "ignore")
+        except Exception:
+            content = None
+
+    return {"id": str(wf.id), "name": wf.name, "kind": wf.kind, "content": content, "size": wf.size_bytes}
+
+
 @router.delete("/files/{file_id}")
 async def delete_standalone_file(
     file_id: uuid.UUID,
