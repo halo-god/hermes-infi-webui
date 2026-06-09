@@ -26,12 +26,13 @@ async def upsert_memory(
         mem = AgentMemory(user_id=user_id, notes=notes, user_profile=user_profile, soul=soul)
         db.add(mem)
     else:
+        # Always update when explicitly provided (including empty string to clear)
         if notes is not None:
-            mem.notes = notes
+            mem.notes = notes or None
         if user_profile is not None:
-            mem.user_profile = user_profile
+            mem.user_profile = user_profile or None
         if soul is not None:
-            mem.soul = soul
+            mem.soul = soul or None
     await db.commit()
     await db.refresh(mem)
     return mem
