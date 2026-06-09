@@ -112,7 +112,6 @@ const greeting = computed(() => {
 });
 
 const landingProfile = computed(() => chat.profiles.find((p) => p.id === landingProfileId.value) || chat.profiles.find((p) => p.is_active) || null);
-const featuredProfiles = computed(() => chat.profiles.filter((p) => p.featured && p.is_active).slice(0, 4));
 const activeConvo = computed(() => chat.conversations.find((c) => c.id === chat.activeId));
 const primaryProfile = computed(() => {
   // Priority: conversation's profile_id > conversation's agent > landing
@@ -658,21 +657,21 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
         <h1 class="hello" v-html="greeting.main"></h1>
         <div class="hello-sub">{{ greeting.sub }}</div>
 
-        <!-- Featured profiles -->
-        <div v-if="featuredProfiles.length" class="featured-profiles">
+        <!-- All profiles for selection -->
+        <div class="featured-profiles">
           <button
-            v-for="fp in featuredProfiles"
-            :key="fp.id"
+            v-for="p in chat.profiles.filter(p => p.is_active)"
+            :key="p.id"
             class="featured-card"
-            :class="{ active: landingProfileId === fp.id }"
-            @click="startWithProfile(fp)"
+            :class="{ active: landingProfileId === p.id }"
+            @click="startWithProfile(p)"
           >
-            <div class="featured-card-icon" :style="{ background: fp.color || '#b8852a' }">
-              <Icon :name="fp.icon || 'sparkle'" :size="16" />
+            <div class="featured-card-icon" :style="{ background: p.color || '#b8852a' }">
+              <Icon :name="p.icon || 'sparkle'" :size="16" />
             </div>
             <div class="featured-card-body">
-              <div class="featured-card-name">{{ fp.name }}</div>
-              <div class="featured-card-desc">{{ fp.desc || fp.skills?.join(' · ') || '' }}</div>
+              <div class="featured-card-name">{{ p.name }}</div>
+              <div class="featured-card-desc">{{ p.desc || p.skills?.join(' · ') || p.default_model }}</div>
             </div>
           </button>
         </div>
@@ -966,6 +965,7 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
           placeholder="继续对话…"
           :agent="{ label: primaryProfile?.name, color: primaryProfile?.color, model: primaryProfile?.default_model || 'ACP' }"
           :profile-id="primaryProfile?.id"
+          :profile-locked="true"
           :streaming="chat.isActivelyStreaming(chat.activeId || '')"
           :conversation-id="chat.activeId || undefined"
           :knowledge-items="teamKnowledge.length ? teamKnowledge : undefined"

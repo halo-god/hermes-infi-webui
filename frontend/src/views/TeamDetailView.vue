@@ -540,24 +540,24 @@ async function deleteTeam() {
       <!-- AGENTS -->
       <template v-else-if="tab === 'agents'">
         <div class="flex-between" style="margin-bottom:14px">
-          <div><div class="heading-serif">助手 · {{ teamProfiles.length }}</div><div class="text-mute-sm" style="margin-top:2px">团队可用的助手（含全局助手）。点击可直接开启对话。</div></div>
+          <div><div class="heading-serif">共享助手 · {{ team.sharedProfileIds.length }}</div><div class="text-mute-sm" style="margin-top:2px">团队共享的助手，点击可直接开启对话。</div></div>
           <button v-if="can('agent.manage')" class="btn primary" @click="openSharedAgentsModal"><Icon name="settings" /> 管理共享</button>
         </div>
         <div class="agents-grid" style="max-width: none">
           <button
-            v-for="p in teamProfiles"
-            :key="p.id"
+            v-for="id in team.sharedProfileIds"
+            :key="id"
             class="agent-card"
             :style="'border-color:var(--accent-soft);box-shadow:var(--shadow-sm);text-align:left;'"
-            @click="router.push({ path: '/', query: { team: teamId, profile: p.id } })"
+            @click="router.push({ path: '/', query: { team: teamId, profile: id } })"
           >
-            <div class="agent-icon" :style="{ background: p.color || '#b8852a' }"><Icon :name="p.icon || 'sparkle'" /></div>
+            <div class="agent-icon" :style="{ background: profileInfo(id).color || '#b8852a' }"><Icon :name="profileInfo(id).icon || 'sparkle'" /></div>
             <div class="agent-meta">
-              <div class="agent-name">{{ p.name }}<span v-if="p.scope === 'global'" class="official">全局</span></div>
-              <div class="agent-desc">{{ p.desc || p.default_model }}</div>
+              <div class="agent-name">{{ profileInfo(id).label }}</div>
+              <div class="agent-desc">{{ profileInfo(id).description }}</div>
             </div>
           </button>
-          <div v-if="!teamProfiles.length" style="grid-column: 1/-1; padding: 40px; text-align: center; color: var(--ink-mute); font-size: 13px">暂无可用助手，请联系管理员在后台配置。</div>
+          <div v-if="!team.sharedProfileIds.length" style="grid-column: 1/-1; padding: 40px; text-align: center; color: var(--ink-mute); font-size: 13px">暂无共享助手，请点击「管理共享」添加。</div>
         </div>
       </template>
 

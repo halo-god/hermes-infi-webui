@@ -17,6 +17,7 @@ const props = defineProps<{
   autofocus?: boolean;
   conversationId?: string;
   profileId?: string;
+  profileLocked?: boolean;
   knowledgeItems?: { id: string; name: string }[];
   isGroup?: boolean;
   groupAgents?: { agent_id: string; name: string; color: string; icon: string }[];
@@ -349,13 +350,14 @@ function isImageFile(f: File) {
         <button class="composer-tool" :class="{ active: deepThink }" title="思考模式" @click="deepThink = !deepThink"><Icon name="sparkle" /> 深思</button>
         <span class="composer-spacer"></span>
         <div style="position: relative">
-          <button class="model-pick" title="切换 Hermes Profile · ACP 会话" @click="showProfile = !showProfile">
+          <button class="model-pick" :class="{ locked: profileLocked }" :title="profileLocked ? '助手已锁定，创建新会话可切换' : '切换助手'" @click="!profileLocked && (showProfile = !showProfile)">
             <span class="profile-dot" :style="{ background: pillColor }"></span>
             {{ pillLabel }}
             <span class="profile-model">{{ pillModel }}</span>
-            <Icon name="chevron_down" />
+            <Icon v-if="profileLocked" name="lock" :size="12" />
+            <Icon v-else name="chevron_down" />
           </button>
-          <div v-if="showProfile" class="menu" style="bottom: 110%; right: 0; min-width: 320px">
+          <div v-if="showProfile && !profileLocked" class="menu" style="bottom: 110%; right: 0; min-width: 320px">
             <div class="menu-label">个人 Profile</div>
             <ProfileListItem v-for="p in personal" :key="p.id" :profile="p" :active="selected?.id === p.id" @pick="pickProfile" />
             <div class="menu-sep"></div>
