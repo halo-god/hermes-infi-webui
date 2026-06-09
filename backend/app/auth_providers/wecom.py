@@ -31,6 +31,24 @@ def build_authorize_url(corp_id: str, agent_id: str, redirect_uri: str, state: s
     return f"https://open.work.weixin.qq.com/wwopen/sso/qrConnect?{urllib.parse.urlencode(params)}"
 
 
+def build_silent_authorize_url(corp_id: str, agent_id: str, redirect_uri: str, state: str = "") -> str:
+    """Build the WeCom OAuth2 authorize URL for silent (workbench) login.
+
+    Uses scope=snsapi_base so the user doesn't need to confirm —
+    WeCom auto-redirects with code if the user is already authenticated.
+    """
+    import urllib.parse
+    params = {
+        "appid": corp_id,
+        "agentid": agent_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "snsapi_base",
+        "state": state or "wecom_silent",
+    }
+    return f"https://open.work.weixin.qq.com/wwopen/sso/oauth2/authorize?{urllib.parse.urlencode(params)}#wechat_redirect"
+
+
 async def authenticate(config: dict, code: str) -> IdentityInfo:
     """Exchange OAuth code for user identity.
 

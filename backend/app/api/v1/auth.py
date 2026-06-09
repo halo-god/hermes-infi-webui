@@ -118,6 +118,40 @@ async def wecom_authorize(db: AsyncSession = Depends(get_db)):
     return {"authorize_url": url}
 
 
+@router.get("/wecom/silent")
+async def wecom_silent(db: AsyncSession = Depends(get_db)):
+    """Silent login from WeCom workbench. Redirects to OAuth2 authorize (scope=snsapi_base).
+
+    Configure this URL as the app's homepage in WeCom admin.
+    WeCom will auto-redirect with code — no QR scan needed.
+    """
+    from app.auth_providers.wecom import build_silent_authorize_url
+
+    provider = await db.get(IdentityProvider, "wecom")
+    if provider is None or not provider.enabled:
+        return Response(
+            content="<html><body><h3>企业微信登录未启用</h3><p>请联系管理员。</p></body></html>",
+            media_type="text/html; charset=utf-8",
+            status_code=403,
+        )
+
+    cfg = provider.config or {}
+    corp_id = (cfg.get("corp_id") or "").strip()
+    agent_id = (cfg.get("agent_id") or "").strip()
+    # Silent flow uses silent_redirect_uri if configured, falls back to redirect_uri
+    silent_redirect_uri = (cfg.get("silent_redirect_uri") or cfg.get("redirect_uri") or "").strip()
+    if not corp_id or not agent_id or not silent_redirect_uri:
+        return Response(
+            content="<html><body><h3>企业微信免登未完整配置</h3><p>请联系管理员配置回调地址。</p></body></html>",
+            media_type="text/html; charset=utf-8",
+            status_code=500,
+        )
+
+    url = build_silent_authorize_url(corp_id, agent_id, silent_redirect_uri)
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=url, status_code=302)
+
+
 @router.get("/wecom/callback")
 async def wecom_callback(code: str = "", state: str = "", db: AsyncSession = Depends(get_db)):
     """WeCom OAuth callback. Exchanges code for user identity, provisions, returns HTML with tokens."""

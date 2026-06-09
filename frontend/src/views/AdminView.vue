@@ -63,7 +63,7 @@ const LDAP_DEFAULTS: Record<string, string | number | boolean> = {
   attr_email: "mail", attr_name: "cn", attr_dept: "departmentNumber", email_domain: "",
 };
 const WECOM_DEFAULTS: Record<string, string> = {
-  corp_id: "", agent_id: "", app_secret: "", redirect_uri: "",
+  corp_id: "", agent_id: "", app_secret: "", redirect_uri: "", silent_redirect_uri: "",
 };
 
 const ldapShowPw = ref(false);
@@ -892,7 +892,7 @@ async function handleImportFile(e: Event) {
               <!-- 接入说明 -->
               <div class="cfg-section" style="background:var(--bg-plate);border-radius:var(--r-md);padding:14px 18px;margin-bottom:4px">
                 <div style="font-size:12.5px;color:var(--ink-mute);line-height:1.7">
-                  <b style="color:var(--ink)">接入步骤：</b>① 在 <a href="https://work.weixin.qq.com/wework_admin/frame#apps" target="_blank" style="color:var(--accent-deep)">企业微信后台</a> 创建自建应用，获取企业ID、AgentID 和 Secret；② 将下方回调地址配置到应用的「网页授权及JS-SDK」可信域名；③ 填写下方参数并保存；④ 点击「验证凭证」确认配置正确。
+                  <b style="color:var(--ink)">接入步骤：</b>① 在 <a href="https://work.weixin.qq.com/wework_admin/frame#apps" target="_blank" style="color:var(--accent-deep)">企业微信后台</a> 创建自建应用，获取企业ID、AgentID 和 Secret；② 将回调地址域名配置到应用的「网页授权及JS-SDK」可信域名；③ 填写下方参数并保存；④ 点击「验证凭证」确认配置正确。<b>免登：</b>将应用「工作台主页」设为 <code class="mono">/api/v1/auth/wecom/silent</code>，用户从工作台点击即免扫码登录。
                 </div>
               </div>
 
@@ -916,10 +916,15 @@ async function handleImportFile(e: Event) {
               <div class="cfg-section">
                 <div class="cfg-section-title"><Icon name="globe" /> OAuth 回调配置</div>
                 <div class="cfg-grid">
-                  <div class="lbl">回调地址</div>
+                  <div class="lbl">扫码回调地址</div>
                   <div class="val">
                     <input class="cfg-input" v-model="wecom.config['redirect_uri']" placeholder="https://hermes.company.com/api/v1/auth/wecom/callback" />
                     <div class="text-mute-xs" style="margin-top:4px">需要与企业微信后台「可信域名」保持一致，路径为 <code class="mono">/api/v1/auth/wecom/callback</code></div>
+                  </div>
+                  <div class="lbl">免登回调地址</div>
+                  <div class="val">
+                    <input class="cfg-input" v-model="wecom.config['silent_redirect_uri']" placeholder="同扫码回调（留空则复用）" />
+                    <div class="text-mute-xs" style="margin-top:4px">工作台免登 OAuth2 回调。留空则复用扫码回调地址。企业微信应用「工作台主页」设为 <code class="mono">/api/v1/auth/wecom/silent</code></div>
                   </div>
                 </div>
               </div>
