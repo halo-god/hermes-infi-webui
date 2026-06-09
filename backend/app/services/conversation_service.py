@@ -899,7 +899,7 @@ async def resolve_mentions(
                 ),
             )
         )
-        profile = res.scalar_one_or_none()
+        profile = res.scalars().first()
         if profile and profile.default_agent_id in group_agents:
             resolved.append(profile.default_agent_id)
             continue
@@ -910,9 +910,9 @@ async def resolve_mentions(
                 select(Profile).where(
                     Profile.default_agent_id == agent_id,
                     Profile.is_active.is_(True),
-                )
+                ).limit(1)
             )
-            p = res2.scalar_one_or_none()
+            p = res2.scalars().first()
             if p and (mention in p.name or p.name.startswith(mention)):
                 resolved.append(agent_id)
                 break
@@ -995,17 +995,17 @@ async def dispatch_group(
 
         # Route to single agent
         system_prompt = None
-        # Priority: @mentioned agent's profile > override > conversation default
+        # Priority: explicit profile_id_override > @mentioned agent's profile > conversation default
         effective_profile_id = profile_id_override or convo.profile_id
-        if resolved:
-            # Try to find the @mentioned agent's profile
+        if not profile_id_override and resolved:
+            # No explicit override — try to find the @mentioned agent's profile
             res_p = await db.execute(
                 select(Profile).where(
                     Profile.default_agent_id == resolved[0],
                     Profile.is_active.is_(True),
-                )
+                ).limit(1)
             )
-            agent_profile = res_p.scalar_one_or_none()
+            agent_profile = res_p.scalars().first()
             if agent_profile:
                 effective_profile_id = str(agent_profile.id)
         if effective_profile_id:
