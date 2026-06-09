@@ -301,7 +301,7 @@ const columns = [
 
 <style scoped>
 .files-page {
-  max-width: 960px;
+  max-width: 1400px;
   margin: 0 auto;
   padding: 32px 24px;
   position: relative;

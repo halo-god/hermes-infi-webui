@@ -105,7 +105,7 @@ const roleLabels: Record<string, string> = {
 
 <style scoped>
 .analytics-page {
-  max-width: 960px;
+  max-width: 1400px;
   margin: 0 auto;
   padding: 32px 24px;
 }
