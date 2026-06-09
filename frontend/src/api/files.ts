@@ -28,7 +28,7 @@ export const filesApi = {
       params: { folder },
     })).data;
   },
-  async createFolder(name: string, parent = "/"): Promise<{ path: string; name: string }> {
+  async createFolder(name: string, parent = "/"): Promise<{ id: string; name: string; kind: string; folder_path: string; is_folder: boolean }> {
     return (await http.post("/files/folder", null, { params: { name, parent } })).data;
   },
   async remove(fileId: string): Promise<void> {

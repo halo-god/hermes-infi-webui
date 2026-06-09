@@ -132,11 +132,23 @@ async def list_standalone_files(
             select(WorkspaceFile).where(
                 WorkspaceFile.conversation_id == storage_convo.id,
                 WorkspaceFile.folder_path == folder,
+                WorkspaceFile.is_folder == False,  # noqa: E712
             )
         )
     ).scalars().all()
 
-    # Collect subfolders: unique first path segment of files in deeper folders
+    # Real folder records in this folder
+    db_folders = (
+        await db.execute(
+            select(WorkspaceFile).where(
+                WorkspaceFile.conversation_id == storage_convo.id,
+                WorkspaceFile.folder_path == folder,
+                WorkspaceFile.is_folder == True,  # noqa: E712
+            )
+        )
+    ).scalars().all()
+
+    # Also collect virtual subfolders: unique first path segment of files in deeper folders
     all_files = (
         await db.execute(
             select(WorkspaceFile.folder_path).where(
@@ -160,7 +172,21 @@ async def list_standalone_files(
             subfolders.add(fp)
 
     result: list[FileItem] = []
+    # Real folders from DB
+    for f in db_folders:
+        result.append(FileItem(
+            id=str(f.id),
+            name=f.name,
+            created_at=f.created_at.isoformat() if f.created_at else "",
+            source="folder",
+            folder_path=f.folder_path or "/",
+            is_folder=True,
+        ))
+    # Virtual subfolders (from file paths)
+    known_paths = {f.folder_path for f in db_folders}
     for sf in sorted(subfolders):
+        if sf in known_paths:
+            continue
         folder_name = sf.rsplit("/", 1)[-1] if "/" in sf else sf
         result.append(FileItem(
             id=f"folder:{sf}",
@@ -193,11 +219,64 @@ async def create_folder(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a folder (virtual, no DB record needed — folders are path prefixes)."""
+    """Create a folder as a real DB record."""
     import re as _re
     clean_name = _re.sub(r"[^\w.\-\u4e00-\u9fff]", "_", name).strip("_. ") or "folder"
     folder_path = parent.rstrip("/") + "/" + clean_name
-    return {"path": folder_path, "name": clean_name}
+
+    # Ensure standalone conversation exists
+    storage_convo = (
+        await db.execute(
+            select(Conversation).where(
+                Conversation.owner_id == user.id,
+                Conversation.title == "__file_storage__",
+            )
+        )
+    ).scalars().first()
+    if not storage_convo:
+        storage_convo = Conversation(
+            owner_id=user.id,
+            title="__file_storage__",
+            system_prompt="",
+        )
+        db.add(storage_convo)
+        await db.flush()
+
+    # Check if folder already exists
+    existing = (
+        await db.execute(
+            select(WorkspaceFile).where(
+                WorkspaceFile.conversation_id == storage_convo.id,
+                WorkspaceFile.name == clean_name,
+                WorkspaceFile.folder_path == parent,
+                WorkspaceFile.is_folder == True,  # noqa: E712
+            )
+        )
+    ).scalars().first()
+    if existing:
+        raise HTTPException(409, "Folder already exists")
+
+    wf = WorkspaceFile(
+        conversation_id=storage_convo.id,
+        name=clean_name,
+        kind="folder",
+        folder_path=parent,
+        content="",
+        size_bytes=0,
+        is_folder=True,
+    )
+    db.add(wf)
+    await db.commit()
+    await db.refresh(wf)
+
+    return {
+        "id": str(wf.id),
+        "name": clean_name,
+        "kind": "folder",
+        "folder_path": parent,
+        "is_folder": True,
+        "created_at": wf.created_at.isoformat() if wf.created_at else None,
+    }
 
 
 @router.post("/files/upload", response_model=FileItem, status_code=201)

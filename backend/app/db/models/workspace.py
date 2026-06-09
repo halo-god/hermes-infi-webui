@@ -8,7 +8,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -37,6 +37,7 @@ class WorkspaceFile(UUIDPrimaryKey, Timestamps, Base):
     storage_key: Mapped[str | None] = mapped_column(String(512))
     size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     created_by_agent: Mapped[str | None] = mapped_column(String(64))
+    is_folder: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class WorkspaceFileVersion(UUIDPrimaryKey, Base):
