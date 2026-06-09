@@ -580,14 +580,25 @@ async def update_file_content(
     db: AsyncSession, f: WorkspaceFile, content: str, author: str | None = None
 ) -> WorkspaceFile:
     # Save current version before overwriting.
-    ver = WorkspaceFileVersion(
-        file_id=f.id,
-        version_num=f.current_version,
-        content=f.content,
-        size_bytes=f.size_bytes,
-        author=author,
-    )
-    db.add(ver)
+    # For MinIO storage, f.content may be None — read from object storage
+    old_content = f.content
+    if old_content is None and f.storage_key:
+        from app.core import object_storage
+        import asyncio
+        try:
+            raw = await asyncio.to_thread(object_storage.get, f.storage_key)
+            old_content = raw.decode("utf-8", "ignore") if isinstance(raw, bytes) else raw
+        except Exception:
+            old_content = None
+    if old_content:
+        ver = WorkspaceFileVersion(
+            file_id=f.id,
+            version_num=f.current_version,
+            content=old_content,
+            size_bytes=f.size_bytes,
+            author=author,
+        )
+        db.add(ver)
     # Keep only the latest 10 versions
     old_versions = (
         await db.execute(

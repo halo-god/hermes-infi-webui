@@ -95,11 +95,20 @@ async def save_file(
             db.add(f)
         else:
             # Save old version before overwriting — only if old content is non-empty
-            if f.content:
+            # For MinIO storage, f.content is None — read from object storage
+            old_content = f.content
+            if old_content is None and f.storage_key:
+                try:
+                    old_content = await asyncio.to_thread(object_storage.get, f.storage_key)
+                    if isinstance(old_content, bytes):
+                        old_content = old_content.decode("utf-8", "ignore")
+                except Exception:
+                    old_content = None
+            if old_content:
                 ver = WorkspaceFileVersion(
                     file_id=f.id,
                     version_num=f.current_version,
-                    content=f.content,
+                    content=old_content,
                     size_bytes=f.size_bytes,
                     author=agent_id,
                 )

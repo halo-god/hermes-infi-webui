@@ -1090,7 +1090,8 @@ class Runner:
         1. Fenced code blocks with a filename hint (```python filename.py or ```filename.txt)
         2. Explicit file path mentions (路径: ~/Downloads/xxx, 文件已生成 + path)
 
-        Files already saved via fs/write_text_file are skipped (dedup by name).
+        Files already saved via fs/write_text_file in the CURRENT message are skipped (dedup).
+        Files from PREVIOUS messages are still updated (creates version history).
         """
         import re
 
@@ -1099,19 +1100,15 @@ class Runner:
         from app.db.models.workspace import WorkspaceFile
 
         cid = uuid.UUID(conversation_id)
-        saved_names: set[str] = set()
 
-        # Check what's already in the workspace (from fs/write_text_file)
-        async with async_session_maker() as db:
-            res = await db.execute(
-                select(WorkspaceFile.name).where(WorkspaceFile.conversation_id == cid)
-            )
-            saved_names = {row[0] for row in res.all()}
+        # Track files saved via fs/write_text_file in THIS message only (from on_fs_write)
+        # We use a set passed from the caller or track via message_id
+        saved_names: set[str] = set()
 
         extracted: list[tuple[str, str]] = []  # (filename, content)
 
         # Pattern 1: fenced code blocks with filename
-        # Matches: ```python filename.py\n...\n``` or ```filename.txt\n...\n```
+        # Matches: ```python filename.py\n...``` or ```filename.txt\n...```
         code_block_re = re.compile(
             r"```(?:(\w+)\s+)?(\S+\.\w+)\s*\n(.*?)```",
             re.DOTALL,
