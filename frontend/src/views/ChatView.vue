@@ -191,6 +191,12 @@ const convoProjectId = computed(() => {
 const TASK_STATUS_ICON: Record<string, string> = { todo: "○", doing: "►", done: "✓" };
 
 function profileByAgentId(agentId: string): Profile | undefined {
+  // Prefer conversation's profile_id over agent_id lookup
+  const convoProfileId = activeConvo.value?.profile_id;
+  if (convoProfileId) {
+    const p = chat.profiles.find((pp) => pp.id === convoProfileId);
+    if (p) return p;
+  }
   return chat.profiles.find((p) => p.default_agent_id === agentId);
 }
 
