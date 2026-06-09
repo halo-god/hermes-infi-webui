@@ -45,6 +45,14 @@ const showKnowledgePicker = ref(false);
 const showFilePicker = ref(false);
 const standaloneFiles = ref<FileItem[]>([]);
 const stagedFileRefs = ref<{ id: string; name: string }[]>([]);
+const pickerFolder = ref("/");
+const pickerBreadcrumbs = computed(() => {
+  const parts = pickerFolder.value.split("/").filter(Boolean);
+  const result = [{ path: "/", label: "根目录" }];
+  let path = "";
+  for (const p of parts) { path += "/" + p; result.push({ path, label: p }); }
+  return result;
+});
 const profiles = ref<Profile[]>([]);
 const selected = ref<Profile | null>(null);
 const stagedFiles = ref<File[]>([]);
@@ -341,12 +349,22 @@ function openKnowledgePicker() {
 
 async function openFilePicker() {
   showAttach.value = false;
+  pickerFolder.value = "/";
+  await loadPickerFiles("/");
+  showFilePicker.value = true;
+}
+
+async function loadPickerFiles(folder: string) {
+  pickerFolder.value = folder;
   try {
-    standaloneFiles.value = await filesApi.listStandalone();
+    standaloneFiles.value = await filesApi.listStandalone(folder);
   } catch {
     standaloneFiles.value = [];
   }
-  showFilePicker.value = true;
+}
+
+function navigatePickerFolder(item: FileItem) {
+  if (item.is_folder) loadPickerFiles(item.folder_path || "/");
 }
 
 function toggleFileRef(item: FileItem) {
@@ -502,22 +520,27 @@ function isImageFile(f: File) {
             </button>
           </div>
           <!-- file picker -->
-          <div v-if="showFilePicker" class="menu" style="bottom: 120%; left: 0; min-width: 260px; max-height: 240px; overflow-y: auto;">
-            <div class="menu-label">选择文件管理中的文件</div>
+          <div v-if="showFilePicker" class="menu" style="bottom: 120%; left: 0; min-width: 300px; max-height: 280px; overflow-y: auto;">
+            <div class="menu-label" style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
+              <span v-for="(bc, i) in pickerBreadcrumbs" :key="bc.path">
+                <span v-if="i > 0" style="color:var(--ink-faint)">/</span>
+                <button style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;padding:1px 2px" @click="loadPickerFiles(bc.path)">{{ bc.label }}</button>
+              </span>
+            </div>
             <div v-if="!standaloneFiles.length" style="padding: 12px; font-size: 12px; color: var(--ink-mute); text-align: center;">
-              暂无文件，请先到文件管理上传
+              暂无文件
             </div>
             <button
               v-for="item in standaloneFiles"
               :key="item.id"
               class="menu-item"
               :class="{ active: isFileSelected(item.id) }"
-              @click="toggleFileRef(item)"
+              @click="item.is_folder ? navigatePickerFolder(item) : toggleFileRef(item)"
             >
-              <Icon name="paperclip" :size="13" />
+              <Icon :name="item.is_folder ? 'folder' : 'paperclip'" :size="13" />
               <span class="m-name">{{ item.name }}</span>
-              <span style="margin-left:auto;font-size:11px;color:var(--ink-mute)">{{ item.size ? (item.size < 1024 ? item.size + 'B' : (item.size/1024).toFixed(1) + 'KB') : '' }}</span>
-              <Icon v-if="isFileSelected(item.id)" name="check" :size="12" style="margin-left:4px;color:var(--accent)" />
+              <span v-if="!item.is_folder && item.size" style="margin-left:auto;font-size:11px;color:var(--ink-mute)">{{ item.size < 1024 ? item.size + 'B' : (item.size/1024).toFixed(1) + 'KB' }}</span>
+              <Icon v-if="!item.is_folder && isFileSelected(item.id)" name="check" :size="12" style="margin-left:4px;color:var(--accent)" />
             </button>
             <div class="menu-sep"></div>
             <button class="menu-item" style="color:var(--accent)" @click="showFilePicker = false">确定 ({{ stagedFileRefs.length }} 已选)</button>

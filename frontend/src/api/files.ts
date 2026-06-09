@@ -3,26 +3,33 @@ import { http } from "./client";
 export interface FileItem {
   id: string;
   name: string;
-  conversation_id: string;
-  conversation_title: string;
+  conversation_id: string | null;
+  conversation_title: string | null;
   size: number | null;
   created_at: string;
-  source: string;  // "upload" or "ai"
+  source: string;  // "upload" or "ai" or "folder"
+  kind?: string | null;
+  folder_path?: string;
+  is_folder?: boolean;
 }
 
 export const filesApi = {
   async listAll(): Promise<FileItem[]> {
     return (await http.get<FileItem[]>("/files")).data;
   },
-  async listStandalone(): Promise<FileItem[]> {
-    return (await http.get<FileItem[]>("/files/standalone")).data;
+  async listStandalone(folder = "/"): Promise<FileItem[]> {
+    return (await http.get<FileItem[]>("/files/standalone", { params: { folder } })).data;
   },
-  async upload(file: File): Promise<FileItem> {
+  async upload(file: File, folder = "/"): Promise<FileItem> {
     const form = new FormData();
     form.append("file", file);
     return (await http.post<FileItem>("/files/upload", form, {
       headers: { "Content-Type": "multipart/form-data" },
+      params: { folder },
     })).data;
+  },
+  async createFolder(name: string, parent = "/"): Promise<{ path: string; name: string }> {
+    return (await http.post("/files/folder", null, { params: { name, parent } })).data;
   },
   async remove(fileId: string): Promise<void> {
     await http.delete(`/files/${fileId}`);

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { h, onMounted, ref, computed } from "vue";
 import { useRouter } from "vue-router";
-import { NCard, NDataTable, NSpin, NTag, NButton, NTabs, NTabPane, NEmpty } from "naive-ui";
+import { NCard, NDataTable, NSpin, NTag, NButton, NEmpty } from "naive-ui";
 import { filesApi, type FileItem } from "@/api/files";
 import { conversationsApi } from "@/api/conversations";
 import { useNotificationStore } from "@/stores/notifications";
@@ -10,32 +10,31 @@ import Icon from "@/components/Icon.vue";
 const router = useRouter();
 const ns = useNotificationStore();
 const files = ref<FileItem[]>([]);
-const standaloneFiles = ref<FileItem[]>([]);
+const allFiles = ref<FileItem[]>([]);
 const loading = ref(true);
 const uploading = ref(false);
-const activeTab = ref("all");
 const dragover = ref(false);
+const currentFolder = ref("/");
+const newFolderName = ref("");
+const showNewFolder = ref(false);
 
-onMounted(async () => {
+async function loadFiles(folder = "/") {
+  loading.value = true;
   try {
-    const [allFiles, standalone] = await Promise.all([
+    const [standalone, all] = await Promise.all([
+      filesApi.listStandalone(folder),
       filesApi.listAll(),
-      filesApi.listStandalone(),
     ]);
-    files.value = allFiles;
-    standaloneFiles.value = standalone;
+    files.value = standalone;
+    allFiles.value = all;
   } catch {
     files.value = [];
-    standaloneFiles.value = [];
   } finally {
     loading.value = false;
   }
-});
+}
 
-const displayFiles = computed(() => {
-  if (activeTab.value === "standalone") return standaloneFiles.value;
-  return [...standaloneFiles.value, ...files.value];
-});
+onMounted(() => loadFiles("/"));
 
 function formatSize(bytes: number | null): string {
   if (!bytes) return "-";
@@ -47,26 +46,46 @@ function formatSize(bytes: number | null): string {
 function formatDate(iso: string): string {
   if (!iso) return "-";
   return new Date(iso).toLocaleDateString("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
+    month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
   });
 }
 
-function getFileIcon(name: string): string {
-  const ext = name.split(".").pop()?.toLowerCase() || "";
+function getFileIcon(item: FileItem): string {
+  if (item.is_folder) return "folder";
+  const ext = (item.kind || item.name.split(".").pop() || "").toLowerCase();
   if (["jpg", "jpeg", "png", "gif", "svg", "webp"].includes(ext)) return "star";
   if (["pdf", "doc", "docx", "txt", "md"].includes(ext)) return "doc";
   if (["py", "js", "ts", "vue", "css", "html", "json"].includes(ext)) return "sparkle";
   return "paperclip";
 }
 
+// Breadcrumb
+const breadcrumbs = computed(() => {
+  const parts = currentFolder.value.split("/").filter(Boolean);
+  const result = [{ path: "/", label: "根目录" }];
+  let path = "";
+  for (const p of parts) {
+    path += "/" + p;
+    result.push({ path, label: p });
+  }
+  return result;
+});
+
+function navigateTo(path: string) {
+  currentFolder.value = path;
+  loadFiles(path);
+}
+
+function enterFolder(item: FileItem) {
+  if (item.is_folder) {
+    navigateTo(item.folder_path || "/");
+  }
+}
+
 async function downloadFile(row: FileItem) {
   try {
     if (row.conversation_id) {
-      const url = conversationsApi.fileRawUrl(row.conversation_id, row.id);
-      window.open(url, "_blank");
+      window.open(conversationsApi.fileRawUrl(row.conversation_id, row.id), "_blank");
     } else {
       ns.toast("独立文件暂不支持直接下载", "warn");
     }
@@ -76,10 +95,10 @@ async function downloadFile(row: FileItem) {
 }
 
 async function deleteFile(row: FileItem) {
+  if (row.is_folder) return;
   if (!confirm(`确定删除文件 "${row.name}" 吗？`)) return;
   try {
     await filesApi.remove(row.id);
-    standaloneFiles.value = standaloneFiles.value.filter((f) => f.id !== row.id);
     files.value = files.value.filter((f) => f.id !== row.id);
     ns.toast("已删除", "ok");
   } catch {
@@ -87,22 +106,28 @@ async function deleteFile(row: FileItem) {
   }
 }
 
-function goToConversation(row: FileItem) {
-  if (row.conversation_id) {
-    router.push({ path: "/", query: { c: row.conversation_id } });
+// Create folder
+async function createFolder() {
+  if (!newFolderName.value.trim()) return;
+  try {
+    await filesApi.createFolder(newFolderName.value.trim(), currentFolder.value);
+    newFolderName.value = "";
+    showNewFolder.value = false;
+    await loadFiles(currentFolder.value);
+    ns.toast("文件夹已创建", "ok");
+  } catch {
+    ns.toast("创建失败", "error");
   }
 }
 
-// Upload handling
+// Upload
 function triggerFileInput() {
   const input = document.createElement("input");
   input.type = "file";
   input.multiple = true;
   input.onchange = async (e) => {
     const target = e.target as HTMLInputElement;
-    if (target.files) {
-      await uploadFiles(Array.from(target.files));
-    }
+    if (target.files) await uploadFiles(Array.from(target.files));
   };
   input.click();
 }
@@ -114,9 +139,7 @@ function triggerFolderInput() {
   input.multiple = true;
   input.onchange = async (e) => {
     const target = e.target as HTMLInputElement;
-    if (target.files) {
-      await uploadFiles(Array.from(target.files));
-    }
+    if (target.files) await uploadFiles(Array.from(target.files));
   };
   input.click();
 }
@@ -124,150 +147,116 @@ function triggerFolderInput() {
 async function uploadFiles(fileList: File[]) {
   if (!fileList.length) return;
   uploading.value = true;
-  let successCount = 0;
-  let failCount = 0;
-
+  let ok = 0, fail = 0;
   for (const file of fileList) {
     try {
-      const result = await filesApi.upload(file);
-      standaloneFiles.value.unshift(result);
-      successCount++;
-    } catch {
-      failCount++;
-    }
+      const result = await filesApi.upload(file, currentFolder.value);
+      files.value.unshift(result);
+      ok++;
+    } catch { fail++; }
   }
-
   uploading.value = false;
-  if (successCount > 0) {
-    ns.toast(`成功上传 ${successCount} 个文件${failCount > 0 ? `，${failCount} 个失败` : ""}`, "ok");
-  } else if (failCount > 0) {
-    ns.toast("上传失败", "error");
-  }
+  if (ok) ns.toast(`成功上传 ${ok} 个文件${fail ? `，${fail} 个失败` : ""}`, "ok");
+  else if (fail) ns.toast("上传失败", "error");
 }
 
-// Drag and drop
-function onDragover(e: DragEvent) {
-  e.preventDefault();
-  dragover.value = true;
-}
-
-function onDragleave() {
-  dragover.value = false;
-}
-
+function onDragover(e: DragEvent) { e.preventDefault(); dragover.value = true; }
+function onDragleave() { dragover.value = false; }
 async function onDrop(e: DragEvent) {
-  e.preventDefault();
-  dragover.value = false;
-  if (e.dataTransfer?.files) {
-    await uploadFiles(Array.from(e.dataTransfer.files));
-  }
+  e.preventDefault(); dragover.value = false;
+  if (e.dataTransfer?.files) await uploadFiles(Array.from(e.dataTransfer.files));
+}
+
+function goToConversation(row: FileItem) {
+  if (row.conversation_id) router.push({ path: "/", query: { c: row.conversation_id } });
 }
 
 const columns = [
   {
-    title: "",
-    key: "icon",
-    width: 36,
-    render: (row: FileItem) =>
-      h(Icon, { name: getFileIcon(row.name), size: 14, style: { color: "var(--accent)" } }),
+    title: "", key: "icon", width: 36,
+    render: (row: FileItem) => h(Icon, { name: getFileIcon(row), size: 14, style: { color: row.is_folder ? "var(--accent)" : "var(--ink-mute)" } }),
   },
   {
-    title: "文件名",
-    key: "name",
-    ellipsis: { tooltip: true },
-    sorter: (a: FileItem, b: FileItem) => a.name.localeCompare(b.name),
+    title: "文件名", key: "name", ellipsis: { tooltip: true },
+    render: (row: FileItem) => row.is_folder
+      ? h("span", { style: { cursor: "pointer", color: "var(--accent)", fontWeight: 500 }, onClick: () => enterFolder(row) }, row.name)
+      : row.name,
   },
   {
-    title: "大小",
-    key: "size",
-    width: 90,
-    render: (row: FileItem) => formatSize(row.size),
-    sorter: (a: FileItem, b: FileItem) => (a.size || 0) - (b.size || 0),
+    title: "大小", key: "size", width: 90,
+    render: (row: FileItem) => row.is_folder ? "-" : formatSize(row.size),
   },
   {
-    title: "来源",
-    key: "source",
-    width: 80,
-    render: (row: FileItem) =>
-      h(
-        NTag,
-        { size: "small", type: row.source === "ai" ? "success" : "info" },
-        () => row.source === "ai" ? "AI生成" : "上传"
-      ),
+    title: "来源", key: "source", width: 80,
+    render: (row: FileItem) => row.is_folder
+      ? h(NTag, { size: "small", type: "warning" }, () => "文件夹")
+      : h(NTag, { size: "small", type: row.source === "ai" ? "success" : "info" }, () => row.source === "ai" ? "AI生成" : "上传"),
   },
   {
-    title: "所属会话",
-    key: "conversation_title",
-    ellipsis: { tooltip: true },
+    title: "所属会话", key: "conversation_title", ellipsis: { tooltip: true },
     render: (row: FileItem) => {
-      if (!row.conversation_title || row.conversation_title === "__file_storage__") {
-        return h("span", { style: { color: "var(--ink-mute)", fontSize: "12px" } }, "独立文件");
+      if (row.is_folder || !row.conversation_title || row.conversation_title === "__file_storage__") {
+        return h("span", { style: { color: "var(--ink-mute)", fontSize: "12px" } }, row.is_folder ? "" : "独立文件");
       }
-      return h(
-        NButton,
-        { text: true, size: "small", onClick: () => goToConversation(row) },
-        () => row.conversation_title
-      );
+      return h(NButton, { text: true, size: "small", onClick: () => goToConversation(row) }, () => row.conversation_title);
     },
   },
   {
-    title: "上传时间",
-    key: "created_at",
-    width: 130,
-    render: (row: FileItem) => formatDate(row.created_at),
-    sorter: (a: FileItem, b: FileItem) => a.created_at.localeCompare(b.created_at),
+    title: "上传时间", key: "created_at", width: 130,
+    render: (row: FileItem) => row.is_folder ? "" : formatDate(row.created_at),
   },
   {
-    title: "",
-    key: "actions",
-    width: 80,
-    render: (row: FileItem) =>
-      h("div", { style: { display: "flex", gap: "4px" } }, [
-        h(
-          NButton,
-          { text: true, size: "small", title: "下载", onClick: () => downloadFile(row) },
-          () => h(Icon, { name: "arrow_up", size: 14, style: { transform: "rotate(180deg)" } })
-        ),
-        row.conversation_title === "__file_storage__"
-          ? h(
-              NButton,
-              { text: true, size: "small", title: "删除", onClick: () => deleteFile(row) },
-              () => h(Icon, { name: "x", size: 14, style: { color: "var(--error)" } })
-            )
-          : null,
-      ]),
+    title: "", key: "actions", width: 80,
+    render: (row: FileItem) => row.is_folder ? null : h("div", { style: { display: "flex", gap: "4px" } }, [
+      h(NButton, { text: true, size: "small", title: "下载", onClick: () => downloadFile(row) },
+        () => h(Icon, { name: "arrow_up", size: 14, style: { transform: "rotate(180deg)" } })),
+      row.conversation_title === "__file_storage__"
+        ? h(NButton, { text: true, size: "small", title: "删除", onClick: () => deleteFile(row) },
+            () => h(Icon, { name: "x", size: 14, style: { color: "var(--error)" } }))
+        : null,
+    ]),
   },
 ];
+
+// Expose current folder for parent components
+defineExpose({ currentFolder });
 </script>
 
 <template>
-  <div
-    class="files-page"
-    @dragover="onDragover"
-    @dragleave="onDragleave"
-    @drop="onDrop"
-  >
+  <div class="files-page" @dragover="onDragover" @dragleave="onDragleave" @drop="onDrop">
     <div class="files-head">
       <Icon name="folder" :size="20" />
       <h2>文件管理</h2>
-      <NTag v-if="displayFiles.length" size="small" type="info" style="margin-left: auto">
-        {{ displayFiles.length }} 个文件
-      </NTag>
+      <NTag v-if="files.length" size="small" type="info" style="margin-left: auto">{{ files.length }} 项</NTag>
     </div>
 
-    <!-- Upload area -->
-    <div class="files-upload-bar">
-      <button class="files-upload-btn" :disabled="uploading" @click="triggerFileInput">
-        <Icon name="arrow_up" :size="14" />
-        {{ uploading ? "上传中..." : "上传文件" }}
+    <!-- Breadcrumb -->
+    <div class="files-breadcrumb">
+      <span v-for="(bc, i) in breadcrumbs" :key="bc.path">
+        <span v-if="i > 0" class="bc-sep">/</span>
+        <button class="bc-link" :class="{ active: i === breadcrumbs.length - 1 }" @click="navigateTo(bc.path)">{{ bc.label }}</button>
+      </span>
+    </div>
+
+    <!-- Toolbar -->
+    <div class="files-toolbar">
+      <button class="files-btn" :disabled="uploading" @click="triggerFileInput">
+        <Icon name="arrow_up" :size="14" /> {{ uploading ? "上传中..." : "上传文件" }}
       </button>
-      <button class="files-upload-btn" :disabled="uploading" @click="triggerFolderInput">
-        <Icon name="folder" :size="14" />
-        上传文件夹
+      <button class="files-btn" :disabled="uploading" @click="triggerFolderInput">
+        <Icon name="folder" :size="14" /> 上传文件夹
       </button>
-      <div class="files-upload-hint">
-        拖放文件到此处也可上传
-      </div>
+      <button class="files-btn" @click="showNewFolder = !showNewFolder">
+        <Icon name="folder" :size="14" /> 新建文件夹
+      </button>
+      <div class="files-hint">拖放文件到此处也可上传</div>
+    </div>
+
+    <!-- New folder input -->
+    <div v-if="showNewFolder" class="files-new-folder">
+      <input v-model="newFolderName" class="cfg-input" placeholder="文件夹名称" @keydown.enter="createFolder" autofocus />
+      <button class="btn primary" style="font-size:12px" :disabled="!newFolderName.trim()" @click="createFolder">创建</button>
+      <button class="btn" style="font-size:12px" @click="showNewFolder = false; newFolderName = ''">取消</button>
     </div>
 
     <!-- Drag overlay -->
@@ -276,18 +265,12 @@ const columns = [
       <div>释放鼠标上传文件</div>
     </div>
 
-    <!-- Tabs -->
-    <NTabs v-model:value="activeTab" type="segment" size="small" class="files-tabs">
-      <NTabPane name="all" tab="全部文件" />
-      <NTabPane name="standalone" tab="独立文件" />
-    </NTabs>
-
     <NSpin :show="loading">
       <NCard size="small" class="files-card">
         <NDataTable
-          v-if="displayFiles.length"
+          v-if="files.length"
           :columns="columns"
-          :data="displayFiles"
+          :data="files"
           :max-height="600"
           :scrollbar-props="{ trigger: 'hover' }"
           :empty-text="'暂无文件'"
@@ -310,76 +293,58 @@ const columns = [
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
   color: var(--ink);
 }
-.files-head h2 {
-  font-family: var(--font-serif);
-  font-size: 22px;
-  font-weight: 500;
-  margin: 0;
+.files-head h2 { font-family: var(--font-serif); font-size: 22px; font-weight: 500; margin: 0; }
+.files-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-bottom: 12px;
+  font-size: 13px;
 }
-.files-upload-bar {
+.bc-sep { color: var(--ink-mute); margin: 0 4px; }
+.bc-link {
+  background: none; border: none; cursor: pointer;
+  color: var(--accent); font-size: 13px; padding: 2px 4px;
+  border-radius: 4px; transition: background 120ms;
+}
+.bc-link:hover { background: var(--accent-tint); }
+.bc-link.active { color: var(--ink); font-weight: 600; cursor: default; }
+.bc-link.active:hover { background: transparent; }
+.files-toolbar {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
   padding: 12px 16px;
   background: var(--bg-panel);
   border: 1px dashed var(--rule);
   border-radius: var(--r-md);
-  transition: border-color 150ms;
 }
-.files-upload-bar:hover {
-  border-color: var(--accent-soft);
+.files-btn {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 16px; background: var(--accent); color: #fff;
+  border: none; border-radius: var(--r-sm); font-size: 13px; font-weight: 500;
+  cursor: pointer; transition: opacity 150ms;
 }
-.files-upload-btn {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 16px;
-  background: var(--accent);
-  color: #fff;
-  border: none;
-  border-radius: var(--r-sm);
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: opacity 150ms;
+.files-btn:hover { opacity: 0.9; }
+.files-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.files-hint { font-size: 12px; color: var(--ink-mute); margin-left: auto; }
+.files-new-folder {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 12px; padding: 10px 16px;
+  background: var(--bg-panel); border-radius: var(--r-sm);
 }
-.files-upload-btn:hover {
-  opacity: 0.9;
-}
-.files-upload-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.files-upload-hint {
-  font-size: 12px;
-  color: var(--ink-mute);
-  margin-left: auto;
-}
+.files-new-folder .cfg-input { flex: 1; height: 32px; font-size: 13px; }
 .files-drop-overlay {
-  position: absolute;
-  inset: 0;
-  background: rgba(var(--accent-rgb, 184, 133, 42), 0.1);
-  border: 2px dashed var(--accent);
-  border-radius: var(--r-md);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  z-index: 10;
-  color: var(--accent);
-  font-size: 16px;
-  font-weight: 500;
+  position: absolute; inset: 0;
+  background: rgba(184, 133, 42, 0.1);
+  border: 2px dashed var(--accent); border-radius: var(--r-md);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; z-index: 10; color: var(--accent); font-size: 16px; font-weight: 500;
   pointer-events: none;
 }
-.files-tabs {
-  margin-bottom: 16px;
-}
-.files-card {
-  background: var(--bg-panel);
-}
+.files-card { background: var(--bg-panel); }
 </style>

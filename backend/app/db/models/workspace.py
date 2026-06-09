@@ -30,6 +30,7 @@ class WorkspaceFile(UUIDPrimaryKey, Timestamps, Base):
         index=True,
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    folder_path: Mapped[str] = mapped_column(String(512), default="/")  # e.g. "/docs" or "/" for root
     kind: Mapped[str] = mapped_column(String(16), default="md")  # md|docx|csv|json|txt
     current_version: Mapped[int] = mapped_column(Integer, default=1)
     content: Mapped[str | None] = mapped_column(Text)  # P2: inline; later → storage_key

@@ -29,6 +29,8 @@ class FileItem(BaseModel):
     source: str = "upload"  # "upload" or "ai"
     kind: str | None = None
     storage_key: str | None = None
+    folder_path: str = "/"
+    is_folder: bool = False
 
 
 @router.get("/files", response_model=list[FileItem])
@@ -108,10 +110,11 @@ async def list_all_files(
 
 @router.get("/files/standalone", response_model=list[FileItem])
 async def list_standalone_files(
+    folder: str = "/",
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List user's standalone uploaded files (not tied to active conversations)."""
+    """List user's standalone files and subfolders in a given folder."""
     storage_convo = (
         await db.execute(
             select(Conversation).where(
@@ -127,13 +130,49 @@ async def list_standalone_files(
     ws_files = (
         await db.execute(
             select(WorkspaceFile).where(
-                WorkspaceFile.conversation_id == storage_convo.id
+                WorkspaceFile.conversation_id == storage_convo.id,
+                WorkspaceFile.folder_path == folder,
             )
         )
     ).scalars().all()
 
-    return [
-        FileItem(
+    # Collect subfolders: unique first path segment of files in deeper folders
+    all_files = (
+        await db.execute(
+            select(WorkspaceFile.folder_path).where(
+                WorkspaceFile.conversation_id == storage_convo.id,
+                WorkspaceFile.folder_path.startswith(folder) if folder != "/" else WorkspaceFile.folder_path != "/",
+                WorkspaceFile.folder_path != folder,
+            )
+        )
+    ).all()
+
+    subfolders: set[str] = set()
+    prefix = folder.rstrip("/")
+    for (fp,) in all_files:
+        if not fp or fp == folder:
+            continue
+        # Get immediate child folder
+        relative = fp[len(prefix):].lstrip("/")
+        if "/" in relative:
+            subfolders.add(prefix + "/" + relative.split("/")[0])
+        else:
+            subfolders.add(fp)
+
+    result: list[FileItem] = []
+    for sf in sorted(subfolders):
+        folder_name = sf.rsplit("/", 1)[-1] if "/" in sf else sf
+        result.append(FileItem(
+            id=f"folder:{sf}",
+            name=folder_name,
+            created_at="",
+            source="folder",
+            folder_path=sf,
+            is_folder=True,
+        ))
+
+    for wf in ws_files:
+        result.append(FileItem(
             id=str(wf.id),
             name=wf.name,
             size=wf.size_bytes,
@@ -141,14 +180,30 @@ async def list_standalone_files(
             source="upload",
             kind=wf.kind,
             storage_key=wf.storage_key,
-        )
-        for wf in ws_files
-    ]
+            folder_path=wf.folder_path or "/",
+        ))
+
+    return result
+
+
+@router.post("/files/folder", status_code=201)
+async def create_folder(
+    name: str,
+    parent: str = "/",
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a folder (virtual, no DB record needed — folders are path prefixes)."""
+    import re as _re
+    clean_name = _re.sub(r"[^\w.\-\u4e00-\u9fff]", "_", name).strip("_. ") or "folder"
+    folder_path = parent.rstrip("/") + "/" + clean_name
+    return {"path": folder_path, "name": clean_name}
 
 
 @router.post("/files/upload", response_model=FileItem, status_code=201)
 async def upload_standalone_file(
     file: UploadFile = FastApiFile(...),
+    folder: str = "/",
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -202,6 +257,7 @@ async def upload_standalone_file(
     wf = WorkspaceFile(
         conversation_id=storage_convo.id,
         name=name,
+        folder_path=folder,
         kind=ext,
         content=content,
         storage_key=storage_key,
@@ -220,6 +276,7 @@ async def upload_standalone_file(
         source="upload",
         kind=wf.kind,
         storage_key=wf.storage_key,
+        folder_path=wf.folder_path or "/",
     )
 
 
