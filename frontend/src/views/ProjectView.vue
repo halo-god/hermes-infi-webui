@@ -9,10 +9,12 @@ import NewProjectModal from "@/components/NewProjectModal.vue";
 import { projectsApi } from "@/api/projects";
 import { teamsApi } from "@/api/teams";
 import { agentsApi } from "@/api/agents";
+import { useChatStore } from "@/stores/chat";
 import type { Agent, Member, Project, Task } from "@/types";
 
 const route = useRoute();
 const router = useRouter();
+const chat = useChatStore();
 const projectId = route.params.id as string;
 
 const project = ref<(Project & import("@/types").ProjectDetail) | null>(null);
@@ -137,13 +139,20 @@ async function deleteTask(t: Task) {
   await projectsApi.deleteTask(t.id);
   tasks.value = tasks.value.filter((x) => x.id !== t.id);
 }
-function taskToAI(task?: Task) {
+function taskToAI(task?: Task, agentId?: string) {
   const seed = task ? `请帮我完成以下任务：${task.title}` : undefined;
-  router.push({ path: "/", query: { project: projectId, seed } });
+  const profile = agentId ? chat.profiles.find((p) => p.default_agent_id === agentId) : null;
+  const q: Record<string, string> = { project: projectId };
+  if (seed) q.seed = seed;
+  if (profile) q.profile = profile.id;
+  router.push({ path: "/", query: q });
 }
-function docToAI(docName: string) {
+function docToAI(docName: string, agentId?: string) {
   const seed = `请帮我分析项目文件：${docName}`;
-  router.push({ path: "/", query: { project: projectId, seed } });
+  const profile = agentId ? chat.profiles.find((p) => p.default_agent_id === agentId) : null;
+  const q: Record<string, string> = { project: projectId, seed };
+  if (profile) q.profile = profile.id;
+  router.push({ path: "/", query: q });
 }
 function back() {
   if (project.value) router.push(`/teams/${project.value.team_id}`);
@@ -297,7 +306,7 @@ async function removeProject() {
           <div class="section-card">
             <div class="section-head"><div class="section-title"><Icon name="sparkle" /> 项目助手</div></div>
             <div class="agent-mini-grid">
-              <button v-for="id in project.pinned_agents" :key="id" class="agent-mini" @click="router.push('/')">
+              <button v-for="id in project.pinned_agents" :key="id" class="agent-mini" @click="() => { const p = chat.profiles.find((x) => x.default_agent_id === id); router.push({ path: '/', query: { project: projectId, ...(p ? { profile: p.id } : {}) } }); }">
                 <div class="agent-icon" :style="{ background: agentById(id).color || '#b8852a' }"><Icon :name="agentById(id).icon || 'sparkle'" /></div>
                 <div style="min-width: 0; flex: 1">
                   <div class="nm">{{ agentById(id).label }}</div>

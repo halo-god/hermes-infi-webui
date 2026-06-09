@@ -275,6 +275,7 @@ async def send_message(
             attached_file_ids=payload.attached_file_ids,
             owner_id=user.id,
             skip_agent=payload.skip_agent,
+            profile_id_override=payload.profile_id,
         )
     else:
         user_msg, agent_msg = await svc.dispatch(
@@ -282,6 +283,7 @@ async def send_message(
             attached_file_ids=payload.attached_file_ids,
             owner_id=user.id,
             skip_agent=payload.skip_agent,
+            profile_id_override=payload.profile_id,
         )
 
     return SendMessageResponse(
@@ -415,10 +417,11 @@ async def conversation_ws(
                         )
                         continue
                     file_ids = payload.get("attached_file_ids") or []
+                    p_id = payload.get("profileId") or payload.get("profile_id") or None
                     async with async_session_maker() as db2:
                         c = await svc.get_conversation(db2, conversation_id, user.id)
                         if c:
-                            await svc.dispatch(db2, c, text, attached_file_ids=file_ids, owner_id=user.id)
+                            await svc.dispatch(db2, c, text, attached_file_ids=file_ids, owner_id=user.id, profile_id_override=p_id)
             elif action == "cancel":
                 await redis_core.request_cancel(str(conversation_id))
     except WebSocketDisconnect:

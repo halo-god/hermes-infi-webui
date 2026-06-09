@@ -135,11 +135,12 @@ export const conversationsApi = {
   async removeMember(id: string, memberId: string): Promise<void> {
     await http.delete(`/conversations/${id}/members/${memberId}`);
   },
-  async sendWithMentions(id: string, text: string, mentions: string[], fileIds?: string[]): Promise<SendResponse> {
+  async sendWithMentions(id: string, text: string, mentions: string[], fileIds?: string[], profileId?: string): Promise<SendResponse> {
     return (await http.post<SendResponse>(`/conversations/${id}/messages`, {
       text,
       mentions,
       attached_file_ids: fileIds || [],
+      profile_id: profileId || null,
     })).data;
   },
 };

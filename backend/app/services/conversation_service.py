@@ -474,16 +474,18 @@ async def dispatch(
     attached_file_ids: list[str] | None = None,
     owner_id: uuid.UUID | None = None,
     skip_agent: bool = False,
+    profile_id_override: str | None = None,
 ) -> tuple[Message, Message | None]:
     """Route to single or roundtable based on the conversation's active agents."""
     agents = list(convo.active_agent_ids or [convo.primary_agent_id])
     if skip_agent:
         return await send_user_only(db, convo, text, attached_file_ids=attached_file_ids, owner_id=owner_id)
 
-    # Load profile system_prompt for the runner
+    # Load profile system_prompt — request-level override wins over conversation default
     system_prompt: str | None = None
-    if convo.profile_id:
-        profile = await db.get(Profile, convo.profile_id)
+    effective_profile_id = profile_id_override or convo.profile_id
+    if effective_profile_id:
+        profile = await db.get(Profile, effective_profile_id)
         if profile:
             system_prompt = profile.system_prompt or None
 
@@ -926,6 +928,7 @@ async def dispatch_group(
     attached_file_ids: list[str] | None = None,
     owner_id: uuid.UUID | None = None,
     skip_agent: bool = False,
+    profile_id_override: str | None = None,
 ) -> tuple[Message, Message | None]:
     """群聊消息路由：按 channel_mode + mentions 决定走人→人 / 人→机 / 圆桌。"""
     resolved = await resolve_mentions(db, convo.id, mentions)
@@ -992,8 +995,21 @@ async def dispatch_group(
 
         # Route to single agent
         system_prompt = None
-        if convo.profile_id:
-            profile = await db.get(Profile, convo.profile_id)
+        # Priority: @mentioned agent's profile > override > conversation default
+        effective_profile_id = profile_id_override or convo.profile_id
+        if resolved:
+            # Try to find the @mentioned agent's profile
+            res_p = await db.execute(
+                select(Profile).where(
+                    Profile.default_agent_id == resolved[0],
+                    Profile.is_active.is_(True),
+                )
+            )
+            agent_profile = res_p.scalar_one_or_none()
+            if agent_profile:
+                effective_profile_id = str(agent_profile.id)
+        if effective_profile_id:
+            profile = await db.get(Profile, effective_profile_id)
             if profile:
                 system_prompt = profile.system_prompt or None
 
@@ -1020,8 +1036,9 @@ async def dispatch_group(
 
     # 圆桌模式：多Agent并行
     system_prompt = None
-    if convo.profile_id:
-        profile = await db.get(Profile, convo.profile_id)
+    effective_profile_id = profile_id_override or convo.profile_id
+    if effective_profile_id:
+        profile = await db.get(Profile, effective_profile_id)
         if profile:
             system_prompt = profile.system_prompt or None
 

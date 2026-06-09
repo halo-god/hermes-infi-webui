@@ -91,6 +91,7 @@ class SendMessageRequest(BaseModel):
     attached_file_ids: list[str] = Field(default_factory=list)
     skip_agent: bool = False
     mentions: list[str] = Field(default_factory=list)
+    profile_id: str | None = None  # override conversation's default profile
 
 
 class SetAgentsRequest(BaseModel):

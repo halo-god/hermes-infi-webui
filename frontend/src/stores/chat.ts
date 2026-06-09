@@ -387,13 +387,13 @@ export const useChatStore = defineStore("chat", () => {
       // Group chat with @mentions: use sendWithMentions
       closeStream();
       streamingConvoId.value = id;
-      const res = await conversationsApi.sendWithMentions(id, text, opts.mentions, fileIds);
+      const res = await conversationsApi.sendWithMentions(id, text, opts.mentions, fileIds, opts.profileId);
       handleSendResponse(res);
     } else if (isGroup && !opts?.mentions?.length) {
       // Group chat without mentions: pure human-to-human, skip agent
       closeStream();
       streamingConvoId.value = id;
-      const res = await conversationsApi.sendWithMentions(id, text, [], fileIds);
+      const res = await conversationsApi.sendWithMentions(id, text, [], fileIds, opts?.profileId);
       handleSendResponse(res);
     } else {
       // Personal conversation: existing logic

@@ -49,8 +49,11 @@ onMounted(async () => {
   if ("Notification" in window && Notification.permission === "default") {
     Notification.requestPermission();
   }
-  // Set landing profile from first available profile
-  if (chat.profiles.length) {
+  // Set landing profile from query param or first available
+  const queryProfile = route.query.profile as string | undefined;
+  if (queryProfile && chat.profiles.find((p) => p.id === queryProfile)) {
+    landingProfileId.value = queryProfile;
+  } else if (chat.profiles.length) {
     const firstProfile = chat.profiles.find((p) => p.is_active && p.default_agent_id);
     if (firstProfile) landingProfileId.value = firstProfile.id;
   }
