@@ -541,21 +541,8 @@ class Runner:
             if kind == "agent_message_chunk":
                 delta = (update.get("content") or {}).get("text", "")
                 if delta:
-                    # Split: new text after tool call → finalize previous, start new message
-                    if acc["tool_since_split"] and acc["text"]:
-                        await self._finalize(acc["current_msg_id"], acc["text"], "complete", steps, acc.get("thinking") or "", acc.get("plan"))
-                        await R.publish_event(conversation_id, {
-                            "type": "done", "message_id": acc["current_msg_id"],
-                            "status": "complete", "text": acc["text"],
-                        })
-                        new_id = await self._create_agent_message(conversation_id, agent_id)
-                        acc["current_msg_id"] = new_id
-                        acc["text"] = ""
-                        steps.clear()
-                        acc["tool_since_split"] = False
-                        acc["thinking"] = ""
-                        acc["plan"] = None
-                        await R.publish_event(conversation_id, {"type": "start", "message_id": new_id})
+                    # No split: accumulate all text (before and after tool calls) into one message
+                    acc["tool_since_split"] = False
                     acc["text"] += delta
                     await R.publish_event(
                         conversation_id,

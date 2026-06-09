@@ -53,7 +53,7 @@ const md: MarkdownIt = new MarkdownIt({
   html: false,        // security: no raw HTML
   linkify: true,
   typographer: true,
-  breaks: true,       // \n → <br> (chat messages expect this)
+  breaks: false,      // don't convert every \n to <br> — markdown handles paragraphs normally
   highlight(str: string, lang: string): string {
     if (lang && hljs.getLanguage(lang)) {
       try {
