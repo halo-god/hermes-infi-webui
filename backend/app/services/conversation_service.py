@@ -492,6 +492,14 @@ async def dispatch(
     if prefs_prompt:
         system_prompt = f"{system_prompt}\n\n{prefs_prompt}" if system_prompt else prefs_prompt
 
+    # Anti-clarify: short follow-up messages are intentional in conversation context
+    anti_clarify = (
+        "重要：用户在对话中的简短回复（如'继续'、'好的'、'是的'、'ok'、单句指令等）"
+        "是明确的意图表达，不要调用 clarify 工具追问。直接执行用户的意图即可。"
+        "只有当用户的请求真正存在多种互不相同的理解方式时才需要澄清。"
+    )
+    system_prompt = f"{system_prompt}\n\n{anti_clarify}" if system_prompt else anti_clarify
+
     if len(agents) > 1:
         return await send_roundtable(
             db, convo, text, agents,
@@ -983,6 +991,14 @@ async def dispatch_group(
         if prefs_prompt:
             system_prompt = f"{system_prompt}\n\n{prefs_prompt}" if system_prompt else prefs_prompt
 
+        # Anti-clarify for short follow-ups
+        anti_clarify = (
+            "重要：用户在对话中的简短回复（如'继续'、'好的'、'是的'、'ok'、单句指令等）"
+            "是明确的意图表达，不要调用 clarify 工具追问。直接执行用户的意图即可。"
+            "只有当用户的请求真正存在多种互不相同的理解方式时才需要澄清。"
+        )
+        system_prompt = f"{system_prompt}\n\n{anti_clarify}" if system_prompt else anti_clarify
+
         _, agent_msg = await send_message(
             db, convo, text,
             attached_file_ids=attached_file_ids,
@@ -1002,6 +1018,14 @@ async def dispatch_group(
     prefs_prompt = await _build_preferences_prompt(db, owner_id)
     if prefs_prompt:
         system_prompt = f"{system_prompt}\n\n{prefs_prompt}" if system_prompt else prefs_prompt
+
+    # Anti-clarify for short follow-ups
+    anti_clarify = (
+        "重要：用户在对话中的简短回复（如'继续'、'好的'、'是的'、'ok'、单句指令等）"
+        "是明确的意图表达，不要调用 clarify 工具追问。直接执行用户的意图即可。"
+        "只有当用户的请求真正存在多种互不相同的理解方式时才需要澄清。"
+    )
+    system_prompt = f"{system_prompt}\n\n{anti_clarify}" if system_prompt else anti_clarify
 
     return await send_roundtable(
         db, convo, text, resolved,
