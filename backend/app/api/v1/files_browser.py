@@ -115,7 +115,45 @@ async def list_standalone_files(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List user's standalone files and subfolders in a given folder."""
+    """List user's standalone files, AI-generated files, and subfolders in a given folder."""
+    # Get user's regular conversations (for AI-generated files lookup)
+    convos = (
+        await db.execute(
+            select(Conversation).where(
+                Conversation.owner_id == user.id,
+                Conversation.title != "__file_storage__",
+            )
+        )
+    ).scalars().all()
+    convo_map = {c.id: c.title for c in convos}
+
+    # AI-generated files from regular conversations (visible in file manager root)
+    ai_files: list[FileItem] = []
+    if convo_map:
+        ai_ws_files = (
+            await db.execute(
+                select(WorkspaceFile).where(
+                    WorkspaceFile.conversation_id.in_(convo_map.keys()),
+                    WorkspaceFile.folder_path == folder,
+                    WorkspaceFile.is_folder == False,  # noqa: E712
+                )
+            )
+        ).scalars().all()
+        for wf in ai_ws_files:
+            ai_files.append(FileItem(
+                id=str(wf.id),
+                name=wf.name,
+                conversation_id=str(wf.conversation_id),
+                conversation_title=convo_map.get(wf.conversation_id, ""),
+                size=wf.size_bytes,
+                created_at=wf.created_at.isoformat() if wf.created_at else "",
+                source="ai",
+                kind=wf.kind,
+                storage_key=wf.storage_key,
+                folder_path=wf.folder_path or "/",
+            ))
+
+    # Standalone storage conversation
     storage_convo = (
         await db.execute(
             select(Conversation).where(
@@ -125,91 +163,91 @@ async def list_standalone_files(
         )
     ).scalars().first()
 
-    if not storage_convo:
-        return []
-
-    ws_files = (
-        await db.execute(
-            select(WorkspaceFile).where(
-                WorkspaceFile.conversation_id == storage_convo.id,
-                WorkspaceFile.folder_path == folder,
-                WorkspaceFile.is_folder == False,  # noqa: E712
-            )
-        )
-    ).scalars().all()
-
-    # Real folder records in this folder
-    db_folders = (
-        await db.execute(
-            select(WorkspaceFile).where(
-                WorkspaceFile.conversation_id == storage_convo.id,
-                WorkspaceFile.folder_path == folder,
-                WorkspaceFile.is_folder == True,  # noqa: E712
-            )
-        )
-    ).scalars().all()
-
-    # Also collect virtual subfolders: unique first path segment of files in deeper folders
-    all_files = (
-        await db.execute(
-            select(WorkspaceFile.folder_path).where(
-                WorkspaceFile.conversation_id == storage_convo.id,
-                WorkspaceFile.folder_path.startswith(folder) if folder != "/" else WorkspaceFile.folder_path != "/",
-                WorkspaceFile.folder_path != folder,
-            )
-        )
-    ).all()
-
-    subfolders: set[str] = set()
-    prefix = folder.rstrip("/")
-    for (fp,) in all_files:
-        if not fp or fp == folder:
-            continue
-        # Get immediate child folder
-        relative = fp[len(prefix):].lstrip("/")
-        if "/" in relative:
-            subfolders.add(prefix + "/" + relative.split("/")[0])
-        else:
-            subfolders.add(fp)
-
     result: list[FileItem] = []
-    # Real folders from DB
-    for f in db_folders:
-        result.append(FileItem(
-            id=str(f.id),
-            name=f.name,
-            created_at=f.created_at.isoformat() if f.created_at else "",
-            source="folder",
-            folder_path=f.folder_path or "/",
-            is_folder=True,
-        ))
-    # Virtual subfolders (from file paths)
-    known_paths = {f.folder_path for f in db_folders}
-    for sf in sorted(subfolders):
-        if sf in known_paths:
-            continue
-        folder_name = sf.rsplit("/", 1)[-1] if "/" in sf else sf
-        result.append(FileItem(
-            id=f"folder:{sf}",
-            name=folder_name,
-            created_at="",
-            source="folder",
-            folder_path=sf,
-            is_folder=True,
-        ))
 
-    for wf in ws_files:
-        result.append(FileItem(
-            id=str(wf.id),
-            name=wf.name,
-            size=wf.size_bytes,
-            created_at=wf.created_at.isoformat() if wf.created_at else "",
-            source="upload",
-            kind=wf.kind,
-            storage_key=wf.storage_key,
-            folder_path=wf.folder_path or "/",
-        ))
+    if storage_convo:
+        ws_files = (
+            await db.execute(
+                select(WorkspaceFile).where(
+                    WorkspaceFile.conversation_id == storage_convo.id,
+                    WorkspaceFile.folder_path == folder,
+                    WorkspaceFile.is_folder == False,  # noqa: E712
+                )
+            )
+        ).scalars().all()
 
+        # Real folder records in this folder
+        db_folders = (
+            await db.execute(
+                select(WorkspaceFile).where(
+                    WorkspaceFile.conversation_id == storage_convo.id,
+                    WorkspaceFile.folder_path == folder,
+                    WorkspaceFile.is_folder == True,  # noqa: E712
+                )
+            )
+        ).scalars().all()
+
+        # Also collect virtual subfolders: unique first path segment of files in deeper folders
+        all_files = (
+            await db.execute(
+                select(WorkspaceFile.folder_path).where(
+                    WorkspaceFile.conversation_id == storage_convo.id,
+                    WorkspaceFile.folder_path.startswith(folder) if folder != "/" else WorkspaceFile.folder_path != "/",
+                    WorkspaceFile.folder_path != folder,
+                )
+            )
+        ).all()
+
+        subfolders: set[str] = set()
+        prefix = folder.rstrip("/")
+        for (fp,) in all_files:
+            if not fp or fp == folder:
+                continue
+            relative = fp[len(prefix):].lstrip("/")
+            if "/" in relative:
+                subfolders.add(prefix + "/" + relative.split("/")[0])
+            else:
+                subfolders.add(fp)
+
+        # Real folders from DB
+        for f in db_folders:
+            result.append(FileItem(
+                id=str(f.id),
+                name=f.name,
+                created_at=f.created_at.isoformat() if f.created_at else "",
+                source="folder",
+                folder_path=f.folder_path or "/",
+                is_folder=True,
+            ))
+        # Virtual subfolders (from file paths)
+        known_paths = {f.folder_path for f in db_folders}
+        for sf in sorted(subfolders):
+            if sf in known_paths:
+                continue
+            folder_name = sf.rsplit("/", 1)[-1] if "/" in sf else sf
+            result.append(FileItem(
+                id=f"folder:{sf}",
+                name=folder_name,
+                created_at="",
+                source="folder",
+                folder_path=sf,
+                is_folder=True,
+            ))
+
+        for wf in ws_files:
+            result.append(FileItem(
+                id=str(wf.id),
+                name=wf.name,
+                size=wf.size_bytes,
+                created_at=wf.created_at.isoformat() if wf.created_at else "",
+                source="upload",
+                kind=wf.kind,
+                storage_key=wf.storage_key,
+                folder_path=wf.folder_path or "/",
+            ))
+
+    # Merge AI files into result (they appear alongside standalone files in the folder)
+    result.extend(ai_files)
     return result
 
 
@@ -357,6 +395,48 @@ async def upload_standalone_file(
         kind=wf.kind,
         storage_key=wf.storage_key,
         folder_path=wf.folder_path or "/",
+    )
+
+
+
+@router.get("/files/{file_id}/raw")
+async def get_file_raw(
+    file_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Download a standalone file by ID."""
+    wf = (await db.execute(select(WorkspaceFile).where(WorkspaceFile.id == file_id))).scalars().first()
+    if not wf:
+        raise HTTPException(404, "File not found")
+
+    convo = (await db.execute(select(Conversation).where(Conversation.id == wf.conversation_id))).scalars().first()
+    if not convo or convo.owner_id != user.id:
+        raise HTTPException(403, "Not authorized")
+
+    content: bytes | None = None
+    content_type = "application/octet-stream"
+    if wf.storage_key:
+        try:
+            content = await asyncio.to_thread(object_storage.get, wf.storage_key)
+        except Exception:
+            raise HTTPException(404, "File not found in storage")
+    elif wf.content:
+        content = wf.content.encode("utf-8") if isinstance(wf.content, str) else wf.content
+        if wf.kind in {"txt", "md", "csv", "json", "html", "css", "js", "py", "yaml", "yml", "xml"}:
+            content_type = "text/plain; charset=utf-8"
+    else:
+        raise HTTPException(404, "File has no content")
+
+    import urllib.parse
+    from fastapi.responses import Response
+
+    filename = wf.name or "download"
+    disposition = f"attachment; filename*=UTF-8''{urllib.parse.quote(filename)}"
+    return Response(
+        content=content,
+        media_type=content_type,
+        headers={"Content-Disposition": disposition},
     )
 
 
