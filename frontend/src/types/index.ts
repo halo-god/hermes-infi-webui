@@ -239,14 +239,19 @@ export interface WorkspaceFileVersion {
   author: string | null;
 }
 
+export interface ClarifyOption {
+  label: string;
+  description?: string;
+  risk?: "low" | "medium" | "high";
+}
+
 export interface ConfirmationRequest {
   id: string;
   conversation_id: string;
   message_id: string;
   question: string;
-  options: string[];
-  // Multi-question mode: each sub-question has its own options
-  questions?: Array<{ question: string; options: string[]; allow_free_text?: boolean }>;
+  options: (string | ClarifyOption)[];
+  questions?: Array<{ question: string; options: (string | ClarifyOption)[]; allow_free_text?: boolean }>;
 }
 
 // Clarify Q&A persisted in message content (audit trail + modal restore on reload)
@@ -282,6 +287,8 @@ export type StreamEvent = (
   | { type: "rt_reply_done"; message_id: string; slot: number; status?: RoundtableReply["status"] }
   | { type: "merge_start"; message_id: string }
   | { type: "merge_token"; message_id: string; delta: string }
+  | { type: "clarification_request"; message_id: string; request: ConfirmationRequest }
+  | { type: "clarification_response"; message_id: string; request_id: string; choice: string }
   | { type: "confirmation_request"; message_id: string; request: ConfirmationRequest }
   | { type: "confirmation_response"; message_id: string; request_id: string; choice: string }
   | { type: "clarify_auto"; message_id: string; question: string; choice: string }

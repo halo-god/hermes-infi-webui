@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref, watch, computed, nextTick } from "vue";
+import { ref, watch, computed, nextTick, onMounted, onUnmounted } from "vue";
 import ModalShell from "@/components/ModalShell.vue";
-import type { ConfirmationRequest } from "@/types";
+import type { ClarifyOption, ConfirmationRequest } from "@/types";
 
 const props = defineProps<{
   request?: ConfirmationRequest;
@@ -29,11 +29,21 @@ const currentQ = computed(() => {
 const currentOptions = computed(() => currentQ.value?.options || []);
 const hasOptions = computed(() => currentOptions.value.length > 0);
 const allowFreeText = computed(() => currentQ.value?.allow_free_text ?? !hasOptions.value);
-
 const currentQuestion = computed(() => currentQ.value?.question || props.request?.question || "");
-
 const totalSteps = computed(() => props.request?.questions?.length || 1);
 const isLastStep = computed(() => currentStep.value >= totalSteps.value - 1);
+
+// Normalize option to structured form
+function normalizeOpt(opt: string | ClarifyOption): ClarifyOption {
+  if (typeof opt === "string") return { label: opt };
+  return opt;
+}
+
+function getRiskColor(risk?: string): string {
+  if (risk === "high") return "var(--error)";
+  if (risk === "medium") return "var(--warning)";
+  return "var(--ink-faint)";
+}
 
 watch(
   () => props.request,
@@ -42,7 +52,7 @@ watch(
     answers.value = [];
     freeText.value = "";
   },
-  { immediate: true }
+  { immediate: true },
 );
 
 watch(currentStep, () => {
@@ -67,11 +77,11 @@ function submitFreeText() {
 function submitAll() {
   if (!props.request?.questions?.length) return;
   if (props.request.questions.length === 1) {
-    emit("respond", answers.value[0] || "跳过");
+    emit("respond", answers.value[0] || "skip");
     return;
   }
   const parts = props.request.questions.map((q, i) => {
-    const answer = answers.value[i] || "跳过";
+    const answer = answers.value[i] || "skip";
     return `${q.question}: ${answer}`;
   });
   emit("respond", parts.join("; "));
@@ -81,12 +91,32 @@ function goBack() {
   if (currentStep.value > 0) currentStep.value--;
 }
 
+// Keyboard shortcuts: 1-9 to select option, Enter for free text
 function onKeydown(e: KeyboardEvent) {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     submitFreeText();
+    return;
+  }
+  // Number keys 1-9 for quick select
+  const num = parseInt(e.key, 10);
+  if (num >= 1 && num <= currentOptions.value.length) {
+    e.preventDefault();
+    const opt = normalizeOpt(currentOptions.value[num - 1]);
+    selectOption(opt.label);
+  }
+  // Escape to close
+  if (e.key === "Escape") {
+    emit("close");
   }
 }
+
+onMounted(() => {
+  document.addEventListener("keydown", onKeydown);
+});
+onUnmounted(() => {
+  document.removeEventListener("keydown", onKeydown);
+});
 
 const modalTitle = computed(() => {
   if (isMultiQuestion.value) return `问题 ${currentStep.value + 1} / ${totalSteps.value}`;
@@ -99,7 +129,7 @@ const modalTitle = computed(() => {
     v-if="request"
     :title="modalTitle"
     :subtitle="currentQuestion"
-    :width="480"
+    :width="520"
     @close="emit('close')"
   >
     <!-- Progress bar for multi-step -->
@@ -114,17 +144,22 @@ const modalTitle = computed(() => {
       <!-- Options list -->
       <div v-if="hasOptions" class="cf-options">
         <button
-          v-for="opt in currentOptions"
-          :key="opt"
+          v-for="(rawOpt, idx) in currentOptions"
+          :key="normalizeOpt(rawOpt).label"
           class="cf-option"
-          @click="selectOption(opt)"
+          :class="{ 'cf-option--high': normalizeOpt(rawOpt).risk === 'high', 'cf-option--medium': normalizeOpt(rawOpt).risk === 'medium' }"
+          @click="selectOption(normalizeOpt(rawOpt).label)"
         >
-          <span class="cf-option-dot" />
-          <span>{{ opt }}</span>
+          <span class="cf-option-key">{{ idx + 1 }}</span>
+          <span class="cf-option-dot" :style="{ background: getRiskColor(normalizeOpt(rawOpt).risk) }" />
+          <div class="cf-option-content">
+            <span class="cf-option-label">{{ normalizeOpt(rawOpt).label }}</span>
+            <span v-if="normalizeOpt(rawOpt).description" class="cf-option-desc">{{ normalizeOpt(rawOpt).description }}</span>
+          </div>
         </button>
       </div>
 
-      <!-- Text input (shown when no options, or options + allow_free_text) -->
+      <!-- Text input -->
       <div v-if="allowFreeText" class="cf-free">
         <input
           ref="textInput"
@@ -132,7 +167,6 @@ const modalTitle = computed(() => {
           type="text"
           :placeholder="hasOptions ? '或输入自定义内容...' : `回答 ${currentQuestion}...`"
           class="cf-input"
-          @keydown="onKeydown"
         />
         <button class="btn primary" :disabled="!freeText.trim()" @click="submitFreeText">
           确认
@@ -144,9 +178,9 @@ const modalTitle = computed(() => {
       <span v-if="isMultiQuestion" class="cf-foot-hint">
         {{ isLastStep ? "选择后将提交所有答案" : `还有 ${totalSteps - currentStep - 1} 个问题` }}
       </span>
-      <span v-else />
+      <span v-else class="cf-foot-hint">1-9 快速选择</span>
       <div class="cf-foot-actions">
-        <button class="btn" @click="emit('respond', '跳过')">跳过</button>
+        <button class="btn" @click="emit('respond', 'skip')">跳过</button>
         <button v-if="isMultiQuestion && currentStep > 0" class="btn" @click="goBack">
           上一步
         </button>
@@ -196,16 +230,56 @@ const modalTitle = computed(() => {
   background: var(--accent-tint);
   border-color: var(--accent-soft);
 }
+.cf-option--high:hover {
+  background: rgba(220, 50, 50, 0.06);
+  border-color: rgba(220, 50, 50, 0.2);
+}
+.cf-option--medium:hover {
+  background: rgba(200, 150, 30, 0.06);
+  border-color: rgba(200, 150, 30, 0.2);
+}
+.cf-option-key {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  background: var(--bg-panel);
+  border: 1px solid var(--rule);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-mute);
+  flex-shrink: 0;
+}
+.cf-option:hover .cf-option-key {
+  background: var(--accent-tint);
+  border-color: var(--accent-soft);
+  color: var(--accent);
+}
 .cf-option-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--ink-faint);
   flex-shrink: 0;
   transition: background 120ms;
 }
 .cf-option:hover .cf-option-dot {
-  background: var(--accent);
+  background: var(--accent) !important;
+}
+.cf-option-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.cf-option-label {
+  font-weight: 500;
+}
+.cf-option-desc {
+  font-size: 12px;
+  color: var(--ink-mute);
+  line-height: 1.4;
 }
 .cf-free {
   display: flex;

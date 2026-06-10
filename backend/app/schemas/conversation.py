@@ -137,6 +137,11 @@ class ConfirmRequest(BaseModel):
     choice: str
 
 
+class ClarifyRequest(BaseModel):
+    request_id: str
+    choice: str
+
+
 class SetSessionModeRequest(BaseModel):
     mode: str = Field(pattern="^(ask|accept_edits|dont_ask)$")
 

@@ -77,6 +77,10 @@ Auth: `Depends(get_current_user)` in `app/deps.py`. Admin routes use `_require_a
 | `rl:msg:{user}` | Rate-limit counter |
 | `acp:cancel:{conv}` | Cancellation signal |
 | `jwt:blacklist:{jti}` | Logout token invalidation |
+| `clarify:{conv}:{req}` | Clarify request + response (SET, TTL 600s) |
+| `clarify_notify:{conv}` | Clarify response pub/sub channel |
+| `hermes:clarify:req:{sid}` | Legacy: agent clarify request LIST (agent compat) |
+| `hermes:clarify:resp:{sid}:{id}` | Legacy: agent clarify response LIST (agent compat) |
 | `mem:consolidate:status:{user}` | Memory-consolidation status + run lock (SET NX) |
 | `mem:consolidate:cooldown:{user}` | Non-admin consolidation cooldown (TTL) |
 

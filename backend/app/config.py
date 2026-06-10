@@ -69,10 +69,8 @@ class Settings(BaseSettings):
     #   auto_first  = always auto-select first option
     #   disabled    = suppress clarify tool calls entirely (auto-resolve with first option)
     clarify_strategy: str = Field(default="smart")
-    # clarify protocol: dual | v2
-    #   v2   = LIST + BLPOP handshake only (race-free; requires updated agent callback)
-    #   dual = v2 plus legacy GET/pubsub keys for not-yet-updated agent deployments
-    clarify_protocol: str = Field(default="dual")
+    # clarify protocol: v3 (unified), kept for backward compat
+    clarify_protocol: str = Field(default="v3")
     # How long the runner waits for the user to answer a clarify modal.
     # Must stay well under acp_prompt_timeout so one clarify round can't kill the prompt.
     clarify_timeout_seconds: int = 240
