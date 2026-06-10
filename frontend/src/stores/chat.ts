@@ -492,14 +492,30 @@ export const useChatStore = defineStore("chat", () => {
     streamingConvoId.value = id;
     registerStreamHandlers();
 
+    // Optimistic user bubble — push BEFORE opening SSE so the user message
+    // always appears above the agent's streaming bubble, even if SSE "start"
+    // arrives before the API response.
+    const optimisticUser = {
+      id: `tmp-${crypto.randomUUID()}`,
+      conversation_id: id,
+      owner_id: null,
+      role: "user" as const,
+      agent_id: null,
+      content: { text },
+      status: "complete" as const,
+      created_at: new Date().toISOString(),
+    };
+    messages.value.push(optimisticUser);
+
     const token = tokenStore.access;
     const url = `${API_BASE}/conversations/${id}/stream?access_token=${encodeURIComponent(token || "")}`;
     await stream.openSSE(url);
 
     const res = await conversationsApi.send(id, text, opts);
-    // The SSE "start" event may have already created the agent bubble — guard
-    // both pushes or the message shows up twice.
-    if (!find(res.user_message.id)) messages.value.push(res.user_message);
+    // Replace the optimistic user message with the real one (server-assigned id)
+    const optIdx = messages.value.findIndex((m) => m.id === optimisticUser.id);
+    if (optIdx !== -1) messages.value.splice(optIdx, 1, res.user_message);
+    // The SSE "start" event may have already created the agent bubble
     if (!find(res.agent_message.id)) messages.value.push(res.agent_message);
   }
 
@@ -534,6 +550,9 @@ export const useChatStore = defineStore("chat", () => {
 
   async function cancel() {
     if (activeId.value) await conversationsApi.cancel(activeId.value).catch(() => {});
+    // Close the SSE/WS stream immediately so the UI stops showing "generating"
+    // instead of waiting for the server to notice the disconnect.
+    closeStream();
   }
 
   async function respondConfirmation(requestId: string, choice: string) {

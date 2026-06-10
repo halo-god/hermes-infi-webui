@@ -358,7 +358,9 @@ async def stream(
         while True:
             if await request.is_disconnected():
                 break
-            entries = await redis_core.read_events(cid, last_id)
+            # Short block so we check disconnection frequently (cancel needs
+            # fast feedback; 8s default was too slow).
+            entries = await redis_core.read_events(cid, last_id, block_ms=2000)
             if not entries:
                 yield ": keepalive\n\n"  # heartbeat
                 continue
@@ -412,7 +414,7 @@ async def conversation_ws(
     async def pump_out():
         nonlocal last_id
         while True:
-            entries = await redis_core.read_events(cid, last_id)
+            entries = await redis_core.read_events(cid, last_id, block_ms=2000)
             for entry_id, data in entries:
                 last_id = entry_id
                 await websocket.send_text(data)
