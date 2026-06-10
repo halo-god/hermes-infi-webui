@@ -20,8 +20,10 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core import metrics, ratelimit
 from app.core import redis as redis_core
+from app.core.files import read_upload_capped
 from app.db.base import async_session_maker, get_db
 from app.db.models.user import User
 from app.db.models.workspace import WorkspaceFile
@@ -600,7 +602,7 @@ async def upload_file(
     db: AsyncSession = Depends(get_db),
 ):
     convo = await _require_convo(db, conversation_id, user)
-    raw = await file.read()
+    raw = await read_upload_capped(file, settings.max_upload_bytes)
     import re as _re
     name = _re.sub(r"[^\w.\-\u4e00-\u9fff]", "_", file.filename or "upload").strip("_. ") or "upload"
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"

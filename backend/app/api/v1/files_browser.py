@@ -14,6 +14,7 @@ from app.db.models.user import User
 from app.db.models.workspace import WorkspaceFile
 from app.deps import get_current_user, get_db
 from app.core import object_storage
+from app.core.files import read_upload_capped
 from app.config import settings
 
 router = APIRouter()
@@ -293,7 +294,7 @@ async def upload_standalone_file(
     TEXT_EXTS = {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
                  "yaml", "yml", "toml", "sh", "bash", "log", "xml", "css", "diff", "patch"}
 
-    raw = await file.read()
+    raw = await read_upload_capped(file, settings.max_upload_bytes)
     content: str | None = None
     storage_key: str | None = None
 

@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.core import object_storage
+from app.core.files import safe_relative_path
 from app.db.base import async_session_maker
 from app.db.models.workspace import WorkspaceFile, WorkspaceFileVersion
 
@@ -38,9 +39,10 @@ async def save_file(
     conversation_id: uuid.UUID, path: str, content: str, agent_id: str | None,
     message_id: uuid.UUID | None = None,
 ) -> WorkspaceFile:
-    # Preserve full relative path for folder support (e.g., "src/main.py")
-    # Normalize: remove leading ./ and /
-    name = path.lstrip("./").lstrip("/") or "untitled.txt"
+    # Preserve full relative path for folder support (e.g., "src/main.py") but
+    # confine it: an agent must not write "../" into another conversation's
+    # MinIO prefix or the DB under a traversal name.
+    name = safe_relative_path(path)
     kind = _kind_of(name)
 
     # Guard: never overwrite existing content with empty/whitespace-only data
@@ -145,7 +147,7 @@ async def read_content(file: WorkspaceFile) -> str:
 
 async def get_existing_content(conversation_id: uuid.UUID, path: str) -> str | None:
     """Return current content of an existing workspace file, or None."""
-    name = path.lstrip("./").lstrip("/") or "untitled.txt"
+    name = safe_relative_path(path)
     async with async_session_maker() as db:
         res = await db.execute(
             select(WorkspaceFile).where(

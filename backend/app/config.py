@@ -100,6 +100,10 @@ class Settings(BaseSettings):
 
     # ── Rate limiting ──
     rate_limit_per_min: int = 30  # per-user message sends / minute (default)
+    login_rate_limit_per_min: int = 10  # per-IP login attempts / minute (brute-force guard)
+
+    # ── Uploads ──
+    max_upload_mb: int = 25  # reject uploads larger than this (per file)
 
     # ── Agent sandbox (P5) ──
     sandbox_enabled: bool = False         # apply POSIX rlimits to agent subprocesses
@@ -120,6 +124,29 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
+
+    @property
+    def max_upload_bytes(self) -> int:
+        return self.max_upload_mb * 1024 * 1024
+
+    def validate_for_production(self) -> list[str]:
+        """Return a list of fatal misconfigurations for a production deploy.
+
+        Empty list ⇒ safe to boot. Callers (startup) should refuse to start
+        when this is non-empty in production so insecure defaults never ship.
+        """
+        problems: list[str] = []
+        if self.secret_key.startswith("change-me") or len(self.secret_key) < 32:
+            problems.append(
+                "SECRET_KEY is the insecure default (or <32 chars) — set a strong random value"
+            )
+        if self.first_admin_password == "Hermes@2026":
+            problems.append(
+                "FIRST_ADMIN_PASSWORD is the well-known default — override it"
+            )
+        if self.storage_backend == "minio" and self.minio_secret_key == "hermes-minio-secret":
+            problems.append("MINIO_SECRET_KEY is the default — override it")
+        return problems
 
 
 @lru_cache

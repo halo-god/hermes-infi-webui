@@ -14,7 +14,9 @@ from pydantic import BaseModel as _BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core import governance as gov
+from app.core.files import read_upload_capped
 from app.core.rbac import require_admin
 from app.db.base import get_db
 from app.db.models.user import User
@@ -477,7 +479,7 @@ async def upload_knowledge(
 ):
     from app.db.models.team import TeamKnowledge
     await svc.require_permission(db, team_id, user.id, "knowledge.upload")
-    raw = await file.read()
+    raw = await read_upload_capped(file, settings.max_upload_bytes)
     import re as _re
     name = _re.sub(r"[^\w.\-\u4e00-\u9fff]", "_", file.filename or "upload").strip("_. ") or "upload"
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"
@@ -587,7 +589,7 @@ async def upload_doc(
 ):
     """Upload a real file as a project document."""
     await _project_with_perm(db, project_id, user, "project.edit")
-    content = await file.read()
+    content = await read_upload_capped(file, settings.max_upload_bytes)
     kind = (file.filename or "doc").rsplit(".", 1)[-1] if "." in (file.filename or "") else "doc"
     payload = DocCreate(
         name=file.filename or "upload",

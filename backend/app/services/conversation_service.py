@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core import redis as redis_core
+from app.core.files import confine_to_dir, safe_relative_path
 from app.db.models.agent import Profile
 from app.db.models.conversation import Conversation, Message
 from app.db.models.user import User
@@ -175,15 +176,18 @@ async def _resolve_attached_files(
             is_image = ext in IMAGE_EXTS
             is_text = ext in TEXT_EXTS
 
-            # Write file content to workspace so agent can read it
+            # Write file content to workspace so agent can read it — confine
+            # the (possibly agent-authored) name so it can't escape ws_dir.
+            rel_name = safe_relative_path(f.name)
             if ws_dir and file_content and not is_image:
-                fpath = os.path.join(ws_dir, f.name)
+                fpath = confine_to_dir(ws_dir, rel_name)
+                os.makedirs(os.path.dirname(fpath), exist_ok=True)
                 with open(fpath, "w", encoding="utf-8") as fh:
                     fh.write(file_content)
 
             result.append({
                 "id": str(f.id), "name": f.name, "kind": f.kind,
-                "workspace_path": f"attachments/{f.name}" if ws_dir and file_content else None,
+                "workspace_path": f"attachments/{rel_name}" if ws_dir and file_content else None,
                 "content": file_content,
                 "size_bytes": f.size_bytes or len(file_content),
                 "mime_type": mime,

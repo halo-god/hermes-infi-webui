@@ -17,10 +17,24 @@ from app.core.redis import close_redis, get_redis
 async def lifespan(app: FastAPI):
     configure_logging()
     logger.info("Starting %s (%s)", settings.app_name, settings.environment)
+
+    # Fail fast on insecure defaults in production — never ship a forgeable
+    # JWT secret or a well-known admin password.
+    problems = settings.validate_for_production()
+    if problems:
+        msg = "Insecure configuration: " + "; ".join(problems)
+        if settings.is_production:
+            raise RuntimeError(msg)
+        logger.warning("%s (allowed in %s)", msg, settings.environment)
+
     try:
         await get_redis().ping()
         logger.info("Redis connected")
     except Exception as exc:  # noqa: BLE001
+        # Redis is on every hot path (streaming, rate limits, sessions); in
+        # production a missing Redis means silent failures later — fail fast.
+        if settings.is_production:
+            raise RuntimeError(f"Redis unreachable at startup: {exc}") from exc
         logger.warning("Redis not reachable at startup: %s", exc)
     yield
     await close_redis()

@@ -16,7 +16,8 @@ from app.schemas.auth import (
     RefreshRequest,
     TokenPair,
 )
-from app.core import metrics
+from app.config import settings
+from app.core import metrics, ratelimit
 from app.auth_providers.base import ProviderError
 from app.schemas.user import UserOut
 from app.services import audit_service, auth_service
@@ -30,6 +31,19 @@ async def login(
 ) -> LoginResponse:
     ip = request.client.host if request.client else None
     who = str(req.username or "")
+
+    # Per-IP brute-force guard — fixed window, fail-open if Redis is down.
+    if ip:
+        try:
+            allowed, _ = await ratelimit.hit(
+                f"rl:login:{ip}", settings.login_rate_limit_per_min, 60
+            )
+        except Exception:  # noqa: BLE001
+            allowed = True
+        if not allowed:
+            metrics.LOGINS.labels("fail").inc()
+            raise HTTPException(status_code=429, detail="登录尝试过于频繁，请稍后再试")
+
     try:
         user = await auth_service.authenticate(db, req)
     except HTTPException as exc:

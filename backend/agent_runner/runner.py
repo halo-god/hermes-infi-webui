@@ -278,6 +278,15 @@ class Runner:
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda s=sig: self._handle_signal(s))
 
+        # Fail fast if Redis is down — the runner is useless without it and a
+        # silent retry loop hides the real problem from operators.
+        try:
+            await R.get_redis().ping()
+        except Exception as exc:
+            if settings.is_production:
+                raise RuntimeError(f"Redis unreachable at startup: {exc}") from exc
+            logger.warning("Redis not reachable at startup: %s", exc)
+
         # Singleton check
         if not await self._acquire_lock():
             return

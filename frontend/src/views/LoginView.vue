@@ -12,6 +12,14 @@ const auth = useAuthStore();
 const router = useRouter();
 const route = useRoute();
 
+/** Only allow same-site relative redirects — blocks `?redirect=https://evil.com`
+ *  open-redirect / `//evil.com` protocol-relative attacks. */
+function safeRedirect(): string {
+  const raw = route.query.redirect;
+  const target = typeof raw === "string" ? raw : "";
+  return /^\/(?!\/)/.test(target) ? target : "/";
+}
+
 const providers = ref<ProviderInfo[]>([]);
 const activeTab = ref<string>("local");
 const showPassword = ref(false);
@@ -51,7 +59,7 @@ async function startWecomOAuth() {
         // Store tokens and load user session
         tokenStore.set(e.data.access_token, e.data.refresh_token);
         auth.bootstrap().then(() => {
-          router.replace((route.query.redirect as string) || "/");
+          router.replace(safeRedirect());
         });
       } else if (e.data?.type === "wecom-error") {
         cleanupWecom();
@@ -114,7 +122,7 @@ onMounted(async () => {
       try {
         await auth.bootstrap();
         if (auth.isAuthenticated) {
-          router.replace((route.query.redirect as string) || "/");
+          router.replace(safeRedirect());
         }
       } catch {
         wecomError.value = "登录状态恢复失败，请重试";
@@ -134,8 +142,7 @@ async function submit() {
       password: form.password,
       remember_device: form.remember,
     });
-    const redirect = (route.query.redirect as string) || "/";
-    router.replace(redirect);
+    router.replace(safeRedirect());
   } catch (e) {
     const ax = e as AxiosError<{ detail?: string }>;
     error.value = ax.response?.data?.detail || "登录失败，请重试";
