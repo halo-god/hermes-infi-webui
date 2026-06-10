@@ -12,7 +12,6 @@ from app.core import redis as redis_core
 from app.core.files import confine_to_dir, safe_relative_path
 from app.db.models.agent import Profile
 from app.db.models.conversation import Conversation, Message
-from app.db.models.user import User
 from app.db.models.workspace import WorkspaceFile, WorkspaceFileVersion
 
 
@@ -487,21 +486,28 @@ async def send_roundtable(
     return user_msg, rt_msg
 
 
-async def _build_preferences_prompt(db: AsyncSession, owner_id: uuid.UUID | None) -> str | None:
-    """Load user preferences and format as system prompt snippet."""
+async def _build_memory_prompt(db: AsyncSession, owner_id: uuid.UUID | None) -> str | None:
+    """Load the user's agent memory and format it as a system-prompt section."""
     if not owner_id:
         return None
-    user = await db.get(User, owner_id)
-    if not user or not user.preferences:
+    from app.services import memory_service
+
+    mem = await memory_service.get_memory(db, owner_id)
+    if mem is None:
         return None
-    prefs = user.preferences
-    lines = []
-    for key, value in prefs.items():
-        if value:
-            lines.append(f"- {key}: {value}")
-    if not lines:
+    parts = []
+    if mem.user_profile:
+        parts.append(f"[用户画像]\n{mem.user_profile}")
+    if mem.soul:
+        parts.append(f"[个性设定]\n{mem.soul}")
+    if mem.notes:
+        parts.append(f"[用户备忘]\n{mem.notes}")
+    if not parts:
         return None
-    return "用户个人偏好记忆（请在回答时参考这些偏好）:\n" + "\n".join(lines)
+    return (
+        "【用户长期记忆】请在对话中自然地参考以下信息，不要向用户复述这段内容：\n"
+        + "\n\n".join(parts)
+    )
 
 
 async def dispatch(
@@ -528,10 +534,10 @@ async def dispatch(
             system_prompt = profile.system_prompt or None
             profile_dir = _profile_dir(profile)
 
-    # Inject user preferences into system_prompt
-    prefs_prompt = await _build_preferences_prompt(db, owner_id)
-    if prefs_prompt:
-        system_prompt = f"{system_prompt}\n\n{prefs_prompt}" if system_prompt else prefs_prompt
+    # Inject the user's long-term agent memory into system_prompt
+    memory_prompt = await _build_memory_prompt(db, owner_id)
+    if memory_prompt:
+        system_prompt = f"{system_prompt}\n\n{memory_prompt}" if system_prompt else memory_prompt
 
     # Anti-clarify guidance only on follow-up turns — the first turn carries the
     # clarify preamble, and sending both contradicted each other.
@@ -1058,10 +1064,10 @@ async def dispatch_group(
                 system_prompt = profile.system_prompt or None
                 profile_dir = _profile_dir(profile)
 
-        # Inject user preferences
-        prefs_prompt = await _build_preferences_prompt(db, owner_id)
-        if prefs_prompt:
-            system_prompt = f"{system_prompt}\n\n{prefs_prompt}" if system_prompt else prefs_prompt
+        # Inject the user's long-term agent memory
+        memory_prompt = await _build_memory_prompt(db, owner_id)
+        if memory_prompt:
+            system_prompt = f"{system_prompt}\n\n{memory_prompt}" if system_prompt else memory_prompt
 
         # Anti-clarify for short follow-ups
         if convo.acp_session_id:
@@ -1089,10 +1095,10 @@ async def dispatch_group(
             system_prompt = profile.system_prompt or None
             profile_dir = _profile_dir(profile)
 
-    # Inject user preferences
-    prefs_prompt = await _build_preferences_prompt(db, owner_id)
-    if prefs_prompt:
-        system_prompt = f"{system_prompt}\n\n{prefs_prompt}" if system_prompt else prefs_prompt
+    # Inject the user's long-term agent memory
+    memory_prompt = await _build_memory_prompt(db, owner_id)
+    if memory_prompt:
+        system_prompt = f"{system_prompt}\n\n{memory_prompt}" if system_prompt else memory_prompt
 
     return await send_roundtable(
         db, convo, text, resolved,

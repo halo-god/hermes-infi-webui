@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /* Personal settings — uses the prototype's user-page styles (.up-*). 个人资料
    editing is wired to PATCH /users/me; other tabs reproduce the structure. */
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import Icon from "@/components/Icon.vue";
 import { http } from "@/api/client";
 import { authApi } from "@/api/auth";
@@ -73,73 +73,6 @@ function relTime(ts: string) {
   return `${Math.floor(diff / 86400)} 天前`;
 }
 
-// ── personal preferences memory ──
-interface PrefItem { key: string; value: string; label: string; placeholder: string }
-const PREF_TEMPLATES: Omit<PrefItem, 'value'>[] = [
-  { key: '称呼', label: '称呼偏好', placeholder: '例如：叫我庭辉、用"你"称呼我' },
-  { key: '语言风格', label: '语言风格', placeholder: '例如：简洁直接、技术范、轻松口语化' },
-  { key: '回复格式', label: '回复格式偏好', placeholder: '例如：用表格对比、用要点列表、先结论后解释' },
-  { key: '技术栈', label: '常用技术栈', placeholder: '例如：Vue3+FastAPI、Python、SQLAlchemy' },
-  { key: '专业领域', label: '专业领域', placeholder: '例如：ERP运维、A股投资、全栈开发' },
-  { key: '兴趣爱好', label: '兴趣爱好', placeholder: '例如：AI学习、投资理财、效率工具' },
-  { key: '时区作息', label: '时区与作息', placeholder: '例如：UTC+8，工作日9-18点在线' },
-  { key: '工作习惯', label: '工作习惯', placeholder: '例如：喜欢先看代码再问问题、偏好详细步骤' },
-]
-const prefsList = ref<PrefItem[]>([])
-const prefsSaving = ref(false)
-const prefsDirty = ref(false)
-
-function initPrefs() {
-  const saved = auth.user?.preferences || {}
-  prefsList.value = PREF_TEMPLATES.map(t => ({
-    ...t,
-    value: (saved as Record<string, string>)[t.key] || '',
-  }))
-  // Load any custom keys not in templates
-  for (const [k, v] of Object.entries(saved as Record<string, string>)) {
-    if (!PREF_TEMPLATES.find(t => t.key === k)) {
-      prefsList.value.push({ key: k, value: v, label: k, placeholder: '自定义偏好' })
-    }
-  }
-  prefsDirty.value = false
-}
-
-function addCustomPref() {
-  prefsList.value.push({ key: '', value: '', label: '自定义', placeholder: '输入偏好名称' })
-  prefsDirty.value = true
-}
-
-function removePref(index: number) {
-  prefsList.value.splice(index, 1)
-  prefsDirty.value = true
-}
-
-function onPrefChange() {
-  prefsDirty.value = true
-}
-
-async function savePrefs() {
-  prefsSaving.value = true
-  try {
-    const prefs: Record<string, string> = {}
-    for (const p of prefsList.value) {
-      const k = p.key.trim()
-      const v = p.value.trim()
-      if (k && v) prefs[k] = v
-    }
-    await http.patch('/users/me', { preferences: prefs })
-    auth.user = await authApi.me()
-    prefsDirty.value = false
-    ns.toast('偏好记忆已保存，AI 会在回答时参考你的偏好')
-  } catch {
-    ns.toast('保存失败', 'error')
-  } finally {
-    prefsSaving.value = false
-  }
-}
-
-watch(() => auth.user, () => { initPrefs() }, { immediate: true })
-
 // ── Agent memory ──
 const MEMORY_SECTIONS = [
   { key: "notes" as const,        label: "我的笔记",   desc: "写给 AI 的备注、提醒、任务背景",       placeholder: "例如：正在推进的项目、需要 AI 记住的关键信息…" },
@@ -147,11 +80,22 @@ const MEMORY_SECTIONS = [
   { key: "soul" as const,         label: "个性设定",   desc: "AI 的角色定位与沟通风格",               placeholder: "例如：以一位有条理的技术顾问角色与我对话，避免过度赘述…" },
 ] as const;
 
+type MemoryKey = "notes" | "user_profile" | "soul";
+const MEMORY_KEYS: MemoryKey[] = ["notes", "user_profile", "soul"];
+const MEMORY_TOTAL_LIMIT = 2200;
+
 const memoryData = ref<Memory>({ notes: null, user_profile: null, soul: null });
 const memoryEditing = ref<Record<string, boolean>>({ notes: false, user_profile: false, soul: false });
 const memoryDrafts = ref<Record<string, string>>({ notes: "", user_profile: "", soul: "" });
 const memorySaving = ref<Record<string, boolean>>({ notes: false, user_profile: false, soul: false });
 const memoryLoading = ref(false);
+
+function effectiveLen(key: MemoryKey): number {
+  const v = memoryEditing.value[key] ? memoryDrafts.value[key] : memoryData.value[key];
+  return (v || "").length;
+}
+const memoryTotalChars = computed(() => MEMORY_KEYS.reduce((s, k) => s + effectiveLen(k), 0));
+const memoryOverLimit = computed(() => memoryTotalChars.value > MEMORY_TOTAL_LIMIT);
 
 async function loadMemory() {
   memoryLoading.value = true;
@@ -162,31 +106,78 @@ async function loadMemory() {
   }
 }
 
-function startEditMemory(key: keyof Memory) {
+function startEditMemory(key: MemoryKey) {
   memoryDrafts.value[key] = memoryData.value[key] || "";
   memoryEditing.value[key] = true;
 }
 
-function cancelEditMemory(key: keyof Memory) {
+function cancelEditMemory(key: MemoryKey) {
   memoryEditing.value[key] = false;
 }
 
-async function saveMemory(key: keyof Memory) {
+async function saveMemory(key: MemoryKey) {
   memorySaving.value[key] = true;
   try {
     const updated = await memoryApi.update({ [key]: memoryDrafts.value[key] || null });
     memoryData.value = updated;
     memoryEditing.value[key] = false;
     ns.toast("已保存");
-  } catch {
-    ns.toast("保存失败", "error");
+  } catch (e: any) {
+    ns.toast(e?.response?.data?.detail || "保存失败", "error");
   } finally {
     memorySaving.value[key] = false;
   }
 }
 
-watch(tab, (t) => { if (t === "memory") loadMemory(); });
-onMounted(() => { if (tab.value === "memory") loadMemory(); });
+// ── 做梦整理记忆 (manual consolidation) ──
+const isSuperAdmin = computed(() => auth.user?.role === "super_admin");
+const consolidating = ref(false);
+const cooldownRemaining = ref(0);
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+function startPolling() {
+  if (!pollTimer) pollTimer = setInterval(refreshConsolidateStatus, 2000);
+}
+
+async function refreshConsolidateStatus() {
+  try {
+    const st = await memoryApi.consolidateStatus();
+    cooldownRemaining.value = st.cooldown_remaining || 0;
+    if (st.status === "running") {
+      consolidating.value = true;
+      startPolling();
+      return;
+    }
+    if (consolidating.value) { // was running, now finished
+      consolidating.value = false;
+      stopPolling();
+      if (st.status === "done") {
+        ns.toast(st.detail || "记忆整理完成");
+        await loadMemory();
+      } else if (st.status === "error") {
+        ns.toast(st.detail || "记忆整理失败", "error");
+      }
+    }
+  } catch { /* ignore */ }
+}
+
+async function triggerConsolidate() {
+  try {
+    await memoryApi.consolidate();
+    consolidating.value = true;
+    startPolling();
+    ns.toast("已开始整理记忆…");
+  } catch (e: any) {
+    ns.toast(e?.response?.data?.detail || "触发失败", "error");
+  }
+}
+
+watch(tab, (t) => { if (t === "memory") { loadMemory(); refreshConsolidateStatus(); } });
+onMounted(() => { if (tab.value === "memory") { loadMemory(); refreshConsolidateStatus(); } });
+onUnmounted(stopPolling);
 
 const notifyPrefs = reactive({
   mention: true,
@@ -268,45 +259,28 @@ async function saveNotifyPrefs() {
       <template v-else-if="tab === 'memory'">
         <div v-if="memoryLoading" style="padding: 32px; text-align: center; color: var(--ink-mute); font-size: 13px">加载中…</div>
         <template v-else>
-          <!-- 个人偏好 (key-value) -->
+          <!-- 做梦整理记忆 -->
           <div class="section-card" style="margin-bottom: 16px">
-            <div class="section-head">
-              <div class="section-title"><Icon name="bolt" /> 个人偏好</div>
-              <div class="text-mute-sm">AI 回答时会参考这些偏好</div>
-            </div>
-            <div style="padding: 18px">
-              <div v-for="(pref, idx) in prefsList" :key="idx" class="pref-row">
-                <div class="pref-label">
-                  <input
-                    v-if="pref.label === '自定义'"
-                    class="cfg-input pref-key-input"
-                    v-model="pref.key"
-                    placeholder="偏好名称"
-                    @input="onPrefChange"
-                  />
-                  <span v-else class="pref-key-label">{{ pref.label }}</span>
+            <div class="section-head" style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">
+              <div>
+                <div class="section-title">🌙 做梦整理记忆</div>
+                <div class="text-mute-sm" style="margin-top:2px">
+                  AI 回顾你的近期对话，自动归纳更新下方三段记忆
+                  <span v-if="memoryData.last_consolidated_at"> · 上次整理：{{ relTime(memoryData.last_consolidated_at) }}</span>
+                  <span v-if="isSuperAdmin"> · 超级管理员不受冷却限制</span>
                 </div>
-                <input
-                  class="cfg-input pref-value-input"
-                  v-model="pref.value"
-                  :placeholder="pref.placeholder"
-                  @input="onPrefChange"
-                />
-                <button
-                  v-if="!PREF_TEMPLATES.find(t => t.key === pref.key)"
-                  class="btn-icon text-mute"
-                  style="flex-shrink: 0; padding: 4px"
-                  @click="removePref(idx)"
-                  title="删除"
-                >✕</button>
               </div>
-              <div style="display: flex; align-items: center; gap: 12px; margin-top: 12px">
-                <button class="btn" style="font-size: 12px" @click="addCustomPref">+ 添加自定义偏好</button>
-                <button v-if="prefsDirty" class="btn primary" style="font-size: 12px" :disabled="prefsSaving" @click="savePrefs">
-                  {{ prefsSaving ? '保存中…' : '保存偏好' }}
-                </button>
-                <span v-if="prefsDirty" class="text-mute-sm">有未保存的更改</span>
-              </div>
+              <button
+                class="btn primary"
+                style="font-size:12px;flex-shrink:0"
+                :disabled="consolidating || cooldownRemaining > 0"
+                @click="triggerConsolidate"
+              >
+                {{ consolidating ? "整理中…" : cooldownRemaining > 0 ? `冷却中 ${Math.ceil(cooldownRemaining / 60)} 分钟` : "🌙 整理记忆" }}
+              </button>
+            </div>
+            <div style="padding: 0 18px 14px; font-size: 12px" :style="{ color: memoryOverLimit ? 'var(--danger)' : 'var(--ink-mute)' }">
+              三段记忆总字数 {{ memoryTotalChars }} / {{ MEMORY_TOTAL_LIMIT }}<span v-if="memoryOverLimit">（已超出上限，请精简后再保存）</span>
             </div>
           </div>
 
@@ -317,14 +291,17 @@ async function saveNotifyPrefs() {
                 <div class="section-title">{{ sec.label }}</div>
                 <div class="text-mute-sm" style="margin-top:2px">{{ sec.desc }}</div>
               </div>
-              <button v-if="!memoryEditing[sec.key]" class="btn" style="font-size:12px;flex-shrink:0" @click="startEditMemory(sec.key)">
-                编辑
-              </button>
-              <div v-else style="display:flex;gap:6px;flex-shrink:0">
-                <button class="btn primary" style="font-size:12px" :disabled="memorySaving[sec.key]" @click="saveMemory(sec.key)">
-                  {{ memorySaving[sec.key] ? '保存中…' : '保存' }}
+              <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+                <span class="text-mute-sm" :style="{ color: memoryOverLimit ? 'var(--danger)' : undefined }">{{ effectiveLen(sec.key) }} 字</span>
+                <button v-if="!memoryEditing[sec.key]" class="btn" style="font-size:12px" @click="startEditMemory(sec.key)">
+                  编辑
                 </button>
-                <button class="btn" style="font-size:12px" @click="cancelEditMemory(sec.key)">取消</button>
+                <div v-else style="display:flex;gap:6px">
+                  <button class="btn primary" style="font-size:12px" :disabled="memorySaving[sec.key] || memoryOverLimit" @click="saveMemory(sec.key)">
+                    {{ memorySaving[sec.key] ? '保存中…' : '保存' }}
+                  </button>
+                  <button class="btn" style="font-size:12px" @click="cancelEditMemory(sec.key)">取消</button>
+                </div>
               </div>
             </div>
             <div style="padding: 0 18px 18px">
@@ -490,43 +467,6 @@ async function saveNotifyPrefs() {
 }
 .cfg-toggle.on { background: var(--accent) }
 .cfg-toggle.on::after { transform: translateX(16px) }
-.pref-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 10px;
-}
-.pref-label {
-  flex-shrink: 0;
-  width: 110px;
-}
-.pref-key-label {
-  font-size: 12.5px;
-  font-weight: 500;
-  color: var(--ink);
-  line-height: 32px;
-}
-.pref-key-input {
-  font-size: 12.5px !important;
-  height: 32px !important;
-}
-.pref-value-input {
-  flex: 1;
-  font-size: 12.5px !important;
-  height: 32px !important;
-}
-.btn-icon {
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-size: 14px;
-  line-height: 1;
-  border-radius: 4px;
-  transition: background 120ms;
-}
-.btn-icon:hover {
-  background: var(--rule);
-}
 .memory-view-text {
   font-size: 13px;
   color: var(--ink);

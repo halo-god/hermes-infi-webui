@@ -189,6 +189,19 @@ def clarify_resp_key(session_id: str, clarify_id: str) -> str:
     return f"hermes:clarify:resp:{session_id}:{clarify_id}"
 
 
+# ── Agent memory consolidation (做梦整理记忆) ──
+# The status key doubles as the run lock (SET NX on enqueue; runner overwrites
+# it with done/error). The cooldown key gates non-admin re-triggers via its TTL.
+
+
+def mem_consolidate_status_key(user_id: str) -> str:
+    return f"mem:consolidate:status:{user_id}"
+
+
+def mem_consolidate_cooldown_key(user_id: str) -> str:
+    return f"mem:consolidate:cooldown:{user_id}"
+
+
 # ── User presence (online/offline) ──
 _PRESENCE_PREFIX = "presence:"
 _PRESENCE_TTL = 60  # seconds; heartbeat every 30s keeps it alive

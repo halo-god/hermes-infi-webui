@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
-from sqlalchemy import ForeignKey, Text
+from sqlalchemy import DateTime, ForeignKey, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -20,3 +21,4 @@ class AgentMemory(UUIDPrimaryKey, Timestamps, Base):
     notes: Mapped[str | None] = mapped_column(Text)
     user_profile: Mapped[str | None] = mapped_column(Text)
     soul: Mapped[str | None] = mapped_column(Text)
+    last_consolidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

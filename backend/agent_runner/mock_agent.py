@@ -55,6 +55,17 @@ def _handle_prompt(session_id: str, params: dict, req_id, persona: dict, emit_fi
             prompt_text += part.get("text", "")
     prompt_text = prompt_text.strip()
 
+    # Memory consolidation task: reply with deterministic JSON so the dream-time
+    # consolidation flow is verifiable end-to-end without the real CLI.
+    if "【记忆整理任务】" in prompt_text:
+        _msg_chunk(session_id, json.dumps({
+            "user_profile": "全栈工程师，偏好简洁直接的回答（mock 整理结果）",
+            "soul": "以有条理的技术顾问角色对话",
+            "notes": "正在测试做梦整理记忆功能",
+        }, ensure_ascii=False))
+        _send({"jsonrpc": "2.0", "id": req_id, "result": {"stopReason": "end_turn"}})
+        return
+
     # Emit confirmation_request for very short or question messages to demo the flow
     if len(prompt_text) < 15 or prompt_text.endswith("?") or prompt_text.endswith("？"):
         _update(session_id, {

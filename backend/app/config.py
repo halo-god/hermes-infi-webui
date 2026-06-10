@@ -102,6 +102,16 @@ class Settings(BaseSettings):
     rate_limit_per_min: int = 30  # per-user message sends / minute (default)
     login_rate_limit_per_min: int = 10  # per-IP login attempts / minute (brute-force guard)
 
+    # ── Agent memory (做梦整理记忆) ──
+    memory_total_chars: int = 2200  # combined budget for user_profile + soul + notes
+    memory_consolidate_cooldown_seconds: int = 600  # non-admin trigger cooldown
+    memory_consolidate_input_chars: int = 24000  # conversation-excerpt budget fed to the LLM
+    memory_consolidate_msg_chars: int = 400  # per-message truncation in excerpts
+    memory_consolidate_max_conversations: int = 50  # newest-first cap per run
+    memory_consolidate_status_ttl: int = 3600  # done/error status visibility window
+    # running-lock TTL; must exceed acp_prompt_timeout so a slow run can't double-start
+    memory_consolidate_lock_ttl: int = 1200
+
     # ── Uploads ──
     max_upload_mb: int = 25  # reject uploads larger than this (per file)
 

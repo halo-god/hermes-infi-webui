@@ -23,7 +23,11 @@ from app.db import base as db_base  # noqa: E402
 from app.db.models.user import User  # noqa: E402
 
 TEST_DB_URL = os.environ["DATABASE_URL"]
-test_engine = create_async_engine(TEST_DB_URL, echo=False, pool_size=5, max_overflow=10)
+# NullPool: each test runs in its own event loop (asyncio_mode=auto); pooled
+# asyncpg connections created in one loop break when reused from another.
+from sqlalchemy.pool import NullPool  # noqa: E402
+
+test_engine = create_async_engine(TEST_DB_URL, echo=False, poolclass=NullPool)
 test_session_maker = async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
 
 # Override app engine

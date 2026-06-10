@@ -77,6 +77,8 @@ Auth: `Depends(get_current_user)` in `app/deps.py`. Admin routes use `_require_a
 | `rl:msg:{user}` | Rate-limit counter |
 | `acp:cancel:{conv}` | Cancellation signal |
 | `jwt:blacklist:{jti}` | Logout token invalidation |
+| `mem:consolidate:status:{user}` | Memory-consolidation status + run lock (SET NX) |
+| `mem:consolidate:cooldown:{user}` | Non-admin consolidation cooldown (TTL) |
 
 ### Frontend — Vue 3 + Pinia
 
