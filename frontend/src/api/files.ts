@@ -1,4 +1,7 @@
 import { http } from "./client";
+import { tokenStore } from "./client";
+
+const API_BASE = import.meta.env.VITE_API_BASE || "/api/v1";
 
 export interface FileItem {
   id: string;
@@ -36,5 +39,9 @@ export const filesApi = {
   },
   async content(fileId: string): Promise<{ id: string; name: string; kind: string; content: string | null; size: number | null }> {
     return (await http.get(`/files/${fileId}/content`)).data;
+  },
+  rawUrl(fileId: string): string {
+    const token = tokenStore.access || "";
+    return `${API_BASE}/files/${fileId}/raw?access_token=${encodeURIComponent(token)}`;
   },
 };

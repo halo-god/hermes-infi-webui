@@ -78,16 +78,27 @@ function navigateTo(path: string) {
 
 function enterFolder(item: FileItem) {
   if (item.is_folder) {
-    navigateTo(item.folder_path || "/");
+    // Real DB folders have UUID ids and folder_path == parent dir.
+    // Virtual inferred folders have ids like "folder:/path" and folder_path == full path.
+    const isVirtual = item.id.startsWith("folder:");
+    if (isVirtual) {
+      navigateTo(item.folder_path || "/");
+    } else {
+      const path = item.folder_path === "/" ? `/${item.name}` : `${item.folder_path}/${item.name}`;
+      navigateTo(path);
+    }
   }
 }
 
 async function downloadFile(row: FileItem) {
   try {
-    if (row.conversation_id) {
+    if (row.is_folder) return;
+    if (row.conversation_id && row.conversation_title && row.conversation_title !== "__file_storage__") {
+      // 会话内文件
       window.open(conversationsApi.fileRawUrl(row.conversation_id, row.id), "_blank");
     } else {
-      ns.toast("独立文件暂不支持直接下载", "warn");
+      // 独立文件
+      window.open(filesApi.rawUrl(row.id), "_blank");
     }
   } catch {
     ns.toast("下载失败", "error");

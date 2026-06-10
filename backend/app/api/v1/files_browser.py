@@ -360,6 +360,47 @@ async def upload_standalone_file(
     )
 
 
+@router.get("/files/{file_id}/raw")
+async def get_file_raw(
+    file_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Download a standalone file by ID."""
+    wf = (await db.execute(select(WorkspaceFile).where(WorkspaceFile.id == file_id))).scalars().first()
+    if not wf:
+        raise HTTPException(404, "File not found")
+
+    convo = (await db.execute(select(Conversation).where(Conversation.id == wf.conversation_id))).scalars().first()
+    if not convo or convo.owner_id != user.id:
+        raise HTTPException(403, "Not authorized")
+
+    content: bytes | None = None
+    content_type = "application/octet-stream"
+    if wf.storage_key:
+        try:
+            content = await asyncio.to_thread(object_storage.get, wf.storage_key)
+        except Exception:
+            raise HTTPException(404, "File not found in storage")
+    elif wf.content:
+        content = wf.content.encode("utf-8") if isinstance(wf.content, str) else wf.content
+        if wf.kind in {"txt", "md", "csv", "json", "html", "css", "js", "py", "yaml", "yml", "xml"}:
+            content_type = "text/plain; charset=utf-8"
+    else:
+        raise HTTPException(404, "File has no content")
+
+    import urllib.parse
+    from fastapi.responses import Response
+
+    filename = wf.name or "download"
+    disposition = f"attachment; filename*=UTF-8''{urllib.parse.quote(filename)}"
+    return Response(
+        content=content,
+        media_type=content_type,
+        headers={"Content-Disposition": disposition},
+    )
+
+
 @router.get("/files/{file_id}/content")
 async def get_file_content(
     file_id: uuid.UUID,
