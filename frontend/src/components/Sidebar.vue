@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /* 1:1 port of the prototype sidebar (hermes-app.js Sidebar). Persistent across
    all main screens. Wired to the real chat store + teams + router. */
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import Icon from "@/components/Icon.vue";
@@ -23,6 +23,20 @@ const { theme, toggleTheme } = useTheme();
 const { t } = useI18n();
 const showNewTeam = ref(false);
 const showNewGroup = ref(false);
+
+// Infinite scroll: load the next conversation page when the sentinel appears.
+const loadMoreSentinel = ref<HTMLElement | null>(null);
+let convoObserver: IntersectionObserver | null = null;
+onMounted(() => {
+  convoObserver = new IntersectionObserver((entries) => {
+    if (entries.some((e) => e.isIntersecting)) chat.loadMoreConversations();
+  });
+  watch(loadMoreSentinel, (el, prev) => {
+    if (prev) convoObserver?.unobserve(prev);
+    if (el) convoObserver?.observe(el);
+  }, { immediate: true });
+});
+onBeforeUnmount(() => convoObserver?.disconnect());
 
 const groupConversations = computed(() => chat.conversations.filter((c) => c.type === "group"));
 const personalConversations = computed(() => chat.conversations.filter((c) => c.type !== "group"));
@@ -293,6 +307,13 @@ async function shareConvo(id: string) {
           <div>还没有会话</div>
           <div style="font-size:10.5px;margin-top:2px">点击「新建会话」开始</div>
         </div>
+        <div
+          v-if="chat.hasMoreConversations && personalConversations.length"
+          ref="loadMoreSentinel"
+          class="convo-load-more"
+        >
+          {{ chat.loadingMoreConvos ? '加载中…' : '' }}
+        </div>
       </div>
 
       <div class="side-foot" v-if="auth.user">
@@ -458,5 +479,13 @@ async function shareConvo(id: string) {
   font-size: 12px;
   color: var(--ink-mute);
   text-align: center;
+}
+.convo-load-more {
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--ink-faint);
 }
 </style>

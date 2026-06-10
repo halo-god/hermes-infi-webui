@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1 import api_router
 from app.config import settings
 from app.core.logging import configure_logging, logger
-from app.core.metrics import MetricsMiddleware, metrics_response
+from app.core.metrics import MetricsMiddleware, RequestIDMiddleware, metrics_response
 from app.core.redis import close_redis, get_redis
 
 
@@ -58,6 +58,8 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.add_middleware(MetricsMiddleware)
+    # Outermost so the correlation id is bound before anything else logs.
+    app.add_middleware(RequestIDMiddleware)
 
     app.include_router(api_router, prefix=settings.api_v1_prefix)
 

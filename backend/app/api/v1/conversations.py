@@ -96,10 +96,14 @@ async def _require_convo(db, conversation_id: uuid.UUID, user: User):
 async def list_conversations(
     q: str | None = Query(None),
     pinned: bool = Query(False),
+    limit: int = Query(100, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    return await svc.list_conversations(db, user.id, q=q, pinned_only=pinned)
+    return await svc.list_conversations(
+        db, user.id, q=q, pinned_only=pinned, limit=limit, offset=offset
+    )
 
 
 @router.post("/bulk-delete")

@@ -77,6 +77,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/api/v1/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
     ports:
       - "8000:8000"
 
@@ -109,13 +115,27 @@ services:
         condition: service_healthy
       api:
         condition: service_started
+    healthcheck:
+      # No HTTP server — liveness = python up + Redis (its only hot dependency) reachable.
+      test: ["CMD-SHELL", "python -c \"import os,redis; redis.Redis.from_url(os.environ['REDIS_URL']).ping()\" || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     volumes:
       - workspacedata:/var/hermes/workspaces
 
   web:
     image: hermes-web:latest
     depends_on:
-      - api
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:80/ || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
     ports:
       - "8081:80"
 

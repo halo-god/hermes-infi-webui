@@ -22,6 +22,8 @@ async def list_conversations(
     *,
     q: str | None = None,
     pinned_only: bool = False,
+    limit: int = 100,
+    offset: int = 0,
 ) -> list[Conversation]:
     from app.db.models.conversation import GroupMember
 
@@ -41,6 +43,9 @@ async def list_conversations(
         escaped = q.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         stmt = stmt.where(func.lower(Conversation.title).like(f"%{escaped}%", escape="\\"))
     stmt = stmt.order_by(Conversation.pinned.desc(), Conversation.updated_at.desc())
+    # Bound the query — a user with thousands of conversations must not pull
+    # them all in one request. Callers page with limit/offset.
+    stmt = stmt.offset(max(0, offset)).limit(max(1, min(limit, 200)))
     return list((await db.execute(stmt)).scalars().all())
 
 

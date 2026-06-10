@@ -29,6 +29,9 @@ export const useChatStore = defineStore("chat", () => {
   const pendingConfirmations = ref<ConfirmationRequest[]>([]);
   const hasMoreMessages = ref(true);
   const loadingOlder = ref(false);
+  const CONVO_PAGE = 100;
+  const hasMoreConversations = ref(true);
+  const loadingMoreConvos = ref(false);
 
   // ── Stream composable ──
   const stream = useStream();
@@ -65,7 +68,29 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   async function loadConversations() {
-    conversations.value = await conversationsApi.list();
+    // First page; pagination state reset. Append further pages via loadMore.
+    const page = await conversationsApi.list({ limit: CONVO_PAGE, offset: 0 });
+    conversations.value = page;
+    hasMoreConversations.value = page.length >= CONVO_PAGE;
+  }
+
+  async function loadMoreConversations() {
+    if (loadingMoreConvos.value || !hasMoreConversations.value) return;
+    loadingMoreConvos.value = true;
+    try {
+      const page = await conversationsApi.list({
+        limit: CONVO_PAGE,
+        offset: conversations.value.length,
+      });
+      // Dedupe by id — optimistic unshifts (new convos) can shift offsets.
+      const seen = new Set(conversations.value.map((c) => c.id));
+      conversations.value.push(...page.filter((c) => !seen.has(c.id)));
+      hasMoreConversations.value = page.length >= CONVO_PAGE;
+    } catch {
+      // silent — keep what we have
+    } finally {
+      loadingMoreConvos.value = false;
+    }
   }
 
   function closeStream() {
@@ -577,6 +602,9 @@ export const useChatStore = defineStore("chat", () => {
     loadTeams,
     loadProfiles,
     loadConversations,
+    loadMoreConversations,
+    hasMoreConversations,
+    loadingMoreConvos,
     openConversation,
     loadMoreMessages,
     newConversation,

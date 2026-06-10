@@ -17,7 +17,7 @@ interface SendResponse {
 }
 
 export const conversationsApi = {
-  async list(params?: { q?: string; pinned?: boolean }): Promise<Conversation[]> {
+  async list(params?: { q?: string; pinned?: boolean; limit?: number; offset?: number }): Promise<Conversation[]> {
     return (await http.get<Conversation[]>("/conversations", { params: params || {} })).data;
   },
   async bulkDelete(ids: string[]): Promise<number> {
