@@ -665,11 +665,6 @@ function isImageFile(f: File) {
   color: var(--ink-mute);
 }
 
-/* ── Token bar ── */
-
-  font-variant-numeric: tabular-nums;
-}
-
 /* ── Mention picker (existing) ── */
 .mention-picker {
   position: absolute;
