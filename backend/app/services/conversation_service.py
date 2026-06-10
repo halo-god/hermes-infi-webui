@@ -286,6 +286,14 @@ async def send_user_only(
     return user_msg, None
 
 
+def _profile_dir(profile: Profile | None) -> str | None:
+    """Directory containing the profile's config.yaml — becomes HERMES_HOME for
+    the spawned agent so config/memory/sessions scope to the selected profile."""
+    if profile is None or not profile.path:
+        return None
+    return os.path.dirname(os.path.expanduser(profile.path))
+
+
 async def send_message(
     db: AsyncSession,
     convo: Conversation,
@@ -294,6 +302,7 @@ async def send_message(
     owner_id: uuid.UUID | None = None,
     system_prompt: str | None = None,
     existing_user_msg: Message | None = None,
+    profile_dir: str | None = None,
 ) -> tuple[Message, Message]:
     """Persist the user turn + an empty streaming agent turn, then enqueue ACP work.
 
@@ -400,6 +409,7 @@ async def send_message(
             "text": full_text,
             "content_blocks": prompt_blocks if len(prompt_blocks) > 1 else None,
             "system_prompt": system_prompt,
+            "profile_dir": profile_dir,
         }
     )
     return user_msg, agent_msg
@@ -414,6 +424,7 @@ async def send_roundtable(
     owner_id: uuid.UUID | None = None,
     system_prompt: str | None = None,
     mentions: list[str] | None = None,
+    profile_dir: str | None = None,
 ) -> tuple[Message, Message]:
     """Multi-agent turn: one roundtable message holding per-agent replies + a
     synthesized merge. The runner streams each reply in parallel, then merges."""
@@ -470,6 +481,7 @@ async def send_roundtable(
             "agents": agents,
             "text": prompt_text,
             "system_prompt": system_prompt,
+            "profile_dir": profile_dir,
         }
     )
     return user_msg, rt_msg
@@ -508,11 +520,13 @@ async def dispatch(
 
     # Load profile system_prompt — request-level override wins over conversation default
     system_prompt: str | None = None
+    profile_dir: str | None = None
     effective_profile_id = profile_id_override or convo.profile_id
     if effective_profile_id:
         profile = await db.get(Profile, effective_profile_id)
         if profile:
             system_prompt = profile.system_prompt or None
+            profile_dir = _profile_dir(profile)
 
     # Inject user preferences into system_prompt
     prefs_prompt = await _build_preferences_prompt(db, owner_id)
@@ -528,12 +542,12 @@ async def dispatch(
         return await send_roundtable(
             db, convo, text, agents,
             attached_file_ids=attached_file_ids, owner_id=owner_id,
-            system_prompt=system_prompt,
+            system_prompt=system_prompt, profile_dir=profile_dir,
         )
     return await send_message(
         db, convo, text,
         attached_file_ids=attached_file_ids, owner_id=owner_id,
-        system_prompt=system_prompt,
+        system_prompt=system_prompt, profile_dir=profile_dir,
     )
 
 
@@ -1024,6 +1038,7 @@ async def dispatch_group(
 
         # Route to single agent
         system_prompt = None
+        profile_dir = None
         # Priority: explicit profile_id_override > @mentioned agent's profile > conversation default
         effective_profile_id = profile_id_override or convo.profile_id
         if not profile_id_override and resolved:
@@ -1041,6 +1056,7 @@ async def dispatch_group(
             profile = await db.get(Profile, effective_profile_id)
             if profile:
                 system_prompt = profile.system_prompt or None
+                profile_dir = _profile_dir(profile)
 
         # Inject user preferences
         prefs_prompt = await _build_preferences_prompt(db, owner_id)
@@ -1059,16 +1075,19 @@ async def dispatch_group(
             owner_id=owner_id,
             system_prompt=system_prompt,
             existing_user_msg=user_msg,
+            profile_dir=profile_dir,
         )
         return user_msg, agent_msg
 
     # 圆桌模式：多Agent并行
     system_prompt = None
+    profile_dir = None
     effective_profile_id = profile_id_override or convo.profile_id
     if effective_profile_id:
         profile = await db.get(Profile, effective_profile_id)
         if profile:
             system_prompt = profile.system_prompt or None
+            profile_dir = _profile_dir(profile)
 
     # Inject user preferences
     prefs_prompt = await _build_preferences_prompt(db, owner_id)
@@ -1081,4 +1100,5 @@ async def dispatch_group(
         owner_id=owner_id,
         system_prompt=system_prompt,
         mentions=mentions,
+        profile_dir=profile_dir,
     )

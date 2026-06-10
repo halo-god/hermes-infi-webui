@@ -11,7 +11,7 @@ import logging
 import time
 
 from app.config import settings
-from agent_runner.acp_client import ACPClient, ACPTimeout, OnFsWrite, OnUpdate
+from agent_runner.acp_client import ACPClient, ACPTimeout, OnFsWrite, OnUpdate, profile_env
 
 logger = logging.getLogger("hermes.pool")
 
@@ -28,6 +28,9 @@ class SessionPool:
     def __init__(self) -> None:
         self._clients: dict[str, ACPClient] = {}
         self._last_used: dict[str, float] = {}
+        # profile_dir the client was spawned with — HERMES_HOME is fixed at
+        # spawn, so a profile switch must drop and respawn the subprocess.
+        self._profile_dirs: dict[str, str | None] = {}
 
     def _alive(self, c: ACPClient) -> bool:
         return (
@@ -44,15 +47,27 @@ class SessionPool:
         on_update: OnUpdate,
         on_fs_write: OnFsWrite,
         acp_session_id: str | None = None,
+        profile_dir: str | None = None,
     ) -> tuple[ACPClient, str | None]:
         """Return (client, new_session_id_or_None). session id is set only when
         a fresh subprocess+session was created."""
         self._last_used[conversation_id] = time.monotonic()
         c = self._clients.get(conversation_id)
         if c is not None and self._alive(c):
-            c.on_update = on_update
-            c.on_fs_write = on_fs_write
-            return c, None
+            if self._profile_dirs.get(conversation_id) == profile_dir:
+                c.on_update = on_update
+                c.on_fs_write = on_fs_write
+                return c, None
+            # Profile changed mid-conversation: the live subprocess is pinned to
+            # the old HERMES_HOME, so respawn. The stored acp_session_id lives in
+            # the old profile's session store — resume below fails and falls back
+            # to a fresh session, which the runner persists.
+            logger.info(
+                "Profile changed for conv %s (%s -> %s), respawning agent",
+                conversation_id[:8], self._profile_dirs.get(conversation_id), profile_dir,
+            )
+            await self.drop(conversation_id)
+            c = None
 
         # Drop stale client if any
         if c is not None:
@@ -67,6 +82,7 @@ class SessionPool:
             protocol_version=settings.acp_protocol_version,
             on_update=on_update,
             on_fs_write=on_fs_write,
+            env=profile_env(profile_dir),
         )
         try:
             await asyncio.wait_for(c.start(), timeout=POOL_START_TIMEOUT)
@@ -111,11 +127,13 @@ class SessionPool:
             await c.stop()
             raise
         self._clients[conversation_id] = c
+        self._profile_dirs[conversation_id] = profile_dir
         return c, session_id
 
     async def drop(self, conversation_id: str) -> None:
         c = self._clients.pop(conversation_id, None)
         self._last_used.pop(conversation_id, None)
+        self._profile_dirs.pop(conversation_id, None)
         if c:
             await c.stop()
 
@@ -132,3 +150,4 @@ class SessionPool:
             await c.stop()
         self._clients.clear()
         self._last_used.clear()
+        self._profile_dirs.clear()

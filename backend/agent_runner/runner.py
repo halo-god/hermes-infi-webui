@@ -31,7 +31,7 @@ from app.db.base import async_session_maker
 from app.db.models.agent import Agent
 from app.db.models.conversation import Conversation, Message
 from agent_runner import discovery, storage
-from agent_runner.acp_client import ACPClient, ACPTimeout
+from agent_runner.acp_client import ACPClient, ACPTimeout, profile_env
 from agent_runner.session_pool import SessionPool
 
 logger = logging.getLogger("hermes.runner")
@@ -384,6 +384,7 @@ class Runner:
         message_id = task["message_id"]
         agent_ids: list[str] = task["agents"]
         text = task["text"]
+        rt_env = profile_env(task.get("profile_dir") or None)
 
         cwd = os.path.join(settings.workspace_root, conversation_id)
         os.makedirs(cwd, exist_ok=True)
@@ -426,7 +427,7 @@ class Runner:
 
             client = ACPClient(
                 agent.command, cwd, protocol_version=settings.acp_protocol_version,
-                on_update=on_update, on_fs_write=on_fs,
+                on_update=on_update, on_fs_write=on_fs, env=rt_env,
             )
             try:
                 await client.start()
@@ -504,7 +505,7 @@ class Runner:
 
             mclient = ACPClient(
                 hermes.command, cwd, protocol_version=settings.acp_protocol_version,
-                on_update=on_merge, on_fs_write=_noop,
+                on_update=on_merge, on_fs_write=_noop, env=rt_env,
             )
             try:
                 await mclient.start()
@@ -551,6 +552,7 @@ class Runner:
         agent_id = task.get("agent_id", "hermes")
         text = task["text"]
         system_prompt: str | None = task.get("system_prompt") or None
+        profile_dir: str | None = task.get("profile_dir") or None
 
         agent = self.agents.get(agent_id) or self.agents.get("hermes")
         if agent is None:
@@ -732,7 +734,7 @@ class Runner:
         try:
             client, new_session = await self.pool.get(
                 conversation_id, agent.command, cwd, on_update, on_fs_write,
-                acp_session_id=acp_session_id,
+                acp_session_id=acp_session_id, profile_dir=profile_dir,
             )
             logger.info(
                 "handle_single: conv=%s msg=%s client_pid=%s new_session=%s",

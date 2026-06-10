@@ -124,6 +124,17 @@ services:
       start_period: 15s
     volumes:
       - workspacedata:/var/hermes/workspaces
+    # Per-profile HERMES_HOME: the runner launches the agent with HERMES_HOME
+    # pointing at the profile dir recorded by the API's /profiles/scan. For
+    # this to work in Docker, mount the host ~/.hermes here READ-WRITE (the
+    # agent persists memory/sessions inside it) at the SAME absolute path the
+    # api container saw during the scan, e.g.:
+    #
+    #   - ${HOME}/.local/bin:/hermes-host/bin:ro
+    #   - ${HOME}/.hermes:/hermes-host/.hermes
+    #
+    # If a profile's dir is missing inside this container, the runner logs a
+    # warning and falls back to the default HERMES_HOME.
 
   web:
     image: hermes-web:latest

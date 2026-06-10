@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -48,6 +49,25 @@ class ACPTimeout(ACPError):
     pass
 
 
+def profile_env(profile_dir: str | None) -> dict[str, str] | None:
+    """Env overrides scoping the hermes CLI to a profile directory.
+
+    The hermes agent roots all state (config.yaml, memory, sessions, skills)
+    at HERMES_HOME. Returns None — i.e. default ~/.hermes behavior — when no
+    profile dir is given or it doesn't exist on this host (e.g. unmounted in
+    Docker), so a misconfigured profile degrades gracefully instead of failing.
+    """
+    if not profile_dir:
+        return None
+    if not os.path.isdir(profile_dir):
+        logger.warning(
+            "Profile dir %s not found on this host — falling back to default HERMES_HOME",
+            profile_dir,
+        )
+        return None
+    return {"HERMES_HOME": profile_dir}
+
+
 class ACPClient:
     def __init__(
         self,
@@ -57,12 +77,14 @@ class ACPClient:
         protocol_version: int = 1,
         on_update: OnUpdate | None = None,
         on_fs_write: OnFsWrite | None = None,
+        env: dict[str, str] | None = None,
     ) -> None:
         self.command = command
         self.cwd = cwd
         self.protocol_version = protocol_version
         self.on_update = on_update
         self.on_fs_write = on_fs_write
+        self.env = env
 
         self._proc: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task | None = None
@@ -78,6 +100,8 @@ class ACPClient:
         from agent_runner import sandbox
 
         argv = sandbox.build_argv(self.command, self.cwd)
+        # env=None inherits the runner's environment unchanged.
+        spawn_env = {**os.environ, **self.env} if self.env else None
         self._proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=self.cwd,
@@ -85,11 +109,15 @@ class ACPClient:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             preexec_fn=sandbox.preexec_fn(),
+            env=spawn_env,
         )
         self._reader_task = asyncio.create_task(self._read_loop())
         # Drain stderr so a chatty real CLI can't deadlock on a full pipe buffer.
         self._stderr_task = asyncio.create_task(self._drain_stderr())
-        logger.info("ACP subprocess started: %s (cwd=%s)", " ".join(argv), self.cwd)
+        logger.info(
+            "ACP subprocess started: %s (cwd=%s%s)", " ".join(argv), self.cwd,
+            f", env+={self.env}" if self.env else "",
+        )
 
     async def stop(self) -> None:
         import contextlib
