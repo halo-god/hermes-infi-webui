@@ -439,6 +439,109 @@ async def get_file_raw(
     )
 
 
+@router.get("/files/folders")
+async def list_all_folders(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return all folder paths for the user's standalone file storage."""
+    storage_convo = (
+        await db.execute(
+            select(Conversation).where(
+                Conversation.owner_id == user.id,
+                Conversation.title == "__file_storage__",
+            )
+        )
+    ).scalars().first()
+
+    if not storage_convo:
+        return [{"path": "/", "label": "根目录"}]
+
+    # Real folder records
+    db_folders = (
+        await db.execute(
+            select(WorkspaceFile).where(
+                WorkspaceFile.conversation_id == storage_convo.id,
+                WorkspaceFile.is_folder == True,  # noqa: E712
+            )
+        )
+    ).scalars().all()
+
+    # Collect all unique folder_path values from non-folder files too
+    all_paths = (
+        await db.execute(
+            select(WorkspaceFile.folder_path).where(
+                WorkspaceFile.conversation_id == storage_convo.id,
+            )
+        )
+    ).all()
+
+    paths: set[str] = {"/"}
+    for f in db_folders:
+        fp = (f.folder_path.rstrip("/") + "/" + f.name) if f.folder_path else "/" + f.name
+        paths.add(fp)
+    for (fp,) in all_paths:
+        if fp:
+            paths.add(fp)
+
+    # Build list with labels
+    result = []
+    for p in sorted(paths):
+        label = "根目录" if p == "/" else p.rsplit("/", 1)[-1] or p
+        result.append({"path": p, "label": label})
+    return result
+
+
+class MoveFileRequest(BaseModel):
+    target_folder: str
+
+
+@router.put("/files/{file_id}/move")
+async def move_file_to_folder(
+    file_id: uuid.UUID,
+    body: MoveFileRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Move a standalone file into a different folder."""
+    wf = (
+        await db.execute(
+            select(WorkspaceFile).where(WorkspaceFile.id == file_id)
+        )
+    ).scalars().first()
+    if not wf:
+        raise HTTPException(404, "File not found")
+
+    # Verify ownership
+    convo = (
+        await db.execute(
+            select(Conversation).where(Conversation.id == wf.conversation_id)
+        )
+    ).scalars().first()
+    if not convo or convo.owner_id != user.id:
+        raise HTTPException(403, "Not authorized")
+
+    if wf.is_folder:
+        raise HTTPException(400, "Cannot move folders, only files")
+
+    target = body.target_folder if body.target_folder else "/"
+    if not target.startswith("/"):
+        target = "/" + target
+
+    old_folder = wf.folder_path or "/"
+    wf.folder_path = target
+    await db.commit()
+    await db.refresh(wf)
+
+    return {
+        "status": "ok",
+        "id": str(wf.id),
+        "name": wf.name,
+        "old_folder": old_folder,
+        "new_folder": target,
+    }
+
+
 @router.get("/files/{file_id}/content")
 async def get_file_content(
     file_id: uuid.UUID,

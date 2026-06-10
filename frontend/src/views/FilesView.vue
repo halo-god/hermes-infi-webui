@@ -6,6 +6,7 @@ import { filesApi, type FileItem } from "@/api/files";
 import { conversationsApi } from "@/api/conversations";
 import { useNotificationStore } from "@/stores/notifications";
 import Icon from "@/components/Icon.vue";
+import ModalShell from "@/components/ModalShell.vue";
 
 const router = useRouter();
 const ns = useNotificationStore();
@@ -17,6 +18,13 @@ const dragover = ref(false);
 const currentFolder = ref("/");
 const newFolderName = ref("");
 const showNewFolder = ref(false);
+
+// Move file modal state
+const showMoveModal = ref(false);
+const moveTarget = ref<FileItem | null>(null);
+const moveFolders = ref<{ path: string; label: string }[]>([]);
+const selectedMoveFolder = ref("/");
+const moveLoading = ref(false);
 
 async function loadFiles(folder = "/") {
   loading.value = true;
@@ -182,6 +190,35 @@ function goToConversation(row: FileItem) {
   if (row.conversation_id) router.push({ path: "/", query: { c: row.conversation_id } });
 }
 
+// Move file to folder
+async function openMoveModal(row: FileItem) {
+  moveTarget.value = row;
+  selectedMoveFolder.value = row.folder_path || "/";
+  showMoveModal.value = true;
+  try {
+    moveFolders.value = await filesApi.listFolders();
+  } catch {
+    moveFolders.value = [{ path: "/", label: "根目录" }];
+  }
+}
+
+async function confirmMove() {
+  if (!moveTarget.value) return;
+  moveLoading.value = true;
+  try {
+    await filesApi.moveToFolder(moveTarget.value.id, selectedMoveFolder.value);
+    // Remove from current view if moved to a different folder
+    files.value = files.value.filter((f) => f.id !== moveTarget.value!.id);
+    ns.toast(`已移动到 ${selectedMoveFolder.value === "/" ? "根目录" : selectedMoveFolder.value}`, "ok");
+    showMoveModal.value = false;
+    moveTarget.value = null;
+  } catch {
+    ns.toast("移动失败", "error");
+  } finally {
+    moveLoading.value = false;
+  }
+}
+
 const columns = [
   {
     title: "", key: "icon", width: 36,
@@ -217,8 +254,10 @@ const columns = [
     render: (row: FileItem) => row.is_folder ? "" : formatDate(row.created_at),
   },
   {
-    title: "", key: "actions", width: 80,
+    title: "", key: "actions", width: 110,
     render: (row: FileItem) => row.is_folder ? null : h("div", { style: { display: "flex", gap: "4px" } }, [
+      h(NButton, { text: true, size: "small", title: "移动到文件夹", onClick: () => openMoveModal(row) },
+        () => h(Icon, { name: "folder", size: 14 })),
       h(NButton, { text: true, size: "small", title: "下载", onClick: () => downloadFile(row) },
         () => h(Icon, { name: "arrow_up", size: 14, style: { transform: "rotate(180deg)" } })),
       row.conversation_title === "__file_storage__"
@@ -290,6 +329,40 @@ defineExpose({ currentFolder });
         <NEmpty v-else description="暂无文件，点击上方按钮或拖放文件上传" />
       </NCard>
     </NSpin>
+
+    <!-- Move to folder modal -->
+    <ModalShell v-if="showMoveModal" title="移动到文件夹" :width="420" @close="showMoveModal = false">
+      <div class="move-modal-body">
+        <div class="move-file-info">
+          <Icon name="doc" :size="14" />
+          <span>{{ moveTarget?.name }}</span>
+        </div>
+        <div class="move-folder-list">
+          <label
+            v-for="folder in moveFolders"
+            :key="folder.path"
+            class="move-folder-item"
+            :class="{ selected: selectedMoveFolder === folder.path }"
+          >
+            <input
+              type="radio"
+              name="move-folder"
+              :value="folder.path"
+              v-model="selectedMoveFolder"
+            />
+            <Icon name="folder" :size="14" :style="{ color: selectedMoveFolder === folder.path ? 'var(--accent)' : 'var(--ink-mute)' }" />
+            <span>{{ folder.label }}</span>
+            <span class="move-folder-path">{{ folder.path }}</span>
+          </label>
+        </div>
+      </div>
+      <template #foot>
+        <button class="btn" @click="showMoveModal = false">取消</button>
+        <button class="btn primary" :disabled="moveLoading || selectedMoveFolder === (moveTarget?.folder_path || '/')" @click="confirmMove">
+          {{ moveLoading ? "移动中..." : "确认移动" }}
+        </button>
+      </template>
+    </ModalShell>
   </div>
 </template>
 
@@ -358,4 +431,24 @@ defineExpose({ currentFolder });
   pointer-events: none;
 }
 .files-card { background: var(--bg-panel); }
+.move-modal-body { display: flex; flex-direction: column; gap: 12px; }
+.move-file-info {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; background: var(--bg-panel); border-radius: var(--r-sm);
+  font-size: 13px; font-weight: 500;
+}
+.move-folder-list {
+  max-height: 300px; overflow-y: auto;
+  border: 1px solid var(--rule); border-radius: var(--r-sm);
+}
+.move-folder-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px; cursor: pointer; font-size: 13px;
+  border-bottom: 1px solid var(--rule); transition: background 120ms;
+}
+.move-folder-item:last-child { border-bottom: none; }
+.move-folder-item:hover { background: var(--accent-tint); }
+.move-folder-item.selected { background: var(--accent-tint); font-weight: 500; }
+.move-folder-item input[type="radio"] { margin: 0; }
+.move-folder-path { margin-left: auto; font-size: 11px; color: var(--ink-mute); }
 </style>
