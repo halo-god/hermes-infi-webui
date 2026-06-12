@@ -47,106 +47,6 @@ STALE_THRESHOLD_MS = 120_000  # 2 minutes — reclaim stuck pending messages
 RECLAIM_INTERVAL = 30   # check for stale messages every N seconds
 MAX_CONCURRENT = 5      # max tasks processed in parallel
 
-# ── Memory consolidation (做梦整理记忆) helpers ──
-_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
-
-_MEMORY_KEYS = ("user_profile", "soul", "notes")
-
-CONSOLIDATE_PROMPT = """【记忆整理任务】你正在执行"做梦"式记忆整理。请基于下方的现有长期记忆和近期对话摘录，更新这位用户的三段长期记忆。
-
-要求：
-1. 合并现有记忆与对话中的新信息：保留仍然有效的旧内容，补充新洞察，删除过时或重复的内容。
-2. user_profile（用户画像）：用户的职业背景、技术栈、关注领域、沟通偏好等客观事实。
-3. soul（个性设定）：AI 应当以什么角色、语气、风格与该用户互动。
-4. notes（我的笔记）：值得长期记住的具体事项（进行中的项目、重要约定、待办背景等）。
-5. 三段内容总字数不得超过 {budget} 字。宁可精炼，不要堆砌。
-6. 只输出一个 JSON 对象，不要输出任何其他文字、解释或 markdown 代码块：
-{{"user_profile": "...", "soul": "...", "notes": "..."}}
-
-【现有记忆】
-[用户画像]
-{user_profile}
-
-[个性设定]
-{soul}
-
-[我的笔记]
-{notes}
-
-【近期对话摘录】
-{excerpts}
-"""
-
-
-def parse_memory_json(text: str) -> dict[str, str] | None:
-    """Extract {"user_profile","soul","notes"} from LLM output.
-
-    Tolerates markdown fences and surrounding prose. Returns None on failure.
-    """
-    candidates: list[str] = []
-    m = _JSON_FENCE_RE.search(text)
-    if m:
-        candidates.append(m.group(1))
-    start, end = text.find("{"), text.rfind("}")
-    if start != -1 and end > start:
-        candidates.append(text[start:end + 1])
-    for raw in candidates:
-        try:
-            data = json.loads(raw)
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        out: dict[str, str] = {}
-        for key in _MEMORY_KEYS:
-            val = data.get(key)
-            out[key] = val.strip() if isinstance(val, str) else ""
-        if any(out.values()):
-            return out
-    return None
-
-
-def trim_memory_to_budget(mem: dict[str, str], budget: int) -> dict[str, str]:
-    """Proportionally trim the three fields so their total length <= budget."""
-    total = sum(len(v) for v in mem.values())
-    if total <= budget:
-        return mem
-    ratio = budget / total
-    out: dict[str, str] = {}
-    used = 0
-    for i, k in enumerate(_MEMORY_KEYS):
-        if i == len(_MEMORY_KEYS) - 1:
-            allowed = budget - used  # rounding slack goes to the last field
-        else:
-            allowed = int(len(mem[k]) * ratio)
-        out[k] = mem[k][:max(0, allowed)]
-        used += len(out[k])
-    return out
-
-
-def _message_excerpt(msg: Message) -> str | None:
-    """One transcript line for the consolidation prompt; None to skip."""
-    content = msg.content or {}
-    if msg.role == "system" or msg.status == "error":
-        return None
-    if msg.role == "roundtable":
-        text = ((content.get("merged") or {}).get("text") or "").strip()
-        prefix = "AI(圆桌)"
-    elif msg.role == "agent":
-        text = (content.get("text") or "").strip()
-        prefix = "AI"
-    elif msg.role == "user":
-        text = (content.get("text") or "").strip()
-        prefix = "用户"
-    else:
-        return None
-    if not text:
-        return None
-    limit = settings.memory_consolidate_msg_chars
-    if len(text) > limit:
-        text = text[:limit] + "…"
-    return f"{prefix}: {text}"
-
 
 class Runner:
     def __init__(self) -> None:
@@ -168,7 +68,6 @@ class Runner:
             if ok:
                 logger.info("Runner lock acquired (token=%s)", self._lock_token[:8])
                 return True
-            # Check if the existing lock holder is alive
             existing = await redis.get(LOCK_KEY)
             if existing:
                 logger.warning("Another runner is active (token=%s). Exiting.", existing[:8])
@@ -183,7 +82,6 @@ class Runner:
             return
         redis = R.get_redis()
         try:
-            # Only refresh if we still own it
             current = await redis.get(LOCK_KEY)
             if current and str(current) == self._lock_token:
                 await redis.expire(LOCK_KEY, LOCK_TTL)
@@ -196,7 +94,6 @@ class Runner:
             return
         redis = R.get_redis()
         try:
-            # Atomic: delete only if value matches our token
             lua = """
             if redis.call("get", KEYS[1]) == ARGV[1] then
                 return redis.call("del", KEYS[1])
@@ -251,7 +148,6 @@ class Runner:
         """Claim stuck pending messages that exceed STALE_THRESHOLD_MS."""
         try:
             redis = R.get_redis()
-            # xautoclaim: returns [next_start_id, [(msg_id, fields), ...], deleted_ids]
             result = await redis.xautoclaim(
                 settings.acp_stream, settings.acp_group,
                 settings.acp_consumer, STALE_THRESHOLD_MS, "0-0",
@@ -260,9 +156,7 @@ class Runner:
                 claimed = result[1]
                 for msg_id, fields in claimed:
                     logger.warning("Reclaimed stale message %s", msg_id)
-                    # ACK it so it doesn't block
                     await redis.xack(settings.acp_stream, settings.acp_group, msg_id)
-                    # Re-enqueue for fresh processing
                     data = fields.get(b"data", fields.get("data"))
                     if data:
                         await redis.xadd(settings.acp_stream, {"data": data})
@@ -296,7 +190,6 @@ class Runner:
         group = "runner-control"
         consumer = "runner-0"
 
-        # Create consumer group (ignore if exists)
         try:
             await redis.xgroup_create(stream, group, id="0", mkstream=True)
         except Exception:
@@ -376,13 +269,10 @@ class Runner:
     async def run(self) -> None:
         configure_logging()
 
-        # Register signal handlers (async-safe)
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda s=sig: self._handle_signal(s))
 
-        # Fail fast if Redis is down — the runner is useless without it and a
-        # silent retry loop hides the real problem from operators.
         try:
             await R.get_redis().ping()
         except Exception as exc:
@@ -390,7 +280,6 @@ class Runner:
                 raise RuntimeError(f"Redis unreachable at startup: {exc}") from exc
             logger.warning("Redis not reachable at startup: %s", exc)
 
-        # Singleton check
         if not await self._acquire_lock():
             return
 
@@ -399,7 +288,6 @@ class Runner:
         logger.info("Runner consuming %s as %s/%s (max_concurrent=%d)",
                     settings.acp_stream, settings.acp_group, settings.acp_consumer, MAX_CONCURRENT)
 
-        # Start background heartbeat + reclaim
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         control_task = asyncio.create_task(self._control_loop())
 
@@ -414,7 +302,7 @@ class Runner:
                         count=1,
                         block=3000,
                     )
-                    _xread_backoff = 2.0  # reset on success
+                    _xread_backoff = 2.0
                 except Exception:
                     logger.exception("xreadgroup failed; backing off %.0fs", _xread_backoff)
                     await asyncio.sleep(_xread_backoff)
@@ -427,7 +315,6 @@ class Runner:
                     for entry_id, fields in entries:
                         if self._shutdown:
                             break
-                        # ACK immediately — we own this message now
                         try:
                             await R.get_redis().xack(
                                 settings.acp_stream, settings.acp_group, entry_id
@@ -448,11 +335,9 @@ class Runner:
                 await heartbeat_task
             except asyncio.CancelledError:
                 pass
-            # Wait for all active tasks to finish (with timeout)
             if self._active_tasks:
                 logger.info("Waiting for %d active task(s) to finish...", len(self._active_tasks))
                 await asyncio.wait(self._active_tasks, timeout=60)
-            # Wait for background clarify/title tasks
             if self._bg_tasks:
                 await asyncio.gather(*self._bg_tasks, return_exceptions=True)
             await self._release_lock()
@@ -477,323 +362,19 @@ class Runner:
     # ── dispatch ──
     async def handle(self, task: dict) -> None:
         if task.get("type") == "roundtable":
-            await self.handle_roundtable(task)
+            from agent_runner.runner_roundtable import handle_roundtable
+            await handle_roundtable(task, self.agents)
             return
         if task.get("type") == "memory_consolidate":
-            await self.handle_memory_consolidate(task)
+            from agent_runner.runner_memory import handle_memory_consolidate
+            await handle_memory_consolidate(task, self.agents)
             return
         await self.handle_single(task)
 
-    # ── memory consolidation (做梦整理记忆): summarize history into AgentMemory ──
-    async def handle_memory_consolidate(self, task: dict) -> None:
-        from app.services import memory_service
-
-        user_id = task["user_id"]
-        r = R.get_redis()
-        status_key = R.mem_consolidate_status_key(user_id)
-
-        async def _set_status(status: str, detail: str | None = None) -> None:
-            payload: dict = {
-                "status": status,
-                "finished_at": datetime.now(tz=timezone.utc).isoformat(),
-            }
-            if detail:
-                payload["detail"] = detail
-            ttl = (
-                settings.memory_consolidate_lock_ttl
-                if status == "running"
-                else settings.memory_consolidate_status_ttl
-            )
-            await r.set(status_key, json.dumps(payload, ensure_ascii=False), ex=ttl)
-
-        # Captured BEFORE reading, so conversations updated mid-run are picked up next time.
-        consolidation_ts = datetime.now(tz=timezone.utc)
-
-        try:
-            # Session 1: gather everything, then close BEFORE the slow LLM call —
-            # holding a pool connection across a 15-min prompt would starve the API.
-            async with async_session_maker() as db:
-                mem = await memory_service.get_memory(db, uuid.UUID(user_id))
-                since = mem.last_consolidated_at if mem else None
-                stmt = select(Conversation).where(Conversation.owner_id == uuid.UUID(user_id))
-                if since is not None:
-                    stmt = stmt.where(Conversation.updated_at > since)
-                stmt = stmt.order_by(Conversation.updated_at.desc()).limit(
-                    settings.memory_consolidate_max_conversations
-                )
-                convos = list((await db.execute(stmt)).scalars().all())
-
-                budget = settings.memory_consolidate_input_chars
-                sections: list[str] = []
-                used = 0
-                for convo in convos:  # newest first
-                    res = await db.execute(
-                        select(Message)
-                        .where(Message.conversation_id == convo.id)
-                        .order_by(Message.created_at.asc())
-                    )
-                    lines = [e for m in res.scalars().all() if (e := _message_excerpt(m))]
-                    if not lines:
-                        continue
-                    section = f"## 会话「{convo.title}」\n" + "\n".join(lines)
-                    if used + len(section) > budget:
-                        section = section[: budget - used]
-                    sections.append(section)
-                    used += len(section)
-                    if used >= budget:
-                        break
-                old = {
-                    "user_profile": (mem.user_profile if mem else "") or "",
-                    "soul": (mem.soul if mem else "") or "",
-                    "notes": (mem.notes if mem else "") or "",
-                }
-                # Migrate legacy users.preferences into notes on first consolidation
-                if mem is None or not mem.last_consolidated_at:
-                    user = await db.get(User, uuid.UUID(user_id))
-                    if user and user.preferences:
-                        prefs = user.preferences
-                        pref_lines = [f"- {k}: {v}" for k, v in prefs.items() if v]
-                        if pref_lines:
-                            legacy = "【旧版偏好设置（自动迁移）】\n" + "\n".join(pref_lines)
-                            old["notes"] = (old["notes"] + "\n\n" + legacy).strip() if old["notes"] else legacy
-            # session closed here — nothing may lazy-load past this point
-
-            if not sections:
-                await _set_status("done", "没有新的对话内容，记忆保持不变")
-                return
-
-            agent = self.agents.get("hermes") or next(iter(self.agents.values()), None)
-            if agent is None:
-                await _set_status("error", "没有可用的 agent")
-                return
-
-            prompt = CONSOLIDATE_PROMPT.format(
-                budget=settings.memory_total_chars,
-                excerpts="\n\n".join(sections),
-                user_profile=old["user_profile"] or "（空）",
-                soul=old["soul"] or "（空）",
-                notes=old["notes"] or "（空）",
-            )
-
-            cwd = os.path.join(settings.workspace_root, f"memconsol-{user_id}")
-            os.makedirs(cwd, exist_ok=True)
-            buf = {"text": ""}
-
-            async def on_update(update: dict) -> None:
-                if update.get("sessionUpdate") == "agent_message_chunk":
-                    buf["text"] += (update.get("content") or {}).get("text", "")
-
-            async def _noop_fs(_p: str, _c: str) -> None:
-                return None
-
-            client = ACPClient(
-                agent.command, cwd, protocol_version=settings.acp_protocol_version,
-                on_update=on_update, on_fs_write=_noop_fs,
-            )
-            try:
-                await client.start()
-                await client.initialize()
-                await client.new_session(cwd)
-                await client.prompt(prompt)
-            finally:
-                await client.stop()
-
-            parsed = parse_memory_json(buf["text"])
-            if parsed is None:
-                logger.warning(
-                    "memory_consolidate: unparseable output for %s: %r",
-                    user_id[:8], buf["text"][:300],
-                )
-                await _set_status("error", "AI 输出无法解析，记忆未变更")
-                return
-            # A field the model omitted keeps its old value — never clear by accident.
-            for k in _MEMORY_KEYS:
-                parsed[k] = parsed[k] or old[k]
-            parsed = trim_memory_to_budget(parsed, settings.memory_total_chars)
-
-            # Session 2: only overwrite memory on a successful parse.
-            async with async_session_maker() as db:
-                await memory_service.upsert_memory(
-                    db, uuid.UUID(user_id),
-                    notes=parsed["notes"], user_profile=parsed["user_profile"],
-                    soul=parsed["soul"], last_consolidated_at=consolidation_ts,
-                )
-            await _set_status("done")
-        except ACPTimeout:
-            await _set_status("error", "整理超时")
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("memory_consolidate failed for %s", user_id[:8])
-            await _set_status("error", f"整理失败: {type(exc).__name__}")
-
-    # ── roundtable: N agents in parallel, then Hermes merge ──
-    async def handle_roundtable(self, task: dict) -> None:
-        conversation_id = task["conversation_id"]
-        message_id = task["message_id"]
-        agent_ids: list[str] = task["agents"]
-        text = task["text"]
-        rt_env = profile_env(task.get("profile_dir") or None)
-
-        cwd = os.path.join(settings.workspace_root, conversation_id)
-        os.makedirs(cwd, exist_ok=True)
-
-        slots = []
-        for i, aid in enumerate(agent_ids):
-            a = self.agents.get(aid)
-            slots.append({
-                "agent_id": aid, "slot": i,
-                "label": a.label if a else aid,
-                "color": a.color if a else "#b8852a",
-                "stance": a.description if a else "",
-            })
-        await R.publish_event(
-            conversation_id, {"type": "rt_start", "message_id": message_id, "agents": slots}
-        )
-
-        async def run_one(slot: int, aid: str) -> tuple[str, str]:
-            """Run one roundtable reply. Returns (text, status) where status is
-            complete | timeout | error. Partial text is preserved on failure."""
-            agent = self.agents.get(aid) or self.agents.get("hermes")
-            buf = {"text": ""}
-            reply_status = "complete"
-
-            async def on_update(update: dict) -> None:
-                if update.get("sessionUpdate") == "agent_message_chunk":
-                    d = (update.get("content") or {}).get("text", "")
-                    if d:
-                        buf["text"] += d
-                        await R.publish_event(conversation_id, {
-                            "type": "rt_token", "message_id": message_id, "slot": slot, "delta": d
-                        })
-
-            async def on_fs(path: str, content: str) -> None:
-                f = await storage.save_file(uuid.UUID(conversation_id), path, content, aid, uuid.UUID(message_id))
-                await R.publish_event(conversation_id, {
-                    "type": "file", "message_id": message_id, "file_id": str(f.id),
-                    "name": f.name, "kind": f.kind, "version": f.current_version,
-                })
-
-            client = ACPClient(
-                agent.command, cwd, protocol_version=settings.acp_protocol_version,
-                on_update=on_update, on_fs_write=on_fs, env=rt_env,
-            )
-            try:
-                await client.start()
-                await client.initialize()
-                await client.new_session(cwd)
-                await client.prompt(text)
-            except ACPTimeout as exc:
-                logger.error("roundtable timeout (%s): %s", aid, exc)
-                reply_status = "timeout"
-                buf["text"] = buf["text"] or f"（{aid} 超时未响应）"
-            except Exception:  # noqa: BLE001
-                logger.exception("roundtable reply failed (%s)", aid)
-                reply_status = "error"
-                buf["text"] = buf["text"] or "（该助手作答失败）"
-            finally:
-                await client.stop()
-            await R.publish_event(
-                conversation_id,
-                {"type": "rt_reply_done", "message_id": message_id, "slot": slot, "status": reply_status},
-            )
-            return buf["text"], reply_status
-
-        results = await asyncio.gather(
-            *[run_one(i, aid) for i, aid in enumerate(agent_ids)], return_exceptions=True
-        )
-        texts = [r[0] if isinstance(r, tuple) else "（作答失败）" for r in results]
-        statuses = [r[1] if isinstance(r, tuple) else "error" for r in results]
-
-        if await R.is_cancelled(conversation_id):
-            await self._finalize_roundtable(message_id, agent_ids, texts, statuses, "", "cancelled")
-            await R.clear_cancel(conversation_id)
-            await R.publish_event(conversation_id, {
-                "type": "done", "message_id": message_id, "status": "cancelled"
-            })
-            return
-
-        # ── merge via Hermes — only over replies that actually succeeded ──
-        ok_slots = [i for i, s in enumerate(statuses) if s == "complete" and texts[i].strip()]
-        if not ok_slots:
-            await self._finalize_roundtable(message_id, agent_ids, texts, statuses, "", "error")
-            await R.clear_cancel(conversation_id)
-            await R.publish_event(conversation_id, {
-                "type": "error", "message_id": message_id, "detail": "所有助手均作答失败",
-            })
-            await R.publish_event(conversation_id, {
-                "type": "done", "message_id": message_id, "status": "error"
-            })
-            return
-
-        await R.publish_event(conversation_id, {"type": "merge_start", "message_id": message_id})
-        merged = {"text": ""}
-        if len(ok_slots) == 1:
-            # A merge of one voice is that voice — skip the extra ACP round.
-            merged["text"] = texts[ok_slots[0]]
-            await R.publish_event(conversation_id, {
-                "type": "merge_token", "message_id": message_id, "delta": merged["text"]
-            })
-        else:
-            merge_prompt = "请综合以下各助手的观点，给出一致结论与下一步：\n\n" + "\n\n".join(
-                f"【{agent_ids[i]}】{texts[i]}" for i in ok_slots
-            )
-            hermes = self.agents.get("hermes") or self.agents.get(agent_ids[0])
-
-            async def on_merge(update: dict) -> None:
-                if update.get("sessionUpdate") == "agent_message_chunk":
-                    d = (update.get("content") or {}).get("text", "")
-                    if d:
-                        merged["text"] += d
-                        await R.publish_event(conversation_id, {
-                            "type": "merge_token", "message_id": message_id, "delta": d
-                        })
-
-            async def _noop(_p: str, _c: str) -> None:
-                return None
-
-            mclient = ACPClient(
-                hermes.command, cwd, protocol_version=settings.acp_protocol_version,
-                on_update=on_merge, on_fs_write=_noop, env=rt_env,
-            )
-            try:
-                await mclient.start()
-                await mclient.initialize()
-                await mclient.new_session(cwd)
-                await mclient.prompt(merge_prompt)
-            except ACPTimeout:
-                logger.error("roundtable merge timed out")
-            except Exception:  # noqa: BLE001
-                logger.exception("roundtable merge failed")
-            finally:
-                await mclient.stop()
-
-        await self._finalize_roundtable(message_id, agent_ids, texts, statuses, merged["text"], "complete")
-        await R.clear_cancel(conversation_id)
-        await R.publish_event(
-            conversation_id, {"type": "done", "message_id": message_id, "status": "complete"}
-        )
-
-    async def _finalize_roundtable(
-        self, message_id: str, agent_ids: list[str], texts: list[str],
-        statuses: list[str], merged: str, status: str,
-    ) -> None:
-        async with async_session_maker() as db:
-            msg = await db.get(Message, uuid.UUID(message_id))
-            if msg:
-                msg.content = {
-                    "replies": [
-                        {"agent_id": agent_ids[i], "text": texts[i], "status": statuses[i]}
-                        for i in range(len(agent_ids))
-                    ],
-                    "merged": {"text": merged, "status": status},
-                }
-                msg.status = status
-                convo = await db.get(Conversation, msg.conversation_id)
-                if convo:
-                    convo.updated_at = datetime.now(tz=timezone.utc)
-                await db.commit()
-
     # ── one prompt (single agent) ──
     async def handle_single(self, task: dict) -> None:
+        from agent_runner.runner_clarify import pop_clarify_request, handle_clarify_request
+
         conversation_id = task["conversation_id"]
         message_id = task["message_id"]
         agent_id = task.get("agent_id", "hermes")
@@ -809,7 +390,6 @@ class Runner:
         cwd = os.path.join(settings.workspace_root, conversation_id)
         os.makedirs(cwd, exist_ok=True)
 
-        # Load existing ACP session ID and mode for resume
         acp_session_id = None
         session_mode = None
         async with async_session_maker() as db:
@@ -819,14 +399,13 @@ class Runner:
                 session_mode = convo.session_mode
 
         acc = {"text": "", "cancelled": False, "current_msg_id": message_id, "tool_since_split": False, "thinking": "", "plan": None, "files": []}
-        steps: list[dict] = []  # Collect tool_call steps for persistence
+        steps: list[dict] = []
 
         async def on_update(update: dict) -> None:
             kind = update.get("sessionUpdate")
             if kind == "agent_message_chunk":
                 delta = (update.get("content") or {}).get("text", "")
                 if delta:
-                    # No split: accumulate all text (before and after tool calls) into one message
                     acc["tool_since_split"] = False
                     acc["text"] += delta
                     await R.publish_event(
@@ -837,8 +416,6 @@ class Runner:
                 acc["tool_since_split"] = True
                 step = {"title": update.get("title"), "status": update.get("status")}
                 steps.append(step)
-                # NOTE: clarify is detected solely via the request LIST poll in the
-                # prompt loop (atomic LPOP) — title matching here double-fired.
                 await R.publish_event(
                     conversation_id,
                     {
@@ -882,8 +459,6 @@ class Runner:
                 })
                 acc["total_tokens"] = update.get("input_tokens", 0) + update.get("output_tokens", 0)
             elif kind == "session_info" or kind == "session_info_update":
-                # v0.16.0: session_info_update (camelCase: sessionUpdate="session_info_update")
-                # Legacy: session_info
                 new_title = update.get("title")
                 if new_title:
                     t = asyncio.create_task(self._update_conv_title(conversation_id, new_title))
@@ -891,7 +466,6 @@ class Runner:
                     t.add_done_callback(self._bg_tasks.discard)
                     await R.publish_event(conversation_id, {"type": "session_info", "title": new_title})
             elif kind == "usage_update":
-                # v0.16.0: ACP native context usage (size=window, used=pressure)
                 size = update.get("size", 0)
                 used = update.get("used", 0)
                 await R.publish_event(conversation_id, {
@@ -901,8 +475,6 @@ class Runner:
                     "context_used": used,
                 })
             elif kind == "confirmation_request":
-                # Agent natively sent a confirmation_request via session/update.
-                # Send SSE to frontend and wait for user response via background task.
                 request_id = update.get("request_id", str(uuid.uuid4()))
                 question = update.get("question", "需要你的确认")
                 options = update.get("options", ["继续", "跳过"])
@@ -919,16 +491,14 @@ class Runner:
                     {"type": "confirmation_request", "message_id": acc["current_msg_id"], "request": req_payload},
                 )
                 logger.info("Native confirmation_request, sent SSE: %s", request_id)
-                # Wait for user response in background, then inject result into agent
                 t = asyncio.create_task(
-                    self._wait_and_unblock_clarify(
+                    self._wait_and_unblock_clarify_native(
                         conversation_id, request_id, sid=conversation_id,
                         message_id=acc["current_msg_id"], acc=acc,
                     )
                 )
                 self._bg_tasks.add(t)
                 t.add_done_callback(self._bg_tasks.discard)
-            # Cooperative cancellation between chunks.
             if not acc["cancelled"] and await R.is_cancelled(conversation_id):
                 acc["cancelled"] = True
                 try:
@@ -951,11 +521,9 @@ class Runner:
                 ))
                 if diff_lines:
                     diff = "".join(diff_lines[:80])
-            # Track file for persistence in message content
             file_entry = {"id": str(f.id), "name": f.name, "kind": f.kind, "version": f.current_version}
             if diff:
                 file_entry["diff"] = diff
-            # Update or append (dedup by file id)
             existing = [i for i, fi in enumerate(acc["files"]) if fi["id"] == file_entry["id"]]
             if existing:
                 acc["files"][existing[0]] = file_entry
@@ -990,7 +558,6 @@ class Runner:
             )
             if new_session:
                 await self._set_session_id(conversation_id, new_session)
-                # Apply session mode (edit approval policy) if set
                 if session_mode:
                     try:
                         await client.set_session_mode(new_session, session_mode)
@@ -998,24 +565,13 @@ class Runner:
                     except Exception:
                         logger.debug("Could not apply session_mode", exc_info=True)
 
-            # Run prompt with concurrent clarify polling.
-            # The agent's clarify_callback blocks the agent thread while waiting
-            # for user response. Since it can't send on_update events while
-            # blocked, we must poll Redis for pending clarify requests.
-            # NOTE: agent keys clarify requests by ACP session_id — on a resumed
-            # session new_session is None, so fall back to the stored session id
-            # (using conversation_id there made the keys never match).
             clarify_session_id = new_session or acp_session_id or conversation_id
-            # Prepend system_prompt on the first message of a new session,
-            # or when system_prompt is provided (profile switch)
             effective_text = text
             if system_prompt:
                 effective_text = f"【角色设定】\n{system_prompt}\n【角色设定结束】\n\n{text}"
 
-            # Use content_blocks if available (ACP structured content), else plain text
             content_blocks = task.get("content_blocks")
             if content_blocks:
-                # Inject system_prompt into the first text block
                 if system_prompt:
                     for block in content_blocks:
                         if block.get("type") == "text":
@@ -1030,15 +586,12 @@ class Runner:
                     await asyncio.wait_for(asyncio.shield(prompt_task), timeout=1.0)
                 except asyncio.TimeoutError:
                     pass
-                # Atomically pop pending clarify requests (agent keys by session_id).
-                # LPOP consumes each request exactly once — no double-trigger, and
-                # queued requests survive until we get to them (no overwrite).
                 try:
-                    data = await self._pop_clarify_request(clarify_session_id)
+                    data = await pop_clarify_request(clarify_session_id)
                     if data:
-                        await self._handle_clarify_request(
+                        await handle_clarify_request(
                             conversation_id, acc["current_msg_id"], acc,
-                            clarify_session_id, data,
+                            clarify_session_id, data, self._bg_tasks,
                         )
                 except Exception:
                     logger.debug("clarify poll failed", exc_info=True)
@@ -1055,16 +608,11 @@ class Runner:
             return
 
         status = "cancelled" if acc["cancelled"] else "complete"
-        # ── Fallback: extract files from text if agent didn't use fs/write_text_file ──
         if status == "complete" and acc["text"]:
             await self._extract_and_save_files(
                 conversation_id, acc["current_msg_id"], agent_id, acc["text"]
             )
 
-        # Clarify requests are consumed during the prompt loop (LPOP + modal).
-        # The legacy [确认]...[/确认] text-marker fallback was removed: it
-        # contradicted the prompt rules ("禁止输出 [确认] 标记") and markers can
-        # be split across streamed chunks — the tool-call path is the only one.
         await self._finalize(
             acc["current_msg_id"], acc["text"], status, steps,
             acc.get("thinking") or "", acc.get("plan"), acc.get("files"),
@@ -1082,169 +630,45 @@ class Runner:
             },
         )
 
-    # ── Clarify (protocol v2: LIST + BLPOP, race-free) ──
-    #
-    # agent RPUSH `hermes:clarify:req:{sid}`  →  runner LPOP (prompt loop)
-    # runner RPUSH `hermes:clarify:resp:{sid}:{clarify_id}`  →  agent BLPOP
-    #
-    # BLPOP returns even when the response was pushed before the agent started
-    # waiting, so auto-resolve can never strand the agent. With
-    # settings.clarify_protocol == "dual" the legacy GET/pubsub keys are also
-    # consumed/written for agent deployments that haven't been re-patched yet.
-
-    async def _pop_clarify_request(self, sid: str) -> dict | None:
-        """Atomically consume one pending clarify request, if any."""
-        r = R.get_redis()
-        val = await r.lpop(R.clarify_req_key(sid))
-        if val is None and settings.clarify_protocol == "dual":
-            val = await r.getdel(f"hermes:clarify_pending:{sid}")
-        if not val:
-            return None
-        try:
-            return json.loads(val)
-        except (TypeError, ValueError):
-            logger.warning("Malformed clarify request for sid=%s: %r", sid[:8], val)
-            return None
-
-    async def _deliver_clarify_response(self, sid: str, clarify_id: str, choice: str) -> bool:
-        """Unblock the agent's clarify_callback with the chosen answer."""
-        try:
-            r = R.get_redis()
-            resp_key = R.clarify_resp_key(sid, clarify_id)
-            pipe = r.pipeline()
-            pipe.rpush(resp_key, choice)
-            pipe.expire(resp_key, 60)
-            if settings.clarify_protocol == "dual":
-                pipe.set(f"hermes:clarify_response:{sid}:{clarify_id}", choice, ex=60)
-                pipe.publish(f"hermes:clarify_notify:{sid}", clarify_id)
-            await pipe.execute()
-            return True
-        except Exception:
-            logger.exception("Failed to deliver clarify response sid=%s id=%s", sid[:8], clarify_id[:8])
-            return False
-
-    async def _handle_clarify_request(
-        self, conversation_id: str, message_id: str, acc: dict, sid: str, data: dict
-    ) -> None:
-        """Present every clarify request to the user via the confirmation modal.
-
-        Auto-resolve has been removed — all questions require human input.
-        """
-        clarify_id = data.get("clarify_id") or uuid.uuid4().hex[:12]
-        question = data.get("question") or "需要确认"
-        options = data.get("options") or ["继续", "跳过"]
-
-        # ── Always show interactive modal ──
-        await self._record_clarify(message_id, acc, {
-            "id": clarify_id, "question": question, "options": options,
-            "status": "pending", "ts": datetime.now(tz=timezone.utc).isoformat(),
-        })
-        req_payload = {
-            "id": clarify_id,
-            "conversation_id": conversation_id,
-            "message_id": message_id,
-            "question": question,
-            "questions": [{"question": question, "options": options, "allow_free_text": True}],
-            "options": options,
-        }
-        await R.publish_event(
-            conversation_id,
-            {"type": "confirmation_request", "message_id": message_id, "request": req_payload},
-        )
-        logger.info("Clarify request, sent confirmation_request: %s (sid=%s)", clarify_id, sid[:8])
-
-        t = asyncio.create_task(
-            self._wait_and_unblock_clarify(
-                conversation_id, clarify_id, sid=sid, message_id=message_id, acc=acc
-            )
-        )
-        self._bg_tasks.add(t)
-        t.add_done_callback(self._bg_tasks.discard)
-
-    async def _wait_and_unblock_clarify(
-        self, conversation_id: str, clarify_id: str, *,
+    async def _wait_and_unblock_clarify_native(
+        self, conversation_id: str, request_id: str, *,
         sid: str, message_id: str | None = None, acc: dict | None = None,
     ) -> None:
-        """Wait for the user's modal answer (or cancel/timeout), then unblock
-        the agent's clarify_callback and persist the outcome."""
+        from agent_runner.runner_clarify import deliver_clarify_response
         try:
             resp = await R.wait_for_confirmation(
-                conversation_id, clarify_id,
+                conversation_id, request_id,
                 timeout=settings.clarify_timeout_seconds, cancel_check=True,
             )
             choice = resp.get("choice", "超时")
         except Exception:
-            logger.warning("Clarify wait failed for %s", clarify_id[:8], exc_info=True)
+            logger.warning("Native clarify wait failed for %s", request_id[:8], exc_info=True)
             choice = "超时"
-        logger.info("Clarify response for %s: %s", clarify_id[:8], choice)
+        logger.info("Native clarify response for %s: %s", request_id[:8], choice)
 
         try:
             await R.publish_event(
                 conversation_id,
-                {"type": "confirmation_response", "request_id": clarify_id, "choice": choice},
+                {"type": "confirmation_response", "request_id": request_id, "choice": choice},
             )
         except Exception:
             logger.warning("Failed to publish confirmation_response", exc_info=True)
 
-        if not await self._deliver_clarify_response(sid, clarify_id, choice):
+        if not await deliver_clarify_response(sid, request_id, choice):
             await asyncio.sleep(0.5)
-            await self._deliver_clarify_response(sid, clarify_id, choice)
-
-        if message_id and acc is not None:
-            status = {"已取消": "cancelled", "超时": "timeout"}.get(choice, "answered")
-            await self._update_clarify(message_id, acc, clarify_id, status, choice)
-
-    # ── Clarify persistence: Q&A lives in message.content["clarifies"] so a
-    # page refresh can restore the pending modal and history keeps the audit. ──
-
-    async def _record_clarify(self, message_id: str, acc: dict, entry: dict) -> None:
-        acc.setdefault("clarifies", []).append(entry)
-        await self._write_clarifies(message_id, acc["clarifies"])
-
-    async def _update_clarify(
-        self, message_id: str, acc: dict, clarify_id: str, status: str, choice: str
-    ) -> None:
-        for e in acc.get("clarifies", []):
-            if e.get("id") == clarify_id:
-                e["status"] = status
-                e["choice"] = choice
-        await self._write_clarifies(message_id, acc.get("clarifies", []))
-
-    async def _write_clarifies(self, message_id: str, clarifies: list[dict]) -> None:
-        try:
-            async with async_session_maker() as db:
-                msg = await db.get(Message, uuid.UUID(message_id))
-                if msg:
-                    msg.content = {**(msg.content or {}), "clarifies": clarifies}
-                    await db.commit()
-        except Exception:
-            logger.warning("Failed to persist clarifies for %s", message_id[:8], exc_info=True)
+            await deliver_clarify_response(sid, request_id, choice)
 
     # ── Fallback: extract files from AI text response ──
     async def _extract_and_save_files(
         self, conversation_id: str, message_id: str, agent_id: str, text: str
     ) -> None:
-        """Parse AI response text for file artifacts and save them to the workspace.
-
-        Catches two patterns:
-        1. Fenced code blocks with a filename hint (```python filename.py or ```filename.txt)
-        2. Explicit file path mentions (路径: ~/Downloads/xxx, 文件已生成 + path)
-
-        Files already saved via fs/write_text_file in the CURRENT message are skipped (dedup).
-        Files from PREVIOUS messages are still updated (creates version history).
-        """
+        """Parse AI response text for file artifacts and save them to the workspace."""
         import re
 
         cid = uuid.UUID(conversation_id)
-
-        # Track files saved via fs/write_text_file in THIS message only (from on_fs_write)
-        # We use a set passed from the caller or track via message_id
         saved_names: set[str] = set()
+        extracted: list[tuple[str, str]] = []
 
-        extracted: list[tuple[str, str]] = []  # (filename, content)
-
-        # Pattern 1: fenced code blocks with filename
-        # Matches: ```python filename.py\n...``` or ```filename.txt\n...```
         code_block_re = re.compile(
             r"```(?:(\w+)\s+)?(\S+\.\w+)\s*\n(.*?)```",
             re.DOTALL,
@@ -1255,8 +679,6 @@ class Runner:
             if filename and content and filename not in saved_names:
                 extracted.append((filename, content))
 
-        # Pattern 2: explicit file path mention + content in the text
-        # Look for "路径: ~/Downloads/xxx" or "文件已生成" patterns, then try to read the file
         path_re = re.compile(
             r"(?:路径|Path|文件路径|保存到|生成到|保存在)[:：]\s*"
             r"(?:(~/)?([^\s\n]+\.\w+))",
@@ -1269,7 +691,6 @@ class Runner:
             filename = os.path.basename(raw_path)
             if filename in saved_names:
                 continue
-            # Try to read the file if it exists on disk
             if os.path.isfile(raw_path):
                 try:
                     with open(raw_path, encoding="utf-8") as fh:
@@ -1278,7 +699,6 @@ class Runner:
                 except Exception:  # noqa: BLE01
                     logger.debug("Could not read %s", raw_path)
 
-        # Deduplicate (keep first occurrence)
         seen: set[str] = set()
         unique: list[tuple[str, str]] = []
         for name, content in extracted:
@@ -1286,7 +706,6 @@ class Runner:
                 seen.add(name)
                 unique.append((name, content))
 
-        # Save extracted files
         for filename, content in unique:
             try:
                 f = await storage.save_file(cid, filename, content, agent_id, uuid.UUID(message_id))
@@ -1305,9 +724,8 @@ class Runner:
             except Exception:  # noqa: BLE01
                 logger.exception("Failed to save extracted file '%s'", filename)
 
-    # ── DB writes (off the hot path) ──
+    # ── DB writes ──
     async def _create_agent_message(self, conversation_id: str, agent_id: str) -> str:
-        """Create a new agent message in DB, return its ID."""
         async with async_session_maker() as db:
             msg = Message(
                 conversation_id=uuid.UUID(conversation_id),
@@ -1342,7 +760,6 @@ class Runner:
                     content["clarifies"] = clarifies
                 msg.content = content
                 msg.status = status
-                # touch the conversation's updated_at
                 convo = await db.get(Conversation, msg.conversation_id)
                 if convo:
                     convo.updated_at = datetime.now(tz=timezone.utc)

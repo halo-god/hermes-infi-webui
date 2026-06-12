@@ -11,7 +11,7 @@ from app.config import settings
 from app.core import redis as redis_core
 from app.core.files import confine_to_dir, safe_relative_path
 from app.db.models.agent import Profile
-from app.db.models.conversation import Conversation, Message
+from app.db.models.conversation import Conversation, GroupMember, Message
 from app.db.models.workspace import WorkspaceFile, WorkspaceFileVersion
 
 
@@ -24,8 +24,6 @@ async def list_conversations(
     limit: int = 100,
     offset: int = 0,
 ) -> list[Conversation]:
-    from app.db.models.conversation import GroupMember
-
     # Personal conversations (owned) + group conversations (member of)
     group_subq = (
         select(GroupMember.conversation_id)
@@ -66,8 +64,6 @@ async def bulk_delete(
 async def get_conversation(
     db: AsyncSession, conversation_id: uuid.UUID, owner_id: uuid.UUID
 ) -> Conversation | None:
-    from app.db.models.conversation import GroupMember
-
     res = await db.execute(
         select(Conversation).where(
             Conversation.id == conversation_id,
@@ -691,7 +687,6 @@ async def create_group(
     team_id: uuid.UUID | None = None,
 ) -> Conversation:
     """创建群聊，自动添加成员。有团队时默认包含全部成员+助手。"""
-    from app.db.models.conversation import GroupMember
     from app.db.models.team import Team, TeamMember as TM
 
     # If team_id, auto-populate members + agents from team
@@ -771,7 +766,6 @@ async def get_group_members(
     conversation_id: uuid.UUID,
 ) -> list:
     """获取群聊成员列表。"""
-    from app.db.models.conversation import GroupMember
     res = await db.execute(
         select(GroupMember)
         .where(GroupMember.conversation_id == conversation_id)
@@ -789,8 +783,6 @@ async def add_group_member(
     role: str = "member",
 ):
     """添加群聊成员。"""
-    from app.db.models.conversation import GroupMember
-
     if not user_id and not agent_id:
         raise ValueError("必须指定 user_id 或 agent_id")
 
@@ -830,8 +822,6 @@ async def remove_group_member(
     agent_id: str | None = None,
 ):
     """移除群聊成员。"""
-    from app.db.models.conversation import GroupMember
-
     stmt = select(GroupMember).where(
         GroupMember.conversation_id == conversation_id,
     )
@@ -863,8 +853,6 @@ async def list_group_conversations(
     user_id: uuid.UUID,
 ) -> list[Conversation]:
     """列出用户参与的所有群聊。"""
-    from app.db.models.conversation import GroupMember
-
     stmt = (
         select(Conversation)
         .join(GroupMember, GroupMember.conversation_id == Conversation.id)
@@ -883,8 +871,6 @@ async def is_group_member(
     user_id: uuid.UUID,
 ) -> bool:
     """检查用户是否是群聊成员。"""
-    from app.db.models.conversation import GroupMember
-
     res = await db.execute(
         select(GroupMember).where(
             GroupMember.conversation_id == conversation_id,
