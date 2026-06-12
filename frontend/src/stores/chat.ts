@@ -5,8 +5,8 @@ import { agentsApi } from "@/api/agents";
 import { teamsApi } from "@/api/teams";
 import { tokenStore } from "@/api/client";
 import { useStream } from "@/composables/useStream";
-import { useNotificationStore } from "@/stores/notifications";
-import type { ClarifyEntry, Conversation, Message, StreamEvent, Team, WorkspaceFile, ConfirmationRequest, PlanEntry } from "@/types";
+import { registerStreamHandlers } from "@/stores/chatStream";
+import type { ClarifyEntry, Conversation, Message, Team, WorkspaceFile, ConfirmationRequest, PlanEntry } from "@/types";
 import type { Profile } from "@/api/agents";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api/v1";
@@ -146,7 +146,7 @@ export const useChatStore = defineStore("chat", () => {
           }
         }
         streamingConvoId.value = id;
-        registerStreamHandlers();
+        setupStreamHandlers();
         const token = tokenStore.access;
         // Replay the in-flight turn from its start: the event stream is
         // durable, so tokens emitted while we were away are recovered.
@@ -227,202 +227,20 @@ export const useChatStore = defineStore("chat", () => {
     loadConversations().catch(() => {});
   }
 
-  // ── Stream event handlers (4.1 message flow pattern) ──
+  // ── Stream event handlers (delegated to chatStream module) ──
 
-  /** Drop events that belong to another conversation — switching mid-stream
-   *  used to leak the old conversation's tokens into the new message list. */
-  function scoped<T extends StreamEvent>(fn: (ev: T) => void): (ev: T) => void {
-    return (ev) => {
-      if (ev.conversation_id && ev.conversation_id !== activeId.value) return;
-      fn(ev);
-    };
-  }
-
-  function registerStreamHandlers() {
-    stream.offAll();
-
-    stream.on("token", scoped((ev) => {
-      const m = find(ev.message_id);
-      // Only append to a streaming message: replayed tokens after the message
-      // was finalized (done carries the full text) must not double-append.
-      if (m && m.status === "streaming") m.content = { ...m.content, text: (m.content.text || "") + ev.delta };
-    }));
-
-    // Debounced refresh: intermediate "done" events (multi-message split) are followed
-    // by a "start" event within ~100ms. Delay refresh to avoid killing the SSE stream.
-    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
-    const scheduleRefresh = () => {
-      if (refreshTimer) clearTimeout(refreshTimer);
-      refreshTimer = setTimeout(() => {
-        refreshTimer = null;
-        refreshAfterTurn();
-      }, 500);
-    };
-    const cancelRefresh = () => {
-      if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null; }
-    };
-
-    stream.on("start", scoped((ev) => {
-      cancelRefresh();  // New message coming, don't close stream
-      if (!find(ev.message_id)) {
-        messages.value.push({
-          id: ev.message_id,
-          conversation_id: activeId.value || "",
-          owner_id: null,
-          role: "agent",
-          agent_id: "hermes",
-          content: { text: "" },
-          status: "streaming",
-          created_at: new Date().toISOString(),
-        });
-      }
-    }));
-
-    stream.on("rt_start", scoped((ev) => {
-      if (!find(ev.message_id)) {
-        const replies = [...ev.agents]
-          .sort((a, b) => a.slot - b.slot)
-          .map((a) => ({ agent_id: a.agent_id, text: "", status: "streaming" as const }));
-        messages.value.push({
-          id: ev.message_id,
-          conversation_id: activeId.value || "",
-          owner_id: null,
-          role: "roundtable",
-          agent_id: replies[0]?.agent_id || null,
-          content: { text: "", replies, merged: { text: "", status: "pending" } },
-          status: "streaming",
-          created_at: new Date().toISOString(),
-        });
-      }
-    }));
-
-    stream.on("rt_token", scoped((ev) => {
-      const r = find(ev.message_id)?.content.replies?.[ev.slot];
-      if (r && r.status === "streaming") r.text += ev.delta;
-    }));
-
-    stream.on("rt_reply_done", scoped((ev) => {
-      const r = find(ev.message_id)?.content.replies?.[ev.slot];
-      if (r) r.status = ev.status || "complete";
-    }));
-
-    stream.on("merge_start", scoped((ev) => {
-      const merged = find(ev.message_id)?.content.merged;
-      if (merged) merged.status = "streaming";
-    }));
-
-    stream.on("merge_token", scoped((ev) => {
-      const merged = find(ev.message_id)?.content.merged;
-      if (merged && merged.status === "streaming") merged.text += ev.delta;
-    }));
-
-    stream.on("tool_call", scoped((ev) => {
-      const m = find(ev.message_id);
-      if (m) {
-        if (!m.steps) m.steps = [];
-        const existing = m.steps.find((s) => s.title === ev.title);
-        if (existing) existing.status = ev.status || existing.status;
-        else m.steps.push({ title: ev.title || "调用工具", status: ev.status || "running" });
-      }
-    }));
-
-    stream.on("thought", scoped((ev) => {
-      const m = find(ev.message_id);
-      if (m && m.status === "streaming") m.thinking = (m.thinking || "") + ev.delta;
-    }));
-
-    stream.on("plan", scoped((ev) => {
-      const m = find(ev.message_id);
-      if (m) m.plan = ev.entries;
-    }));
-
-    stream.on("usage", scoped((ev) => {
-      const m = find(ev.message_id);
-      const usage: Record<string, number> = {};
-      if (ev.input_tokens != null) usage.input_tokens = ev.input_tokens;
-      if (ev.output_tokens != null) usage.output_tokens = ev.output_tokens;
-      if (ev.context_size != null) usage.context_size = ev.context_size;
-      if (ev.context_used != null) usage.context_used = ev.context_used;
-      if (m) m.usage = usage as any;
-      if (ev.context_size) {
-        contextSize.value = ev.context_size;
-        contextTokens.value = ev.context_used || 0;
-      } else {
-        contextTokens.value = (ev.input_tokens || 0) + (ev.output_tokens || 0);
-      }
-    }));
-
-    stream.on("session_info", scoped((ev) => {
-      if (ev.title) {
-        const c = conversations.value.find((c) => c.id === activeId.value);
-        if (c && c.title === "新会话") c.title = ev.title;
-      }
-    }));
-
-    stream.on("file", scoped((ev) => {
-      const m = find(ev.message_id);
-      if (m) {
-        if (!m.content.files) m.content = { ...m.content, files: [] };
-        const existing = m.content.files!.find((f) => f.id === ev.file_id);
-        if (!existing) {
-          m.content.files!.push({ id: ev.file_id, name: ev.name, kind: ev.kind, diff: ev.diff });
-        }
-      }
-      if (activeId.value) {
-        conversationsApi.files(activeId.value).then((f) => (files.value = f)).catch(() => {});
-      }
-    }));
-
-    stream.on("confirmation_request", scoped((ev) => {
-      // Dedupe: replay after reconnect (or modal restore) may re-deliver it
-      if (pendingConfirmations.value.find((r) => r.id === ev.request.id)) return;
-      pendingConfirmations.value.push(ev.request);
-      // Notify user
-      const ns = useNotificationStore();
-      ns.push({ title: "需要确认", body: ev.request.question || "AI 需要你的确认", kind: "warn" });
-      if (document.hidden && "Notification" in window && Notification.permission === "granted") {
-        new Notification("Hermes · 需要确认", { body: ev.request.question || "AI 需要你的确认", tag: "hermes-confirm" });
-      }
-    }));
-
-    stream.on("confirmation_response", scoped((ev) => {
-      pendingConfirmations.value = pendingConfirmations.value.filter(
-        (r) => r.id !== ev.request_id,
-      );
-    }));
-
-    stream.on("clarify_auto", scoped((ev) => {
-      const ns = useNotificationStore();
-      ns.push({ title: "已自动确认", body: `${ev.question} → ${ev.choice}`, kind: "info" });
-    }));
-
-    stream.on("done", scoped((ev) => {
-      const m = find(ev.message_id);
-      if (m) {
-        m.status = (ev.status as Message["status"]) || "complete";
-        if (ev.text !== undefined) m.content = { ...m.content, text: ev.text };
-        if (m.content.merged && m.content.merged.status === "streaming") {
-          m.content.merged.status = "complete";
-        }
-      }
-      // Notify if user is not viewing this conversation
-      if (document.hidden || !activeId.value) {
-        const ns = useNotificationStore();
-        const text = (ev.text || m?.content?.text || "").slice(0, 80);
-        ns.push({ title: "AI 回复完成", body: text || "点击查看", kind: "success", link: `/?c=${activeId.value}` });
-        // Browser notification
-        if (document.hidden && "Notification" in window && Notification.permission === "granted") {
-          new Notification("Hermes · AI 回复完成", { body: text || "点击查看", tag: "hermes-done" });
-        }
-      }
-      scheduleRefresh();  // Delayed: cancel if a new "start" event follows
-    }));
-
-    stream.on("error", scoped((ev) => {
-      const m = find(ev.message_id);
-      if (m) m.status = "error";
-      scheduleRefresh();
-    }));
+  function setupStreamHandlers() {
+    registerStreamHandlers(stream, {
+      activeId,
+      messages,
+      conversations,
+      pendingConfirmations,
+      contextTokens,
+      contextSize,
+      files,
+      find,
+      refreshAfterTurn,
+    });
   }
 
   async function send(
@@ -490,7 +308,7 @@ export const useChatStore = defineStore("chat", () => {
   async function sendSingle(id: string, text: string, opts?: { profileId?: string; fileIds?: string[] }) {
     closeStream();
     streamingConvoId.value = id;
-    registerStreamHandlers();
+    setupStreamHandlers();
 
     // Optimistic user bubble — push BEFORE opening SSE so the user message
     // always appears above the agent's streaming bubble, even if SSE "start"
@@ -523,7 +341,7 @@ export const useChatStore = defineStore("chat", () => {
   async function sendRoundtable(id: string, text: string, opts?: { profileId?: string; fileIds?: string[] }) {
     closeStream();
     streamingConvoId.value = id;
-    registerStreamHandlers();
+    setupStreamHandlers();
 
     const token = tokenStore.access;
     const wsBase = API_BASE.startsWith("http")
