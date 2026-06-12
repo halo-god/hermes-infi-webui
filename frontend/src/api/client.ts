@@ -82,12 +82,28 @@ async function doRefresh(): Promise<string | null> {
   }
 }
 
+// Global error handler — shows toast for user-facing errors.
+let _showError: ((msg: string) => void) | null = null;
+
+function getShowError() {
+  if (!_showError) {
+    // Use window-level event to communicate with notification store
+    // This avoids circular dependency issues
+    _showError = (msg: string) => {
+      window.dispatchEvent(new CustomEvent("hermes:api-error", { detail: msg }));
+    };
+  }
+  return _showError;
+}
+
 http.interceptors.response.use(
   (r) => r,
   async (error: AxiosError) => {
     const original = error.config as AxiosRequestConfig & { _retried?: boolean };
     const status = error.response?.status;
     const isAuthCall = original?.url?.includes("/auth/");
+    // Skip error toast for SSE/streaming endpoints (they handle errors via events)
+    const isStreamCall = original?.url?.includes("/stream") || original?.url?.includes("/ws");
 
     if (status === 401 && original && !original._retried && !isAuthCall) {
       original._retried = true;
@@ -102,6 +118,15 @@ http.interceptors.response.use(
       // Refresh failed → bounce to login.
       window.dispatchEvent(new CustomEvent("hermes:logout"));
     }
+
+    // Show user-friendly error toast for non-retryable errors
+    if (!isAuthCall && !isStreamCall && status && status >= 400) {
+      const showError = getShowError();
+      const detail = (error.response?.data as Record<string, unknown>)?.detail;
+      const msg = typeof detail === "string" ? detail : `请求失败 (${status})`;
+      showError(msg);
+    }
+
     return Promise.reject(error);
   },
 );

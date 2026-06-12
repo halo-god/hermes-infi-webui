@@ -83,19 +83,16 @@ def has_at_least(role: str, required: str) -> bool:
 
 
 def require_role(required: str):
-    """Dependency factory: ensures the current user has >= required role."""
-    from app.deps import get_current_user  # late import to avoid cycle
+    """Dependency factory: ensures the current user has >= required role.
 
-    async def _guard(user=Depends(get_current_user)):
-        if not has_at_least(user.role, required):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="权限不足",
-            )
-        return user
-
-    return _guard
+    NOTE: This function is kept for backward compatibility. New code should
+    use app.core.guards.require_role() instead to avoid circular imports.
+    """
+    from app.core.guards import require_role as _require_role
+    return _require_role(required)
 
 
 def require_admin():
-    return require_role("admin")
+    """Dependency: requires admin or super_admin role."""
+    from app.core.guards import require_admin as _require_admin
+    return _require_admin()
