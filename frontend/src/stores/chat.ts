@@ -39,7 +39,8 @@ export const useChatStore = defineStore("chat", () => {
   async function loadTeams() {
     try {
       teams.value = await teamsApi.list();
-    } catch {
+    } catch (e) {
+      console.error("[chat] loadTeams failed:", e);
       teams.value = [];
     }
   }
@@ -54,7 +55,8 @@ export const useChatStore = defineStore("chat", () => {
   async function loadProfiles() {
     try {
       profiles.value = await agentsApi.profiles();
-    } catch {
+    } catch (e) {
+      console.error("[chat] loadProfiles failed:", e);
       profiles.value = [];
     }
   }
@@ -64,7 +66,9 @@ export const useChatStore = defineStore("chat", () => {
       const resp = await fetch("/api/v1/config");
       const data = await resp.json();
       features.value = data.features || { followup_chips: false };
-    } catch { /* ignore */ }
+    } catch (e) {
+      console.error("[chat] loadConfig failed:", e);
+    }
   }
 
   async function loadConversations() {

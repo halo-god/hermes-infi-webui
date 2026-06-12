@@ -1,13 +1,14 @@
 """Prometheus metrics + ASGI middleware (request count/latency + correlation id)."""
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 
 from app.core.logging import request_id_var
 
@@ -75,3 +76,33 @@ class RequestIDMiddleware:
 
 def metrics_response() -> Response:
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+class TimeoutMiddleware(BaseHTTPMiddleware):
+    """Global request timeout middleware.
+
+    Protects against slow clients and stuck handlers. SSE/streaming endpoints
+    are excluded since they are long-lived by design.
+    """
+
+    def __init__(self, app, timeout_seconds: int = 30) -> None:
+        super().__init__(app)
+        self.timeout_seconds = timeout_seconds
+
+    async def dispatch(self, request: Request, call_next):
+        # Skip timeout for SSE/WebSocket/streaming endpoints
+        path = request.url.path
+        if "/stream" in path or "/ws" in path or "/events" in path:
+            return await call_next(request)
+
+        try:
+            response = await asyncio.wait_for(
+                call_next(request),
+                timeout=self.timeout_seconds,
+            )
+            return response
+        except asyncio.TimeoutError:
+            return JSONResponse(
+                status_code=504,
+                content={"detail": "请求超时，请稍后重试"},
+            )
