@@ -87,14 +87,15 @@
 | `backend/agent_runner/runner.py` | 检测 clarify tool_call，后台任务等用户回复 |
 | `frontend/src/stores/chat.ts` | `respondConfirmation` 只调 API，不发新消息 |
 
-## Redis Key 设计 (v3 unified)
+## Redis Key 设计
 
 | Key | 写入方 | 读取方 | 用途 |
 |---|---|---|---|
-| `clarify:{conv_id}:{request_id}` | API | Runner | 用户回复存储 (SET, TTL 600s) |
-| `clarify_notify:{conv_id}` | API | Runner | pub/sub 通知 |
-| `hermes:clarify:req:{session_id}` | Agent (legacy) | Runner (legacy) | LIST, agent-side compat |
-| `hermes:clarify:resp:{session_id}:{id}` | Runner (legacy) | Agent (legacy) | LIST, agent-side compat |
+| `hermes:clarify_pending:{session_id}` | clarify_callback | Runner | 存储待确认请求 |
+| `hermes:clarify_response:{session_id}:{id}` | Runner | clarify_callback | 存储用户回复 |
+| `hermes:clarify_notify:{session_id}` | 双方互相 | 双方互相 | pub/sub 通知 |
+| `confirm:{conv_id}:{request_id}` | API | Runner | 用户回复存储 |
+| `confirm_notify:{conv_id}` | API | Runner | pub/sub 通知 |
 
 ## 边界情况处理
 

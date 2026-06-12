@@ -121,44 +121,34 @@ async def clear_cancel(conversation_id: str) -> None:
     await get_redis().delete(cancel_key(conversation_id))
 
 
-# ── Clarify v3: unified key design ──
-# Single SET key per request (status + response), one pub/sub channel per conversation.
-# Replaces the old 5-key design (confirm:*, confirm_notify:*, hermes:clarify:req:*, etc.)
+# ── AI Confirmation requests ──
 import asyncio as _asyncio  # noqa: E402
 from contextlib import suppress as _suppress  # noqa: E402
 
 
-def clarify_key(conversation_id: str, request_id: str) -> str:
-    """Unified clarify state key."""
-    return f"clarify:{conversation_id}:{request_id}"
+def confirm_key(conversation_id: str, request_id: str) -> str:
+    return f"confirm:{conversation_id}:{request_id}"
 
 
-def clarify_notify_key(conversation_id: str) -> str:
-    """Pub/sub channel for clarify response notifications."""
-    return f"clarify_notify:{conversation_id}"
-
-
-async def wait_for_clarify_response(
+async def wait_for_confirmation(
     conversation_id: str, request_id: str, timeout: int = 300, *, cancel_check: bool = False
 ) -> dict:
-    """Wait for the user's answer to a clarify modal.
+    """Wait for the user's answer to a confirmation/clarify modal.
 
     With cancel_check=True the wait also watches the conversation's cancel flag,
     so hitting 取消 unblocks a clarify-waiting agent immediately.
     """
-    key = clarify_key(conversation_id, request_id)
-    pubsub_key = clarify_notify_key(conversation_id)
+    key = confirm_key(conversation_id, request_id)
+    pubsub_key = f"confirm_notify:{conversation_id}"
     pubsub = get_redis().pubsub()
     await pubsub.subscribe(pubsub_key)
     try:
         # Check if already present
         val = await get_redis().get(key)
         if val:
-            data = _json.loads(val)
-            if data.get("choice"):
-                await get_redis().delete(key)
-                return data
-        # Wait via pub/sub notification
+            await get_redis().delete(key)
+            return _json.loads(val)
+        # Wait via pub/sub notification (much more efficient than polling)
         deadline = _asyncio.get_event_loop().time() + timeout
         while _asyncio.get_event_loop().time() < deadline:
             remaining = deadline - _asyncio.get_event_loop().time()
@@ -166,10 +156,8 @@ async def wait_for_clarify_response(
             if msg and msg["type"] == "message":
                 val = await get_redis().get(key)
                 if val:
-                    data = _json.loads(val)
-                    if data.get("choice"):
-                        await get_redis().delete(key)
-                        return data
+                    await get_redis().delete(key)
+                    return _json.loads(val)
             if cancel_check and await is_cancelled(conversation_id):
                 return {"choice": "已取消"}
         return {"choice": "超时"}
@@ -180,31 +168,18 @@ async def wait_for_clarify_response(
             await pubsub.aclose()
 
 
-async def respond_to_clarify(conversation_id: str, request_id: str, choice: str) -> None:
-    """User responds to a clarify request. Writes response and notifies waiters."""
-    key = clarify_key(conversation_id, request_id)
-    await get_redis().set(key, _json.dumps({"choice": choice}), ex=600)
-    await get_redis().publish(clarify_notify_key(conversation_id), request_id)
-
-
-# ── Backward-compatible aliases (remove after agent-side migration) ──
-
-def confirm_key(conversation_id: str, request_id: str) -> str:
-    return clarify_key(conversation_id, request_id)
-
-
-async def wait_for_confirmation(
-    conversation_id: str, request_id: str, timeout: int = 300, *, cancel_check: bool = False
-) -> dict:
-    return await wait_for_clarify_response(conversation_id, request_id, timeout, cancel_check=cancel_check)
-
-
 async def respond_to_confirmation(conversation_id: str, request_id: str, choice: str) -> None:
-    await respond_to_clarify(conversation_id, request_id, choice)
+    key = confirm_key(conversation_id, request_id)
+    await get_redis().set(key, _json.dumps({"choice": choice}), ex=300)
+    # Notify waiters via pub/sub
+    await get_redis().publish(f"confirm_notify:{conversation_id}", request_id)
 
 
-# ── Clarify bridge (runner <-> agent clarify_callback), protocol v2 ──
-# Kept for agent-side compatibility until agent switches to session/update only.
+# ── Clarify bridge (runner ↔ agent clarify_callback), protocol v2 ──
+# The agent RPUSHes its request onto a per-session LIST and BLPOPs the
+# per-clarify response LIST. BLPOP returns immediately even when the answer
+# was pushed *before* the agent started waiting — race-free by construction.
+
 
 def clarify_req_key(session_id: str) -> str:
     return f"hermes:clarify:req:{session_id}"

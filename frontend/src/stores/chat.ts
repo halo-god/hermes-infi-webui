@@ -373,27 +373,16 @@ export const useChatStore = defineStore("chat", () => {
       }
     }));
 
-    // Clarify v3 events (primary)
-    stream.on("clarification_request", scoped((ev) => {
+    stream.on("confirmation_request", scoped((ev) => {
+      // Dedupe: replay after reconnect (or modal restore) may re-deliver it
       if (pendingConfirmations.value.find((r) => r.id === ev.request.id)) return;
       pendingConfirmations.value.push(ev.request);
+      // Notify user
       const ns = useNotificationStore();
       ns.push({ title: "需要确认", body: ev.request.question || "AI 需要你的确认", kind: "warn" });
       if (document.hidden && "Notification" in window && Notification.permission === "granted") {
         new Notification("Hermes · 需要确认", { body: ev.request.question || "AI 需要你的确认", tag: "hermes-confirm" });
       }
-    }));
-
-    stream.on("clarification_response", scoped((ev) => {
-      pendingConfirmations.value = pendingConfirmations.value.filter(
-        (r) => r.id !== ev.request_id,
-      );
-    }));
-
-    // Backward compat: v2 event names
-    stream.on("confirmation_request", scoped((ev) => {
-      if (pendingConfirmations.value.find((r) => r.id === ev.request.id)) return;
-      pendingConfirmations.value.push(ev.request);
     }));
 
     stream.on("confirmation_response", scoped((ev) => {
@@ -570,10 +559,9 @@ export const useChatStore = defineStore("chat", () => {
     if (!activeId.value) return;
     const id = activeId.value;
     pendingConfirmations.value = pendingConfirmations.value.filter((r) => r.id !== requestId);
-    // Clarify v3: use /clarify endpoint (falls back to /confirm on error)
-    try { await conversationsApi.clarify(id, requestId, choice); } catch {
-      try { await conversationsApi.confirm(id, requestId, choice); } catch { /* ok */ }
-    }
+    // Tell the runner we responded (so it can unblock and continue the conversation)
+    try { await conversationsApi.confirm(id, requestId, choice); } catch { /* ok */ }
+    // Runner handles the follow-up turn internally — no need to sendSingle here
   }
 
   async function newConversationWithProfile(profileId: string): Promise<string> {

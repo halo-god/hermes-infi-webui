@@ -914,16 +914,11 @@ class Runner:
                     "questions": [{"question": question, "options": options, "allow_free_text": True}],
                     "options": options,
                 }
-                # Emit v3 + v2 events
-                await R.publish_event(
-                    conversation_id,
-                    {"type": "clarification_request", "message_id": acc["current_msg_id"], "request": req_payload},
-                )
                 await R.publish_event(
                     conversation_id,
                     {"type": "confirmation_request", "message_id": acc["current_msg_id"], "request": req_payload},
                 )
-                logger.info("Native clarification_request, sent SSE: %s", request_id)
+                logger.info("Native confirmation_request, sent SSE: %s", request_id)
                 # Wait for user response in background, then inject result into agent
                 t = asyncio.create_task(
                     self._wait_and_unblock_clarify(
@@ -1209,16 +1204,11 @@ class Runner:
             "questions": [{"question": question, "options": options, "allow_free_text": True}],
             "options": options,
         }
-        # Emit v3 event (primary) + v2 event (backward compat)
-        await R.publish_event(
-            conversation_id,
-            {"type": "clarification_request", "message_id": message_id, "request": req_payload},
-        )
         await R.publish_event(
             conversation_id,
             {"type": "confirmation_request", "message_id": message_id, "request": req_payload},
         )
-        logger.info("Clarify request, sent clarification_request: %s (sid=%s)", clarify_id, sid[:8])
+        logger.info("Clarify request, sent confirmation_request: %s (sid=%s)", clarify_id, sid[:8])
 
         t = asyncio.create_task(
             self._wait_and_unblock_clarify(
@@ -1235,7 +1225,7 @@ class Runner:
         """Wait for the user's modal answer (or cancel/timeout), then unblock
         the agent's clarify_callback and persist the outcome."""
         try:
-            resp = await R.wait_for_clarify_response(
+            resp = await R.wait_for_confirmation(
                 conversation_id, clarify_id,
                 timeout=settings.clarify_timeout_seconds, cancel_check=True,
             )
@@ -1246,17 +1236,12 @@ class Runner:
         logger.info("Clarify response for %s: %s", clarify_id[:8], choice)
 
         try:
-            # Emit v3 event (primary) + v2 event (backward compat)
-            await R.publish_event(
-                conversation_id,
-                {"type": "clarification_response", "request_id": clarify_id, "choice": choice},
-            )
             await R.publish_event(
                 conversation_id,
                 {"type": "confirmation_response", "request_id": clarify_id, "choice": choice},
             )
         except Exception:
-            logger.warning("Failed to publish clarification_response", exc_info=True)
+            logger.warning("Failed to publish confirmation_response", exc_info=True)
 
         if not await self._deliver_clarify_response(sid, clarify_id, choice):
             await asyncio.sleep(0.5)

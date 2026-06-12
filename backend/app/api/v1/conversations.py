@@ -34,7 +34,6 @@ from app.schemas.conversation import (
     ConversationDetail,
     ConversationOut,
     ConversationUpdate,
-    ClarifyRequest,
     ConfirmRequest,
     GroupCreate,
     AddMemberRequest,
@@ -597,20 +596,7 @@ async def confirm_action(
     db: AsyncSession = Depends(get_db),
 ):
     await _require_convo(db, conversation_id, user)
-    await redis_core.respond_to_clarify(str(conversation_id), payload.request_id, payload.choice)
-    return {"status": "ok"}
-
-
-@router.post("/{conversation_id}/clarify", status_code=200)
-async def clarify_action(
-    conversation_id: uuid.UUID,
-    payload: ClarifyRequest,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Clarify v3 endpoint. Same behavior as /confirm, clearer naming."""
-    await _require_convo(db, conversation_id, user)
-    await redis_core.respond_to_clarify(str(conversation_id), payload.request_id, payload.choice)
+    await redis_core.respond_to_confirmation(str(conversation_id), payload.request_id, payload.choice)
     return {"status": "ok"}
 
 

@@ -86,9 +86,6 @@ export const conversationsApi = {
   async confirm(id: string, requestId: string, choice: string): Promise<void> {
     await http.post(`/conversations/${id}/confirm`, { request_id: requestId, choice });
   },
-  async clarify(id: string, requestId: string, choice: string): Promise<void> {
-    await http.post(`/conversations/${id}/clarify`, { request_id: requestId, choice });
-  },
   async upload(id: string, file: File): Promise<WorkspaceFile> {
     const form = new FormData();
     form.append("file", file);
