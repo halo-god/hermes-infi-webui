@@ -67,7 +67,7 @@ def _handle_prompt(session_id: str, params: dict, req_id, persona: dict, emit_fi
         return
 
     # Emit confirmation_request for very short or question messages to demo the flow
-    if len(prompt_text) < 15 or prompt_text.endswith("?") or prompt_text.endswith("？"):
+    if prompt_text.endswith("?") or prompt_text.endswith("？"):
         _update(session_id, {
             "sessionUpdate": "confirmation_request",
             "request_id": str(_uuid.uuid4()),

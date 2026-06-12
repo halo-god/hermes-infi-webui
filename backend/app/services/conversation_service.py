@@ -216,19 +216,12 @@ _CLARIFY_PREAMBLE = (
     "当用户的请求有以下任一情况时，你必须先调用 clarify 工具，不要直接回答：\n"
     "- 请求模糊、有多种理解方式\n"
     "- 需要用户选择方向、风格、范围\n"
-    "- 涉及重要决策或有风险的操作\n"
-    "- 用户输入非常简短（少于10个字）\n\n"
+    "- 涉及重要决策或有风险的操作\n\n"
     "调用方式（必须是工具调用，不要输出文本格式）：\n"
     'clarify(question="问题", choices=["选项A", "选项B", "选项C"])\n'
     'clarify(question="你具体想要什么？")  # 无选项时用 open-ended\n\n'
     "禁止在回复文本中输出 [确认] 或类似的标记格式。必须通过工具调用 clarify。\n"
     "违反此规则会导致用户不满。记住：先问再做。"
-)
-
-_STRICT_MODE = (
-    "\n\n【严格模式】用户输入非常简短，你无法确定用户意图。"
-    "你必须先调用 clarify 工具询问用户想要什么，不要直接猜测并执行。"
-    "这是强制要求，不是建议。"
 )
 
 _ANTI_CLARIFY = (
@@ -256,10 +249,7 @@ def _clarify_directives(is_first_turn: bool, text: str) -> str:
         return ""
     if not is_first_turn:
         return ""
-    out = _CLARIFY_PREAMBLE
-    if len(text.strip()) < 15:
-        out += _STRICT_MODE
-    return out
+    return _CLARIFY_PREAMBLE
 
 
 async def send_user_only(
