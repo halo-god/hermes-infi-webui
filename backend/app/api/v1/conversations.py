@@ -430,6 +430,10 @@ async def conversation_ws(
             except (TypeError, ValueError):
                 continue
             action = payload.get("action")
+            # Handle ping/pong for keepalive
+            if action == "ping":
+                await websocket.send_text(json.dumps({"type": "pong"}))
+                continue
             if action == "send":
                 text = (payload.get("text") or "").strip()
                 if text:

@@ -255,3 +255,34 @@ async def wait_for_control_response(conversation_id: str, timeout: float = 15.0)
             await pubsub.unsubscribe(channel)
         with _suppress(Exception):
             await pubsub.aclose()
+
+
+# ── Cache helpers (for hot-path queries) ──
+_CACHE_PREFIX = "cache:"
+DEFAULT_CACHE_TTL = 300  # 5 minutes
+
+
+async def cache_get(key: str) -> str | None:
+    """Get a cached value by key."""
+    return await get_redis().get(f"{_CACHE_PREFIX}{key}")
+
+
+async def cache_set(key: str, value: str, ttl: int = DEFAULT_CACHE_TTL) -> None:
+    """Set a cached value with TTL."""
+    await get_redis().set(f"{_CACHE_PREFIX}{key}", value, ex=ttl)
+
+
+async def cache_delete(key: str) -> None:
+    """Delete a cached value."""
+    await get_redis().delete(f"{_CACHE_PREFIX}{key}")
+
+
+async def cache_delete_pattern(pattern: str) -> int:
+    """Delete all keys matching a pattern. Returns count of deleted keys."""
+    r = get_redis()
+    keys = []
+    async for key in r.scan_iter(f"{_CACHE_PREFIX}{pattern}"):
+        keys.append(key)
+    if keys:
+        return await r.delete(*keys)
+    return 0
