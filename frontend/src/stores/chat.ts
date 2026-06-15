@@ -181,8 +181,8 @@ export const useChatStore = defineStore("chat", () => {
         messages.value = [...older, ...messages.value];
         if (older.length < 50) hasMoreMessages.value = false;
       }
-    } catch {
-      // silently fail
+    } catch (e) {
+      console.error("[chat] loadMoreMessages failed:", e);
     } finally {
       loadingOlder.value = false;
     }
@@ -262,7 +262,9 @@ export const useChatStore = defineStore("chat", () => {
         const uploaded = await Promise.all(opts.stagedFiles.map((f) => conversationsApi.upload(id, f)));
         fileIds = uploaded.map((r) => r.id);
         files.value = [...files.value, ...uploaded];
-      } catch { /* upload failure is non-fatal */ }
+      } catch (e) {
+        console.error("[chat] file upload failed:", e);
+      }
     }
 
     // Check if this is a group conversation
@@ -385,7 +387,11 @@ export const useChatStore = defineStore("chat", () => {
     const id = activeId.value;
     pendingConfirmations.value = pendingConfirmations.value.filter((r) => r.id !== requestId);
     // Tell the runner we responded (so it can unblock and continue the conversation)
-    try { await conversationsApi.confirm(id, requestId, choice); } catch { /* ok */ }
+    try {
+      await conversationsApi.confirm(id, requestId, choice);
+    } catch (e) {
+      console.error("[chat] confirm response failed:", e);
+    }
     // Runner handles the follow-up turn internally — no need to sendSingle here
   }
 
