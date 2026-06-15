@@ -20,6 +20,9 @@ HTTP_LATENCY = Histogram(
 )
 LOGINS = Counter("hermes_logins_total", "Login attempts", ["result"])
 MESSAGES = Counter("hermes_messages_total", "Messages dispatched")
+# Failed access-token validations (expired/forged/revoked) and authz denials —
+# a spike here is a brute-force / token-probing signal.
+AUTH_FAILURES = Counter("hermes_auth_failures_total", "Auth failures", ["reason"])
 
 
 def _route_path(request: Request) -> str:

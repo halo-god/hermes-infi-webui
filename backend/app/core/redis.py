@@ -40,6 +40,67 @@ async def is_blacklisted(jti: str) -> bool:
     return bool(await get_redis().exists(f"{_BLACKLIST_PREFIX}{jti}"))
 
 
+# ── Per-user access-token revocation watermark ──
+# Bumped on password change / "log out everywhere": every token whose `iat`
+# predates this epoch is rejected. Covers the case where we can't enumerate
+# each outstanding jti individually.
+_REVOKE_PREFIX = "auth:revoke:"
+
+
+async def set_user_revoke_before(user_id: str, epoch_seconds: int, ttl_seconds: int) -> None:
+    await get_redis().set(
+        f"{_REVOKE_PREFIX}{user_id}", str(epoch_seconds), ex=max(ttl_seconds, 1)
+    )
+
+
+# ── Media tickets (SSE/WS/file-raw auth without a bearer token in the URL) ──
+# EventSource, WebSocket and <img>/<a> can't set an Authorization header, so the
+# client exchanges its bearer token for a short-lived, opaque, user-scoped
+# ticket and puts THAT in the URL. A leaked URL then exposes only ~5 min of
+# media access for that user — never the API-capable access token. The ticket is
+# reusable within its TTL so EventSource auto-reconnects don't break.
+import secrets as _secrets  # noqa: E402
+
+_MEDIA_TICKET_PREFIX = "media:ticket:"
+MEDIA_TICKET_TTL = 300  # seconds
+
+
+async def issue_media_ticket(user_id: str) -> tuple[str, int]:
+    token = _secrets.token_urlsafe(32)
+    await get_redis().set(f"{_MEDIA_TICKET_PREFIX}{token}", str(user_id), ex=MEDIA_TICKET_TTL)
+    return token, MEDIA_TICKET_TTL
+
+
+async def resolve_media_ticket(token: str | None) -> str | None:
+    """Return the ticket's user_id, or None if missing/expired/invalid."""
+    if not token:
+        return None
+    try:
+        return await get_redis().get(f"{_MEDIA_TICKET_PREFIX}{token}")
+    except Exception:
+        return None
+
+
+async def token_revocation_state(jti: str | None, user_id: str) -> tuple[bool, int]:
+    """One round-trip on the auth hot path: (jti blacklisted?, revoke-before epoch).
+
+    `revoke_before` is 0 when no watermark is set for the user. Fails open on a
+    Redis error (returns "not revoked") so a transient blip can't 401 every
+    request — same availability trade-off the login rate-limiter makes; access
+    tokens remain short-lived and signature-checked regardless.
+    """
+    try:
+        r = get_redis()
+        pipe = r.pipeline()
+        # exists() on a sentinel key when there's no jti keeps the pipeline shape stable.
+        pipe.exists(f"{_BLACKLIST_PREFIX}{jti}" if jti else f"{_BLACKLIST_PREFIX}\x00none")
+        pipe.get(f"{_REVOKE_PREFIX}{user_id}")
+        blacklisted, revoke_before = await pipe.execute()
+        return bool(blacklisted), int(revoke_before) if revoke_before else 0
+    except Exception:
+        return False, 0
+
+
 # ── ACP prompt queue (Redis Stream) + live event stream (per conversation) ──
 import json as _json  # noqa: E402
 

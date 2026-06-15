@@ -1,8 +1,21 @@
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import { authApi, type LoginPayload } from "@/api/auth";
-import { tokenStore } from "@/api/client";
+import { mediaTicket, tokenStore } from "@/api/client";
 import type { User } from "@/types";
+
+// Keep a live media ticket so SSE/WS/raw-file URLs never carry the access token.
+// Refreshed under the 5-min TTL so the synchronous raw-URL accessors stay valid.
+let _ticketTimer: ReturnType<typeof setInterval> | null = null;
+function startMediaTicket() {
+  void mediaTicket.ensure();
+  if (_ticketTimer) return;
+  _ticketTimer = setInterval(() => void mediaTicket.ensure(), 120_000);
+}
+function stopMediaTicket() {
+  if (_ticketTimer) { clearInterval(_ticketTimer); _ticketTimer = null; }
+  mediaTicket.clear();
+}
 
 export const useAuthStore = defineStore("auth", () => {
   const user = ref<User | null>(null);
@@ -17,6 +30,7 @@ export const useAuthStore = defineStore("auth", () => {
     const res = await authApi.login(payload);
     tokenStore.set(res.access_token, res.refresh_token);
     user.value = res.user;
+    startMediaTicket();
     return res.user;
   }
 
@@ -37,6 +51,7 @@ export const useAuthStore = defineStore("auth", () => {
     }
     try {
       user.value = await authApi.me();
+      startMediaTicket();
     } catch (e) {
       console.error("[auth] bootstrap failed:", e);
       tokenStore.clear();
@@ -52,6 +67,7 @@ export const useAuthStore = defineStore("auth", () => {
     } catch (e) {
       console.error("[auth] logout failed:", e);
     }
+    stopMediaTicket();
     tokenStore.clear();
     user.value = null;
   }

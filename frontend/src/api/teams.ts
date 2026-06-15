@@ -1,4 +1,4 @@
-import { http, tokenStore } from "./client";
+import { http, mediaTicket } from "./client";
 import type { Knowledge, Member, Team, TeamDetail, TeamPolicy } from "@/types";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api/v1";
@@ -63,8 +63,7 @@ export const teamsApi = {
     return r.data.content || "";
   },
   knowledgeRawUrl(id: string, kid: string): string {
-    const token = tokenStore.access || "";
-    return `${API_BASE}/teams/${id}/knowledge/${kid}/raw?access_token=${encodeURIComponent(token)}`;
+    return `${API_BASE}/teams/${id}/knowledge/${kid}/raw?ticket=${encodeURIComponent(mediaTicket.current())}`;
   },
   async updateKnowledgeContent(id: string, kid: string, content: string): Promise<string> {
     const r = await http.patch<{ content: string | null }>(`/teams/${id}/knowledge/${kid}`, { content });

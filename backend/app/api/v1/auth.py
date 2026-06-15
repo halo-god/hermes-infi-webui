@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import get_db
 from app.db.models.identity import IdentityProvider
 from app.db.models.user import User
-from app.deps import get_current_user
+from app.deps import _bearer, get_current_user
 from app.schemas.auth import (
     ChangePasswordRequest,
     LoginRequest,
@@ -71,8 +72,15 @@ async def refresh(req: RefreshRequest, db: AsyncSession = Depends(get_db)) -> To
 
 
 @router.post("/logout", status_code=204)
-async def logout(req: RefreshRequest | None = None) -> Response:
-    await auth_service.logout(req.refresh_token if req else None)
+async def logout(
+    req: RefreshRequest | None = None,
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> Response:
+    # Blacklist the access token (from the Authorization header) too, not just
+    # the refresh token — otherwise a logged-out access token stays valid until
+    # its exp. No auth dependency here: logout must work even with a stale token.
+    access = creds.credentials if creds else None
+    await auth_service.logout(req.refresh_token if req else None, access)
     return Response(status_code=204)
 
 
@@ -81,19 +89,36 @@ async def me(user: User = Depends(get_current_user)) -> User:
     return user
 
 
-@router.post("/change-password", status_code=204)
+@router.post("/stream-ticket")
+async def stream_ticket(user: User = Depends(get_current_user)) -> dict:
+    """Mint a short-lived media ticket for SSE/WS/file-raw URLs, so the browser
+    never has to put the API access token in a query string."""
+    from app.core import redis as redis_core
+
+    ticket, expires_in = await redis_core.issue_media_ticket(str(user.id))
+    return {"ticket": ticket, "expires_in": expires_in}
+
+
+@router.post("/change-password", response_model=TokenPair)
 async def change_password(
     req: ChangePasswordRequest,
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> Response:
+) -> TokenPair:
     from app.core.security import verify_password, hash_password
 
     if not user.password_hash or not verify_password(req.current_password, user.password_hash):
         raise HTTPException(status_code=400, detail="当前密码不正确")
     user.password_hash = hash_password(req.new_password)
     await db.commit()
-    return Response(status_code=204)
+    # Blacklist the caller's current access token (precise, beats the 1s watermark
+    # granularity), then bump the per-user watermark to kill every other session.
+    await auth_service.logout(None, creds.credentials if creds else None)
+    await auth_service.revoke_all_user_tokens(str(user.id))
+    # Hand the caller a fresh token pair so the device that changed the password
+    # stays signed in (its new tokens are issued at/after the watermark).
+    return auth_service.issue_tokens(user)
 
 
 @router.get("/providers", response_model=list[ProviderInfo])
@@ -217,6 +242,11 @@ def _wecom_callback_html(
 </script>
 </body></html>"""
     else:
+        # Scope postMessage to the app's own origin so tokens can never be
+        # delivered to an attacker-controlled opener. Falls back to same-origin
+        # when no public origin is configured.
+        import json as _json
+        target_origin = _json.dumps(settings.primary_origin or "/")
         content = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>企业微信登录</title></head>
 <body>
@@ -229,7 +259,7 @@ def _wecom_callback_html(
       type: 'wecom-callback',
       access_token: '{access_token}',
       refresh_token: '{refresh_token}'
-    }}, '*');
+    }}, {target_origin});
     setTimeout(function() {{ window.close(); }}, 500);
   }} else {{
     // Workbench / no-opener fallback: pass tokens via URL hash

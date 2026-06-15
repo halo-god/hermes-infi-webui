@@ -1,5 +1,5 @@
 import { http } from "./client";
-import { tokenStore } from "./client";
+import { mediaTicket } from "./client";
 import type {
   Conversation,
   ConversationDetail,
@@ -71,8 +71,7 @@ export const conversationsApi = {
     return (await http.get(`/conversations/${id}/files/${fileId}`)).data;
   },
   fileRawUrl(id: string, fileId: string): string {
-    const token = tokenStore.access || "";
-    return `${API_BASE}/conversations/${id}/files/${fileId}/raw?access_token=${encodeURIComponent(token)}`;
+    return `${API_BASE}/conversations/${id}/files/${fileId}/raw?ticket=${encodeURIComponent(mediaTicket.current())}`;
   },
   async patchFile(id: string, fileId: string, content: string): Promise<WorkspaceFile & { content: string }> {
     return (await http.patch(`/conversations/${id}/files/${fileId}`, { content })).data;

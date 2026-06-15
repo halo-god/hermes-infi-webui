@@ -69,5 +69,11 @@ def test_validate_for_production_flags_defaults():
 
 def test_validate_for_production_clean():
     s = Settings(secret_key="x" * 48, first_admin_password="some-strong-secret",
-                 storage_backend="db")
+                 storage_backend="db", debug=False)
     assert s.validate_for_production() == []
+
+
+def test_validate_for_production_flags_debug():
+    s = Settings(secret_key="x" * 48, first_admin_password="some-strong-secret",
+                 storage_backend="db", debug=True)
+    assert any("DEBUG" in p for p in s.validate_for_production())

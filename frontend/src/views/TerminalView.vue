@@ -3,7 +3,7 @@ import { onBeforeUnmount, onMounted, ref } from "vue";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { tokenStore } from "@/api/client";
+import { mediaTicket } from "@/api/client";
 
 const termContainer = ref<HTMLElement | null>(null);
 const connected = ref(false);
@@ -14,13 +14,13 @@ let fitAddon: FitAddon | null = null;
 let ws: WebSocket | null = null;
 let resizeObserver: ResizeObserver | null = null;
 
-function connect() {
+async function connect() {
   if (ws) return;
   connecting.value = true;
 
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const token = tokenStore.access || "";
-  ws = new WebSocket(`${proto}//${location.host}/api/v1/terminal/ws?token=${encodeURIComponent(token)}`);
+  const ticket = await mediaTicket.ensure();
+  ws = new WebSocket(`${proto}//${location.host}/api/v1/terminal/ws?ticket=${encodeURIComponent(ticket)}`);
 
   ws.onopen = () => {
     connected.value = true;

@@ -57,6 +57,50 @@ export const tokenStore = {
 
 export const http = axios.create({ baseURL: API_BASE, timeout: 20000 });
 
+/**
+ * Media tickets for SSE / WebSocket / file-raw URLs.
+ *
+ * EventSource, WebSocket and <img>/<a> can't send an Authorization header, so
+ * we never put the API access token in a URL. Instead we mint a short-lived,
+ * user-scoped, opaque ticket and embed THAT — a leaked URL then exposes only a
+ * few minutes of media access, never the API-capable token. `ensure()` is
+ * single-flight and refreshes before expiry; `current()` is the sync accessor
+ * for raw URLs (primed/refreshed by the auth store).
+ */
+let _ticket: string | null = null;
+let _ticketExp = 0;
+let _ticketInflight: Promise<string> | null = null;
+
+export const mediaTicket = {
+  current(): string {
+    return _ticket ?? "";
+  },
+  clear() {
+    _ticket = null;
+    _ticketExp = 0;
+  },
+  async ensure(): Promise<string> {
+    // Refresh well before the 5-min TTL so the cached value stays valid for the
+    // synchronous raw-URL accessors between auth-store refresh ticks.
+    if (_ticket && _ticketExp - Date.now() > 120_000) return _ticket;
+    if (!_ticketInflight) {
+      _ticketInflight = (async () => {
+        try {
+          const { data } = await http.post<{ ticket: string; expires_in: number }>(
+            "/auth/stream-ticket",
+          );
+          _ticket = data.ticket;
+          _ticketExp = Date.now() + data.expires_in * 1000;
+          return _ticket;
+        } finally {
+          _ticketInflight = null;
+        }
+      })();
+    }
+    return _ticketInflight;
+  },
+};
+
 // Attach access token.
 http.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   const t = tokenStore.access;
