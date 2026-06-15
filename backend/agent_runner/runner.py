@@ -11,6 +11,8 @@ Stability features:
   - Stale reclaim: stuck pending messages auto-claimed after 60s
   - Graceful shutdown: SIGTERM/SIGINT handled, ACP subprocesses cleaned up
   - Concurrency: up to MAX_CONCURRENT tasks processed in parallel
+  - Dead letter queue: failed tasks after MAX_RETRIES sent to DLQ
+  - Prometheus metrics: task counts, durations, session pool, Redis ops
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ import logging
 import os
 import re
 import signal
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -34,6 +37,13 @@ from app.db.models.conversation import Conversation, Message
 from agent_runner import discovery, storage
 from agent_runner.acp_client import ACPTimeout
 from agent_runner.session_pool import SessionPool
+from agent_runner.metrics import (
+    TASKS_ENQUEUED,
+    TASKS_COMPLETED,
+    TASKS_FAILED,
+    TASK_DURATION,
+    DLQ_MESSAGES,
+)
 
 logger = logging.getLogger("hermes.runner")
 
@@ -51,6 +61,8 @@ HEARTBEAT_INTERVAL = 10  # refresh lock every N seconds
 STALE_THRESHOLD_MS = 120_000  # 2 minutes — reclaim stuck pending messages
 RECLAIM_INTERVAL = 30   # check for stale messages every N seconds
 MAX_CONCURRENT = 5      # max tasks processed in parallel
+MAX_RETRIES = 3         # max retries before sending to DLQ
+DLQ_STREAM = "acp:dlq"  # dead letter queue stream
 
 
 class Runner:
@@ -62,6 +74,7 @@ class Runner:
         self._sem = asyncio.Semaphore(MAX_CONCURRENT)
         self._active_tasks: set[asyncio.Task] = set()
         self._bg_tasks: set[asyncio.Task] = set()
+        self._task_retries: dict[str, int] = {}  # entry_id -> retry count
 
     # ── Singleton lock ──
     async def _acquire_lock(self) -> bool:
@@ -142,6 +155,11 @@ class Runner:
         except ResponseError as e:
             if "BUSYGROUP" not in str(e):
                 raise
+        # Create DLQ stream if it doesn't exist
+        try:
+            await R.get_redis().xadd(DLQ_STREAM, {"_init": "1"}, maxlen=1000)
+        except Exception:
+            pass
 
     # ── Signal handling ──
     def _handle_signal(self, sig: int) -> None:
@@ -351,12 +369,45 @@ class Runner:
     async def _run_task(self, task_data: dict, entry_id: str) -> None:
         """Run a single task with semaphore-based concurrency limiting."""
         async with self._sem:
+            task_type = task_data.get("type", "unknown")
+            start_time = time.monotonic()
+            TASKS_ENQUEUED.labels(type=task_type).inc()
             logger.info("Starting task %s (active=%d/%d)",
                         entry_id, len(self._active_tasks), MAX_CONCURRENT)
             try:
                 await self.handle(task_data)
-            except Exception:
-                logger.exception("handle failed for %s", entry_id)
+                duration = time.monotonic() - start_time
+                TASK_DURATION.labels(type=task_type).observe(duration)
+                TASKS_COMPLETED.labels(type=task_type, status="success").inc()
+            except Exception as exc:
+                duration = time.monotonic() - start_time
+                TASK_DURATION.labels(type=task_type).observe(duration)
+                retries = self._task_retries.get(entry_id, 0)
+                if retries < MAX_RETRIES:
+                    self._task_retries[entry_id] = retries + 1
+                    logger.warning("Task %s failed (retry %d/%d): %s",
+                                   entry_id, retries + 1, MAX_RETRIES, exc)
+                    # Re-enqueue for retry
+                    try:
+                        await R.get_redis().xadd(
+                            settings.acp_stream, {"data": json.dumps(task_data)}
+                        )
+                    except Exception:
+                        logger.exception("Failed to re-enqueue task %s", entry_id)
+                else:
+                    # Max retries reached — send to DLQ
+                    logger.error("Task %s failed permanently after %d retries, sending to DLQ",
+                                 entry_id, MAX_RETRIES)
+                    TASKS_FAILED.labels(type=task_type, error=type(exc).__name__).inc()
+                    DLQ_MESSAGES.labels(reason="max_retries").inc()
+                    try:
+                        await R.get_redis().xadd(
+                            DLQ_STREAM,
+                            {"data": json.dumps(task_data), "error": str(exc), "entry_id": entry_id},
+                        )
+                    except Exception:
+                        logger.exception("Failed to send task %s to DLQ", entry_id)
+                    self._task_retries.pop(entry_id, None)
 
     def _on_task_done(self, task: asyncio.Task) -> None:
         """Clean up completed tasks from the active set."""
