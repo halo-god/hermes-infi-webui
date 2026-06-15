@@ -23,7 +23,8 @@ const i18n = createI18n({
 });
 
 export function setLocale(locale: string) {
-  (i18n.global.locale as any).value = locale;
+  // vue-i18n Composition API locale is a Ref<string>
+  (i18n.global.locale as unknown as { value: string }).value = locale;
   localStorage.setItem(I18N_KEY, locale);
 }
 

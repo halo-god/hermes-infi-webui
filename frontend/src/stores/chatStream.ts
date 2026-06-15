@@ -142,12 +142,14 @@ export function registerStreamHandlers(
 
   stream.on("usage", scoped((ev) => {
     const m = find(ev.message_id);
-    const usage: Record<string, number> = {};
-    if (ev.input_tokens != null) usage.input_tokens = ev.input_tokens;
-    if (ev.output_tokens != null) usage.output_tokens = ev.output_tokens;
-    if (ev.context_size != null) usage.context_size = ev.context_size;
-    if (ev.context_used != null) usage.context_used = ev.context_used;
-    if (m) m.usage = usage as any;
+    if (m) {
+      m.usage = {
+        input_tokens: ev.input_tokens || 0,
+        output_tokens: ev.output_tokens || 0,
+        context_size: ev.context_size,
+        context_used: ev.context_used,
+      };
+    }
     if (ev.context_size) {
       contextSize.value = ev.context_size;
       contextTokens.value = ev.context_used || 0;

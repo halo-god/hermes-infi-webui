@@ -166,7 +166,7 @@ watch(
 
 // Load project tasks when the active conversation has a project_id
 watch(
-  () => (activeConvo.value as any)?.project_id,
+  () => activeConvo.value?.project_id,
   async (pid) => {
     if (pid) {
       try { projectTasks.value = await projectsApi.tasks(pid); } catch { projectTasks.value = []; }
@@ -183,10 +183,10 @@ const convoTeamName = computed(() => {
   return tid ? chat.teams.find((t) => t.id === tid)?.name : null;
 });
 const convoProjectName = computed(() => {
-  return (activeConvo.value as any)?.project_name || null;
+  return activeConvo.value?.project_name || null;
 });
 const convoProjectId = computed(() => {
-  return (activeConvo.value as any)?.project_id || null;
+  return activeConvo.value?.project_id || null;
 });
 const TASK_STATUS_ICON: Record<string, string> = { todo: "○", doing: "►", done: "✓" };
 
@@ -428,7 +428,7 @@ const ctxTooltip = computed(() =>
 
 // ── Session controls ──
 const forking = ref(false);
-const sessionMode = ref<string>((activeConvo.value as any)?.session_mode || "ask");
+const sessionMode = ref<string>(activeConvo.value?.session_mode || "ask");
 const SESSION_MODES = [
   { id: "ask", label: "Ask", desc: "编辑需确认" },
   { id: "accept_edits", label: "Accept", desc: "自动审批工作区" },
