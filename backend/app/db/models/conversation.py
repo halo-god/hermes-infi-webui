@@ -55,6 +55,9 @@ class Conversation(UUIDPrimaryKey, Timestamps, Base):
 
 class Message(UUIDPrimaryKey, Timestamps, Base):
     __tablename__ = "messages"
+    __table_args__ = (
+        Index("ix_msg_conv_created", "conversation_id", "created_at", postgresql_using="btree"),
+    )
 
     conversation_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),

@@ -116,4 +116,14 @@ export default {
     pasteLink: "粘贴网页链接",
     attachFile: "附件",
   },
+  stream: {
+    toolCall: "调用工具",
+    newConversation: "新会话",
+    needsConfirmation: "需要确认",
+    aiNeedsConfirmation: "AI 需要你的确认",
+    autoConfirmed: "已自动确认",
+    aiReplyComplete: "AI 回复完成",
+    clickToView: "点击查看",
+    streamDisconnected: "SSE 连接断开",
+  },
 }

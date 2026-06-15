@@ -115,4 +115,14 @@ export default {
     pasteLink: "Paste Link",
     attachFile: "Attach",
   },
+  stream: {
+    toolCall: "Calling tool",
+    newConversation: "New conversation",
+    needsConfirmation: "Confirmation needed",
+    aiNeedsConfirmation: "AI needs your confirmation",
+    autoConfirmed: "Auto-confirmed",
+    aiReplyComplete: "AI reply complete",
+    clickToView: "Click to view",
+    streamDisconnected: "SSE connection lost",
+  },
 }
