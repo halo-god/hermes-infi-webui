@@ -36,6 +36,22 @@ async def readyz() -> dict:
     return {"ready": ready, "checks": checks}
 
 
+@router.get("/info")
+async def info() -> dict:
+    """Return system information for monitoring."""
+    import platform
+    import sys
+    from app.config import settings
+
+    return {
+        "app": settings.app_name,
+        "version": "0.1.0",
+        "environment": settings.environment,
+        "python": sys.version,
+        "platform": platform.platform(),
+    }
+
+
 @router.get("/config")
 async def get_config() -> dict:
     from app.config import settings
