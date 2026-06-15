@@ -37,7 +37,8 @@ export const useAuthStore = defineStore("auth", () => {
     }
     try {
       user.value = await authApi.me();
-    } catch {
+    } catch (e) {
+      console.error("[auth] bootstrap failed:", e);
       tokenStore.clear();
       user.value = null;
     } finally {
@@ -48,8 +49,8 @@ export const useAuthStore = defineStore("auth", () => {
   async function logout() {
     try {
       await authApi.logout(tokenStore.refresh);
-    } catch {
-      /* best-effort */
+    } catch (e) {
+      console.error("[auth] logout failed:", e);
     }
     tokenStore.clear();
     user.value = null;

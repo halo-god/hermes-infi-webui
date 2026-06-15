@@ -324,6 +324,30 @@ def _profile_dir(profile: Profile | None) -> str | None:
     return os.path.dirname(os.path.expanduser(profile.path))
 
 
+def _build_attached_prompt(text: str, attached: list[dict]) -> str:
+    """Build prompt text with attached files inlined.
+
+    Handles text truncation and empty file messages consistently.
+    Images are referenced as placeholders (actual image blocks handled separately).
+    """
+    if not attached:
+        return text
+    parts = []
+    for f in attached:
+        if f.get("is_image"):
+            parts.append(f"[图片附件: {f['name']}]")
+        else:
+            content = f.get("content", "")
+            if content:
+                orig_len = len(content)
+                if orig_len > 200000:
+                    content = content[:200000] + f"\n\n... [文件截断，共 {orig_len} 字符]"
+                parts.append(f"【附件: {f['name']}】\n```\n{content}\n```")
+            else:
+                parts.append(f"【附件: {f['name']}】（文件内容为空）")
+    return f"{text}\n\n" + "\n\n".join(parts)
+
+
 async def send_message(
     db: AsyncSession,
     convo: Conversation,
@@ -383,26 +407,7 @@ async def send_message(
     prompt_blocks: list[dict] = []
 
     # Text block: preambles + user message + inline file references
-    prompt_text = text
-    if attached:
-        text_parts = []
-        for f in attached:
-            if f.get("is_image"):
-                # Images go as separate ImageContentBlock, just reference in text
-                text_parts.append(f"[图片附件: {f['name']}]")
-            else:
-                # Text files: include inline as before (fallback for agents that don't support resource_link)
-                content = f.get("content", "")
-                if content:
-                    orig_len = len(content)
-                    if orig_len > 200000:
-                        content = content[:200000] + f"\n\n... [文件截断，共 {orig_len} 字符]"
-                    text_parts.append(f"【附件: {f['name']}】\n```\n{content}\n```")
-                else:
-                    text_parts.append(f"【附件: {f['name']}】（文件内容为空）")
-        if text_parts:
-            prompt_text = f"{text}\n\n" + "\n\n".join(text_parts)
-
+    prompt_text = _build_attached_prompt(text, attached)
     full_text = f"{_FILE_WRITE_PREAMBLE}{_clarify_directives(is_first_turn, text)}\n\n{prompt_text}"
     prompt_blocks.append({"type": "text", "text": full_text})
 
@@ -484,19 +489,7 @@ async def send_roundtable(
     await db.refresh(user_msg)
     await db.refresh(rt_msg)
 
-    prompt_text = text
-    if attached:
-        parts = []
-        for f in attached:
-            content = f.get("content", "")
-            if content:
-                if len(content) > 200000:
-                    content = content[:200000] + f"\n\n... [文件截断，共 {len(f.get('content', ''))} 字符]"
-                parts.append(f"【附件: {f['name']}】\n```\n{content}\n```")
-            else:
-                parts.append(f"【附件: {f['name']}】（文件内容为空）")
-        file_block = "\n\n".join(parts)
-        prompt_text = f"{text}\n\n{file_block}"
+    prompt_text = _build_attached_prompt(text, attached)
 
     # File-write instructions for roundtable agents; clarify is explicitly
     # disallowed here because nobody can answer a modal mid-roundtable.
