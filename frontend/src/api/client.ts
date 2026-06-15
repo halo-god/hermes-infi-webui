@@ -48,7 +48,8 @@ export const tokenStore = {
       this._access = data.access_token;
       localStorage.setItem(REFRESH_KEY, data.refresh_token);
       return true;
-    } catch {
+    } catch (e) {
+      console.error("[auth] token refresh failed:", e);
       this.clear();
       return false;
     }
@@ -120,7 +121,8 @@ async function doRefresh(): Promise<string | null> {
     });
     tokenStore.set(data.access_token, data.refresh_token);
     return data.access_token as string;
-  } catch {
+  } catch (e) {
+    console.error("[auth] token refresh failed:", e);
     tokenStore.clear();
     return null;
   }
