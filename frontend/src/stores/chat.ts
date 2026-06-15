@@ -90,8 +90,8 @@ export const useChatStore = defineStore("chat", () => {
       const seen = new Set(conversations.value.map((c) => c.id));
       conversations.value.push(...page.filter((c) => !seen.has(c.id)));
       hasMoreConversations.value = page.length >= CONVO_PAGE;
-    } catch {
-      // silent — keep what we have
+    } catch (e) {
+      console.error("[chat] loadMoreConversations failed:", e);
     } finally {
       loadingMoreConvos.value = false;
     }
