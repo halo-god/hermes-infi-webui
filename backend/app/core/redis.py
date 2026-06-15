@@ -40,6 +40,39 @@ async def is_blacklisted(jti: str) -> bool:
     return bool(await get_redis().exists(f"{_BLACKLIST_PREFIX}{jti}"))
 
 
+# ── Per-user access-token revocation watermark ──
+# Bumped on password change / "log out everywhere": every token whose `iat`
+# predates this epoch is rejected. Covers the case where we can't enumerate
+# each outstanding jti individually.
+_REVOKE_PREFIX = "auth:revoke:"
+
+
+async def set_user_revoke_before(user_id: str, epoch_seconds: int, ttl_seconds: int) -> None:
+    await get_redis().set(
+        f"{_REVOKE_PREFIX}{user_id}", str(epoch_seconds), ex=max(ttl_seconds, 1)
+    )
+
+
+async def token_revocation_state(jti: str | None, user_id: str) -> tuple[bool, int]:
+    """One round-trip on the auth hot path: (jti blacklisted?, revoke-before epoch).
+
+    `revoke_before` is 0 when no watermark is set for the user. Fails open on a
+    Redis error (returns "not revoked") so a transient blip can't 401 every
+    request — same availability trade-off the login rate-limiter makes; access
+    tokens remain short-lived and signature-checked regardless.
+    """
+    try:
+        r = get_redis()
+        pipe = r.pipeline()
+        # exists() on a sentinel key when there's no jti keeps the pipeline shape stable.
+        pipe.exists(f"{_BLACKLIST_PREFIX}{jti}" if jti else f"{_BLACKLIST_PREFIX}\x00none")
+        pipe.get(f"{_REVOKE_PREFIX}{user_id}")
+        blacklisted, revoke_before = await pipe.execute()
+        return bool(blacklisted), int(revoke_before) if revoke_before else 0
+    except Exception:
+        return False, 0
+
+
 # ── ACP prompt queue (Redis Stream) + live event stream (per conversation) ──
 import json as _json  # noqa: E402
 

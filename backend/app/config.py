@@ -64,6 +64,9 @@ class Settings(BaseSettings):
 
     # ── CORS ──
     cors_origins: list[str] = Field(default=["http://localhost:5173", "http://localhost:8080"])
+    # Public origin of the app (scheme://host[:port]); used to scope OAuth
+    # postMessage and absolute links. Empty ⇒ fall back to the first CORS origin.
+    app_base_url: str = Field(default="")
 
     # ── Bootstrap super admin (seeded on first run) ──
     first_admin_email: str = "admin@hermes.io"
@@ -141,17 +144,33 @@ class Settings(BaseSettings):
         return self.environment == "production"
 
     @property
+    def enforce_secure_config(self) -> bool:
+        """Non-dev environments must refuse to boot with insecure defaults."""
+        return self.environment in ("production", "staging")
+
+    @property
+    def primary_origin(self) -> str:
+        """The app's canonical public origin (for OAuth postMessage scoping)."""
+        return self.app_base_url or (self.cors_origins[0] if self.cors_origins else "")
+
+    @property
     def max_upload_bytes(self) -> int:
         return self.max_upload_mb * 1024 * 1024
 
     def validate_for_production(self) -> list[str]:
-        """Return a list of fatal misconfigurations for a production deploy.
+        """Return a list of fatal misconfigurations for a non-dev deploy.
 
         Empty list ⇒ safe to boot. Callers (startup) should refuse to start
-        when this is non-empty in production so insecure defaults never ship.
+        when this is non-empty in production/staging so insecure defaults and
+        debug mode never ship.
         """
         problems: list[str] = []
-        if self.secret_key.startswith("dev-") or len(self.secret_key) < 32:
+        weak_secret = (
+            self.secret_key.startswith("dev-")
+            or "change" in self.secret_key.lower()
+            or len(self.secret_key) < 32
+        )
+        if weak_secret:
             problems.append(
                 "SECRET_KEY is the insecure default (or <32 chars) — set a strong random value"
             )
@@ -161,6 +180,8 @@ class Settings(BaseSettings):
             )
         if self.storage_backend == "minio" and self.minio_secret_key == "hermes-minio-secret":
             problems.append("MINIO_SECRET_KEY is the default — override it")
+        if self.debug:
+            problems.append("DEBUG must be false outside development")
         return problems
 
 

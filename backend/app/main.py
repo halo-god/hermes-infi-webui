@@ -3,12 +3,15 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.v1 import api_router
 from app.config import settings
-from app.core.logging import configure_logging, logger
+from app.core.logging import configure_logging, logger, request_id_var
 from app.core.metrics import MetricsMiddleware, RequestIDMiddleware, TimeoutMiddleware, metrics_response
 from app.core.redis import close_redis, get_redis
 
@@ -18,12 +21,12 @@ async def lifespan(app: FastAPI):
     configure_logging()
     logger.info("Starting %s (%s)", settings.app_name, settings.environment)
 
-    # Fail fast on insecure defaults in production — never ship a forgeable
-    # JWT secret or a well-known admin password.
+    # Fail fast on insecure defaults in production/staging — never ship a
+    # forgeable JWT secret, a well-known admin password, or debug mode.
     problems = settings.validate_for_production()
     if problems:
         msg = "Insecure configuration: " + "; ".join(problems)
-        if settings.is_production:
+        if settings.enforce_secure_config:
             raise RuntimeError(msg)
         logger.warning("%s (allowed in %s)", msg, settings.environment)
 
@@ -63,6 +66,33 @@ def create_app() -> FastAPI:
     app.add_middleware(RequestIDMiddleware)
 
     app.include_router(api_router, prefix=settings.api_v1_prefix)
+
+    # ── Exception handlers ──────────────────────────────────────────────
+    # Preserve FastAPI's normal HTTP/validation responses, but never let an
+    # unhandled exception leak a Python traceback to the client. The full
+    # error is logged server-side with the request's correlation id.
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_exc(request: Request, exc: StarletteHTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail, "request_id": request_id_var.get()},
+            headers=getattr(exc, "headers", None),
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_exc(request: Request, exc: RequestValidationError):
+        return JSONResponse(
+            status_code=422,
+            content={"detail": exc.errors(), "request_id": request_id_var.get()},
+        )
+
+    @app.exception_handler(Exception)
+    async def _unhandled_exc(request: Request, exc: Exception):
+        logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "服务器内部错误", "request_id": request_id_var.get()},
+        )
 
     @app.get("/")
     async def root() -> dict:

@@ -82,10 +82,16 @@ async def refresh_tokens(db: AsyncSession, refresh_token: str) -> tuple[User, To
     if payload.get("type") != "refresh":
         raise HTTPException(status_code=401, detail="令牌类型错误")
     jti = payload.get("jti")
-    if jti and await redis_core.is_blacklisted(jti):
+    sub = str(payload["sub"])
+    blacklisted, revoke_before = await redis_core.token_revocation_state(jti, sub)
+    if blacklisted:
         raise HTTPException(status_code=401, detail="令牌已失效")
+    # Honour the per-user watermark so a password change / forced logout
+    # invalidates refresh tokens on every other device too.
+    if revoke_before and int(payload.get("iat", 0)) < revoke_before:
+        raise HTTPException(status_code=401, detail="登录状态已失效，请重新登录")
 
-    user = await user_service.get_by_id(db, _uuid(payload["sub"]))
+    user = await user_service.get_by_id(db, _uuid(sub))
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="用户不存在或已停用")
 
@@ -97,17 +103,32 @@ async def refresh_tokens(db: AsyncSession, refresh_token: str) -> tuple[User, To
     return user, issue_tokens(user)
 
 
-async def logout(refresh_token: str | None) -> None:
-    if not refresh_token:
-        return
-    try:
-        payload = decode_token(refresh_token)
-    except jwt.PyJWTError:
-        return
-    jti = payload.get("jti")
-    if jti:
-        ttl = max(int(payload["exp"]) - int(datetime.now(tz=timezone.utc).timestamp()), 1)
-        await redis_core.blacklist_jti(jti, ttl)
+async def logout(refresh_token: str | None, access_token: str | None = None) -> None:
+    """Revoke the session: blacklist both the refresh and the (still-valid)
+    access token so a logged-out token can't be replayed until its exp."""
+    now = int(datetime.now(tz=timezone.utc).timestamp())
+    for tok in (refresh_token, access_token):
+        if not tok:
+            continue
+        try:
+            payload = decode_token(tok)
+        except jwt.PyJWTError:
+            continue
+        jti = payload.get("jti")
+        if jti:
+            ttl = max(int(payload.get("exp", now)) - now, 1)
+            await redis_core.blacklist_jti(jti, ttl)
+
+
+async def revoke_all_user_tokens(user_id: str) -> None:
+    """Invalidate every outstanding token for a user (password change / forced
+    logout). Bumps the per-user watermark; tokens issued before now are rejected.
+
+    TTL outlives the longest-lived token so the watermark can't lapse early.
+    """
+    now = int(datetime.now(tz=timezone.utc).timestamp())
+    ttl = settings.refresh_token_ttl_days * 86_400 + 60
+    await redis_core.set_user_revoke_before(str(user_id), now, ttl)
 
 
 def _uuid(value: str):
