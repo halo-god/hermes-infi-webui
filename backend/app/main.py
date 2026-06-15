@@ -14,12 +14,16 @@ from app.config import settings
 from app.core.logging import configure_logging, logger, request_id_var
 from app.core.metrics import MetricsMiddleware, RequestIDMiddleware, TimeoutMiddleware, metrics_response
 from app.core.redis import close_redis, get_redis
+from app.core.tracing import setup_tracing, shutdown_tracing
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
     logger.info("Starting %s (%s)", settings.app_name, settings.environment)
+
+    # Setup OpenTelemetry tracing
+    setup_tracing(service_name=settings.app_name)
 
     # Fail fast on insecure defaults in production/staging — never ship a
     # forgeable JWT secret, a well-known admin password, or debug mode.
@@ -40,6 +44,7 @@ async def lifespan(app: FastAPI):
             raise RuntimeError(f"Redis unreachable at startup: {exc}") from exc
         logger.warning("Redis not reachable at startup: %s", exc)
     yield
+    shutdown_tracing()
     await close_redis()
     logger.info("Shutdown complete")
 
