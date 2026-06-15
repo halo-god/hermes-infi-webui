@@ -52,13 +52,25 @@ async def handle_clarify_request(
     conversation_id: str, message_id: str, acc: dict, sid: str, data: dict,
     bg_tasks: set,
 ) -> None:
-    """Present every clarify request to the user via the confirmation modal.
+    """Present clarify request to the user via the confirmation modal.
 
     Auto-resolve has been removed — all questions require human input.
+    If no options are provided, skip the modal and auto-resolve with empty answer.
     """
     clarify_id = data.get("clarify_id") or uuid.uuid4().hex[:12]
     question = data.get("question") or "需要确认"
-    options = data.get("options") or ["继续", "跳过"]
+    options = data.get("options") or []
+
+    # If no options provided, skip the modal and auto-resolve
+    if not options:
+        logger.info("Clarify request has no options, auto-resolving: %s (sid=%s)", clarify_id, sid[:8])
+        await _record_clarify(message_id, acc, {
+            "id": clarify_id, "question": question, "options": [],
+            "status": "auto-resolved", "ts": datetime.now(tz=timezone.utc).isoformat(),
+        })
+        # Deliver empty response to unblock agent
+        await deliver_clarify_response(sid, clarify_id, "")
+        return
 
     await _record_clarify(message_id, acc, {
         "id": clarify_id, "question": question, "options": options,
