@@ -27,7 +27,7 @@ RUN pip install --upgrade pip \
 # ── (optional) install the real Hermes Agent CLI ──
 # Enable with: docker build --build-arg INSTALL_HERMES=true
 ARG INSTALL_HERMES=false
-ENV PATH="/root/.local/bin:${PATH}"
+ENV PATH="/home/hermes/.local/bin:${PATH}"
 RUN if [ "$INSTALL_HERMES" = "true" ]; then \
         curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash \
         && (hermes --version || true) ; \
@@ -35,5 +35,11 @@ RUN if [ "$INSTALL_HERMES" = "true" ]; then \
 
 COPY backend/ ./
 RUN chmod +x scripts/run-agent.sh scripts/start.sh 2>/dev/null || true
+
+# Create non-root user for security
+RUN groupadd -r hermes && useradd -r -g hermes -d /app -s /sbin/nologin hermes \
+    && chown -R hermes:hermes /app
+
+USER hermes
 
 CMD ["./scripts/run-agent.sh"]

@@ -19,6 +19,12 @@ from app.schemas.auth import (
 )
 from app.config import settings
 from app.core import metrics, ratelimit
+from app.core.exceptions import (
+    AuthError,
+    InvalidCredentialsError,
+    AccountDisabledError,
+    ValidationError,
+)
 from app.auth_providers.base import ProviderError
 from app.schemas.user import UserOut
 from app.services import audit_service, auth_service
@@ -47,14 +53,24 @@ async def login(
 
     try:
         user = await auth_service.authenticate(db, req)
-    except HTTPException as exc:
+    except InvalidCredentialsError as exc:
         metrics.LOGINS.labels("fail").inc()
         await audit_service.record(
             action="auth.login", actor_name=who, target=who, ip=ip,
-            result="fail", meta={"reason": exc.detail}, db=db,
+            result="fail", meta={"reason": exc.message}, db=db,
         )
         await db.commit()
-        raise
+        raise HTTPException(status_code=401, detail=exc.message)
+    except AccountDisabledError as exc:
+        metrics.LOGINS.labels("fail").inc()
+        await audit_service.record(
+            action="auth.login", actor_name=who, target=who, ip=ip,
+            result="fail", meta={"reason": exc.message}, db=db,
+        )
+        await db.commit()
+        raise HTTPException(status_code=403, detail=exc.message)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.message)
     metrics.LOGINS.labels("ok").inc()
     tokens = auth_service.issue_tokens(user)
     await audit_service.record(
@@ -67,8 +83,11 @@ async def login(
 
 @router.post("/refresh", response_model=TokenPair)
 async def refresh(req: RefreshRequest, db: AsyncSession = Depends(get_db)) -> TokenPair:
-    _, tokens = await auth_service.refresh_tokens(db, req.refresh_token)
-    return tokens
+    try:
+        _, tokens = await auth_service.refresh_tokens(db, req.refresh_token)
+        return tokens
+    except AuthError as exc:
+        raise HTTPException(status_code=401, detail=exc.message)
 
 
 @router.post("/logout", status_code=204)
