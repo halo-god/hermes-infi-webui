@@ -7,11 +7,17 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import jwt
-from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core import redis as redis_core
+from app.core.exceptions import (
+    InvalidCredentialsError,
+    InvalidTokenError,
+    TokenRevokedError,
+    AccountDisabledError,
+    ValidationError,
+)
 from app.core.security import (
     create_token,
     decode_token,
@@ -26,15 +32,12 @@ from app.services import user_service
 
 async def authenticate_local(db: AsyncSession, username: str, password: str) -> User:
     user = await user_service.get_by_email(db, username)
-    invalid = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED, detail="账号或密码错误"
-    )
     if not user or not user.password_hash:
-        raise invalid
+        raise InvalidCredentialsError()
     if not verify_password(password, user.password_hash):
-        raise invalid
+        raise InvalidCredentialsError()
     if not user.is_active or user.status == "inactive":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账号已停用")
+        raise AccountDisabledError()
 
     # Transparent rehash on algorithm/param upgrade.
     if needs_rehash(user.password_hash):
@@ -48,14 +51,14 @@ async def authenticate_local(db: AsyncSession, username: str, password: str) -> 
 async def authenticate(db: AsyncSession, req: LoginRequest) -> User:
     if req.method == "local":
         if not req.username or not req.password:
-            raise HTTPException(status_code=422, detail="请输入账号与密码")
+            raise ValidationError("请输入账号与密码")
         return await authenticate_local(db, str(req.username), req.password)
 
     # External identity providers (LDAP/AD now; WeCom/SAML/OIDC scaffolded).
     from app.services import identity_service
 
     if not req.username or not req.password:
-        raise HTTPException(status_code=422, detail="请输入账号与密码")
+        raise ValidationError("请输入账号与密码")
     return await identity_service.authenticate_external(
         db, req.method, str(req.username), req.password
     )
@@ -77,23 +80,23 @@ async def refresh_tokens(db: AsyncSession, refresh_token: str) -> tuple[User, To
     try:
         payload = decode_token(refresh_token)
     except jwt.PyJWTError:
-        raise HTTPException(status_code=401, detail="刷新令牌无效")
+        raise InvalidTokenError("刷新令牌无效")
 
     if payload.get("type") != "refresh":
-        raise HTTPException(status_code=401, detail="令牌类型错误")
+        raise InvalidTokenError("令牌类型错误")
     jti = payload.get("jti")
     sub = str(payload["sub"])
     blacklisted, revoke_before = await redis_core.token_revocation_state(jti, sub)
     if blacklisted:
-        raise HTTPException(status_code=401, detail="令牌已失效")
+        raise TokenRevokedError("令牌已失效")
     # Honour the per-user watermark so a password change / forced logout
     # invalidates refresh tokens on every other device too.
     if revoke_before and int(payload.get("iat", 0)) < revoke_before:
-        raise HTTPException(status_code=401, detail="登录状态已失效，请重新登录")
+        raise TokenRevokedError("登录状态已失效，请重新登录")
 
     user = await user_service.get_by_id(db, _uuid(sub))
     if not user or not user.is_active:
-        raise HTTPException(status_code=401, detail="用户不存在或已停用")
+        raise InvalidTokenError("用户不存在或已停用")
 
     # Rotate: blacklist the consumed refresh jti until its natural expiry.
     if jti:
