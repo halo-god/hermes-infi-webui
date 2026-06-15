@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Date, DateTime, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -39,6 +39,9 @@ class Team(UUIDPrimaryKey, Timestamps, Base):
 
 class TeamMember(Timestamps, Base):
     __tablename__ = "team_members"
+    __table_args__ = (
+        Index("ix_team_member_user_team", "user_id", "team_id", postgresql_using="btree"),
+    )
 
     team_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), primary_key=True

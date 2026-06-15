@@ -5,6 +5,7 @@
  */
 import { conversationsApi } from "@/api/conversations";
 import { useNotificationStore } from "@/stores/notifications";
+import { useI18n } from "vue-i18n";
 import type { ConfirmationRequest, Message, StreamEvent } from "@/types";
 import type { Ref } from "vue";
 
@@ -117,13 +118,15 @@ export function registerStreamHandlers(
     if (merged && merged.status === "streaming") merged.text += ev.delta;
   }, activeId));
 
+  const { t } = useI18n();
+
   stream.on("tool_call", scoped((ev) => {
     const m = find(ev.message_id);
     if (m) {
       if (!m.steps) m.steps = [];
       const existing = m.steps.find((s) => s.title === ev.title);
       if (existing) existing.status = ev.status || existing.status;
-      else m.steps.push({ title: ev.title || "调用工具", status: ev.status || "running" });
+      else m.steps.push({ title: ev.title || t("stream.toolCall"), status: ev.status || "running" });
     }
   }, activeId));
 
@@ -156,7 +159,7 @@ export function registerStreamHandlers(
   stream.on("session_info", scoped((ev) => {
     if (ev.title) {
       const c = conversations.value.find((c) => c.id === activeId.value);
-      if (c && c.title === "新会话") c.title = ev.title;
+      if (c && c.title === t("stream.newConversation")) c.title = ev.title;
     }
   }, activeId));
 
@@ -178,9 +181,9 @@ export function registerStreamHandlers(
     if (pendingConfirmations.value.find((r) => r.id === ev.request.id)) return;
     pendingConfirmations.value.push(ev.request);
     const ns = useNotificationStore();
-    ns.push({ title: "需要确认", body: ev.request.question || "AI 需要你的确认", kind: "warn" });
+    ns.push({ title: t("stream.needsConfirmation"), body: ev.request.question || t("stream.aiNeedsConfirmation"), kind: "warn" });
     if (document.hidden && "Notification" in window && Notification.permission === "granted") {
-      new Notification("Hermes · 需要确认", { body: ev.request.question || "AI 需要你的确认", tag: "hermes-confirm" });
+      new Notification("Hermes · " + t("stream.needsConfirmation"), { body: ev.request.question || t("stream.aiNeedsConfirmation"), tag: "hermes-confirm" });
     }
   }, activeId));
 
@@ -192,7 +195,7 @@ export function registerStreamHandlers(
 
   stream.on("clarify_auto", scoped((ev) => {
     const ns = useNotificationStore();
-    ns.push({ title: "已自动确认", body: `${ev.question} → ${ev.choice}`, kind: "info" });
+    ns.push({ title: t("stream.autoConfirmed"), body: `${ev.question} → ${ev.choice}`, kind: "info" });
   }, activeId));
 
   stream.on("done", scoped((ev) => {
@@ -207,9 +210,9 @@ export function registerStreamHandlers(
     if (document.hidden || !activeId.value) {
       const ns = useNotificationStore();
       const text = (ev.text || m?.content?.text || "").slice(0, 80);
-      ns.push({ title: "AI 回复完成", body: text || "点击查看", kind: "success", link: `/?c=${activeId.value}` });
+      ns.push({ title: t("stream.aiReplyComplete"), body: text || t("stream.clickToView"), kind: "success", link: `/?c=${activeId.value}` });
       if (document.hidden && "Notification" in window && Notification.permission === "granted") {
-        new Notification("Hermes · AI 回复完成", { body: text || "点击查看", tag: "hermes-done" });
+        new Notification("Hermes · " + t("stream.aiReplyComplete"), { body: text || t("stream.clickToView"), tag: "hermes-done" });
       }
     }
     scheduleRefresh();
