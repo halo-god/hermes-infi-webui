@@ -416,20 +416,13 @@ async def get_knowledge_content(
 async def get_knowledge_raw(
     team_id: uuid.UUID, kid: uuid.UUID,
     request: Request,
-    access_token: str | None = Query(default=None),
+    ticket: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
 ):
     from fastapi.responses import Response
     from app.db.models.team import TeamKnowledge
-    from app.deps import user_from_access_token
-    token = access_token
-    if not token:
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[len("Bearer "):]
-    if not token:
-        raise HTTPException(status_code=401, detail="未认证")
-    user = await user_from_access_token(token, db)
+    from app.deps import user_from_ticket_or_header
+    user = await user_from_ticket_or_header(ticket, request, db)
     await svc.require_membership(db, team_id, user.id)
     k = await db.get(TeamKnowledge, kid)
     if k is None or k.team_id != team_id:

@@ -27,7 +27,7 @@ from app.core.files import read_upload_capped
 from app.db.base import async_session_maker, get_db
 from app.db.models.user import User
 from app.db.models.workspace import WorkspaceFile
-from app.deps import get_current_user, user_from_access_token
+from app.deps import get_current_user, user_from_media_ticket, user_from_ticket_or_header
 
 from app.schemas.conversation import (
     ConversationCreate,
@@ -330,7 +330,7 @@ _STREAM_ID_RE = re.compile(r"^\d+(-\d+)?$")
 async def stream(
     conversation_id: uuid.UUID,
     request: Request,
-    access_token: str = Query(..., description="access token (EventSource cannot set headers)"),
+    ticket: str = Query(..., description="media ticket (EventSource cannot set headers)"),
     since: str | None = Query(None, description="resume after this stream id (e.g. '1700000000000-0')"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -340,9 +340,10 @@ async def stream(
     there is no subscribe-after-publish loss, and reconnects replay: each SSE
     frame carries the stream entry as its `id`, EventSource resends it as the
     Last-Event-ID header on auto-reconnect (the `since` param covers manual
-    resume). No DB on the per-event path.
+    resume). No DB on the per-event path. Auth is a short-lived media ticket,
+    not the API access token — so a leaked stream URL can't call the API.
     """
-    user = await user_from_access_token(access_token, db)
+    user = await user_from_media_ticket(ticket, db)
     convo = await svc.get_conversation(db, conversation_id, user.id)
     if convo is None:
         raise HTTPException(status_code=404, detail="会话不存在")
@@ -387,14 +388,15 @@ async def stream(
 async def conversation_ws(
     websocket: WebSocket,
     conversation_id: uuid.UUID,
-    access_token: str = Query(...),
+    ticket: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
     """Bidirectional channel: client sends {action:'send'|'cancel', text?},
     server relays all conversation events (single + roundtable). Used by the
-    roundtable UI; one persistent socket per open conversation."""
+    roundtable UI; one persistent socket per open conversation. Auth is a
+    short-lived media ticket, not the API access token."""
     try:
-        user = await user_from_access_token(access_token, db)
+        user = await user_from_media_ticket(ticket, db)
     except HTTPException:
         await websocket.close(code=4401)
         return
@@ -493,19 +495,12 @@ async def get_file_raw(
     conversation_id: uuid.UUID,
     file_id: uuid.UUID,
     request: Request,
-    access_token: str | None = Query(default=None),
+    ticket: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
 ):
     from fastapi.responses import Response
 
-    token: str | None = access_token
-    if not token:
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[len("Bearer "):]
-    if not token:
-        raise HTTPException(status_code=401, detail="未认证")
-    user = await user_from_access_token(token, db)
+    user = await user_from_ticket_or_header(ticket, request, db)
     await _require_convo(db, conversation_id, user)
     f = await db.get(WorkspaceFile, file_id)
     if f is None or f.conversation_id != conversation_id:

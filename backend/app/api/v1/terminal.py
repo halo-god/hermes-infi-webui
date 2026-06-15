@@ -16,18 +16,14 @@ async def terminal_ws(
     websocket: WebSocket,
 ):
     """WebSocket PTY terminal. Spawns a shell process and bridges I/O."""
-    # Authenticate via query param token
-    token = websocket.query_params.get("token")
-    if not token:
-        await websocket.close(code=4001, reason="Missing token")
-        return
+    # Authenticate via a short-lived media ticket (WebSocket can't send headers,
+    # and a raw access token in the URL would leak into logs/history).
+    from app.core import redis as redis_core
 
-    # Verify token (simple JWT decode)
-    from app.core.security import decode_token
-
-    payload = decode_token(token)
-    if not payload:
-        await websocket.close(code=4001, reason="Invalid token")
+    ticket = websocket.query_params.get("ticket")
+    user_id = await redis_core.resolve_media_ticket(ticket)
+    if not user_id:
+        await websocket.close(code=4001, reason="Invalid ticket")
         return
 
     await websocket.accept()

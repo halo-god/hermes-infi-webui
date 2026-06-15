@@ -43,6 +43,20 @@ async def _create_tables():
     yield
 
 
+@pytest_asyncio.fixture(autouse=True)
+def _reset_redis_client():
+    """Drop the cached async Redis client around every test.
+
+    asyncio_mode=auto gives each test its own event loop; a client created in a
+    prior loop raises "attached to a different loop" when reused. Resetting the
+    module global forces a fresh, correctly-bound client per test.
+    """
+    import app.core.redis as _redis_mod
+    _redis_mod._client = None
+    yield
+    _redis_mod._client = None
+
+
 @pytest_asyncio.fixture
 async def db() -> AsyncGenerator[AsyncSession, None]:
     """Session wrapped in a transaction that rolls back after test."""

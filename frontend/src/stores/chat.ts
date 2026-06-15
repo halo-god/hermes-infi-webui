@@ -3,7 +3,7 @@ import { computed, ref } from "vue";
 import { conversationsApi } from "@/api/conversations";
 import { agentsApi } from "@/api/agents";
 import { teamsApi } from "@/api/teams";
-import { tokenStore } from "@/api/client";
+import { mediaTicket } from "@/api/client";
 import { useStream } from "@/composables/useStream";
 import { registerStreamHandlers } from "@/stores/chatStream";
 import type { ClarifyEntry, Conversation, Message, Team, WorkspaceFile, ConfirmationRequest, PlanEntry } from "@/types";
@@ -151,13 +151,14 @@ export const useChatStore = defineStore("chat", () => {
         }
         streamingConvoId.value = id;
         setupStreamHandlers();
-        const token = tokenStore.access;
         // Replay the in-flight turn from its start: the event stream is
         // durable, so tokens emitted while we were away are recovered.
         const sinceMs = Date.parse(streamingMsg.created_at);
         const since = Number.isFinite(sinceMs) ? `&since=${Math.max(sinceMs - 1, 0)}-0` : "";
-        const url = `${API_BASE}/conversations/${id}/stream?access_token=${encodeURIComponent(token || "")}${since}`;
-        await stream.openSSE(url);
+        await stream.openSSE(async () => {
+          const ticket = await mediaTicket.ensure();
+          return `${API_BASE}/conversations/${id}/stream?ticket=${encodeURIComponent(ticket)}${since}`;
+        });
       }
     } finally {
       loading.value = false;
@@ -329,9 +330,10 @@ export const useChatStore = defineStore("chat", () => {
     };
     messages.value.push(optimisticUser);
 
-    const token = tokenStore.access;
-    const url = `${API_BASE}/conversations/${id}/stream?access_token=${encodeURIComponent(token || "")}`;
-    await stream.openSSE(url);
+    await stream.openSSE(async () => {
+      const ticket = await mediaTicket.ensure();
+      return `${API_BASE}/conversations/${id}/stream?ticket=${encodeURIComponent(ticket)}`;
+    });
 
     const res = await conversationsApi.send(id, text, opts);
     // Replace the optimistic user message with the real one (server-assigned id)
@@ -347,12 +349,13 @@ export const useChatStore = defineStore("chat", () => {
     streamingConvoId.value = id;
     setupStreamHandlers();
 
-    const token = tokenStore.access;
     const wsBase = API_BASE.startsWith("http")
       ? API_BASE.replace(/^http/, "ws")
       : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${API_BASE}`;
-    const url = `${wsBase}/conversations/${id}/ws?access_token=${encodeURIComponent(token || "")}`;
-    await stream.openWS(url);
+    await stream.openWS(async () => {
+      const ticket = await mediaTicket.ensure();
+      return `${wsBase}/conversations/${id}/ws?ticket=${encodeURIComponent(ticket)}`;
+    });
 
     // Optimistic user bubble
     messages.value.push({

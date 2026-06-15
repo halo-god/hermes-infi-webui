@@ -1,5 +1,5 @@
 import { http } from "./client";
-import { tokenStore } from "./client";
+import { mediaTicket } from "./client";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api/v1";
 
@@ -47,7 +47,6 @@ export const filesApi = {
     return (await http.get(`/files/${fileId}/content`)).data;
   },
   rawUrl(fileId: string): string {
-    const token = tokenStore.access || "";
-    return `${API_BASE}/files/${fileId}/raw?access_token=${encodeURIComponent(token)}`;
+    return `${API_BASE}/files/${fileId}/raw?ticket=${encodeURIComponent(mediaTicket.current())}`;
   },
 };

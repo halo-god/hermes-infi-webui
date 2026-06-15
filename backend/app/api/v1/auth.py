@@ -89,6 +89,16 @@ async def me(user: User = Depends(get_current_user)) -> User:
     return user
 
 
+@router.post("/stream-ticket")
+async def stream_ticket(user: User = Depends(get_current_user)) -> dict:
+    """Mint a short-lived media ticket for SSE/WS/file-raw URLs, so the browser
+    never has to put the API access token in a query string."""
+    from app.core import redis as redis_core
+
+    ticket, expires_in = await redis_core.issue_media_ticket(str(user.id))
+    return {"ticket": ticket, "expires_in": expires_in}
+
+
 @router.post("/change-password", response_model=TokenPair)
 async def change_password(
     req: ChangePasswordRequest,

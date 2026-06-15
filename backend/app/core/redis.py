@@ -53,6 +53,34 @@ async def set_user_revoke_before(user_id: str, epoch_seconds: int, ttl_seconds: 
     )
 
 
+# ── Media tickets (SSE/WS/file-raw auth without a bearer token in the URL) ──
+# EventSource, WebSocket and <img>/<a> can't set an Authorization header, so the
+# client exchanges its bearer token for a short-lived, opaque, user-scoped
+# ticket and puts THAT in the URL. A leaked URL then exposes only ~5 min of
+# media access for that user — never the API-capable access token. The ticket is
+# reusable within its TTL so EventSource auto-reconnects don't break.
+import secrets as _secrets  # noqa: E402
+
+_MEDIA_TICKET_PREFIX = "media:ticket:"
+MEDIA_TICKET_TTL = 300  # seconds
+
+
+async def issue_media_ticket(user_id: str) -> tuple[str, int]:
+    token = _secrets.token_urlsafe(32)
+    await get_redis().set(f"{_MEDIA_TICKET_PREFIX}{token}", str(user_id), ex=MEDIA_TICKET_TTL)
+    return token, MEDIA_TICKET_TTL
+
+
+async def resolve_media_ticket(token: str | None) -> str | None:
+    """Return the ticket's user_id, or None if missing/expired/invalid."""
+    if not token:
+        return None
+    try:
+        return await get_redis().get(f"{_MEDIA_TICKET_PREFIX}{token}")
+    except Exception:
+        return None
+
+
 async def token_revocation_state(jti: str | None, user_id: str) -> tuple[bool, int]:
     """One round-trip on the auth hot path: (jti blacklisted?, revoke-before epoch).
 

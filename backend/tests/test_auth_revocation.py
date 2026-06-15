@@ -25,19 +25,17 @@ async def _require_redis():
         pytest.skip("Redis not reachable — revocation lives in Redis")
 
 
-async def _login(client: AsyncClient) -> tuple[str, str]:
-    """Log the seeded test_user in; returns (access, refresh)."""
-    resp = await client.post("/api/v1/auth/login", json={
-        "username": "test@hermes.io", "password": "Test@1234",
-    })
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    return body["access_token"], body["refresh_token"]
+def _tokens(test_user) -> tuple[str, str]:
+    """Issue a token pair directly — avoids the rate-limited /login path so the
+    test stays isolated from cross-test login-attempt bleed."""
+    from app.services import auth_service
+    pair = auth_service.issue_tokens(test_user)
+    return pair.access_token, pair.refresh_token
 
 
 @pytest.mark.asyncio
 async def test_logout_revokes_access_token(client: AsyncClient, test_user, _require_redis):
-    access, refresh = await _login(client)
+    access, refresh = _tokens(test_user)
     headers = {"Authorization": f"Bearer {access}"}
 
     # Valid before logout.
@@ -53,7 +51,7 @@ async def test_logout_revokes_access_token(client: AsyncClient, test_user, _requ
 
 @pytest.mark.asyncio
 async def test_logout_revokes_refresh_token(client: AsyncClient, test_user, _require_redis):
-    access, refresh = await _login(client)
+    access, refresh = _tokens(test_user)
     headers = {"Authorization": f"Bearer {access}"}
 
     await client.post("/api/v1/auth/logout", json={"refresh_token": refresh}, headers=headers)
@@ -65,7 +63,7 @@ async def test_logout_revokes_refresh_token(client: AsyncClient, test_user, _req
 
 @pytest.mark.asyncio
 async def test_change_password_revokes_old_returns_new(client: AsyncClient, test_user, _require_redis):
-    access, _ = await _login(client)
+    access, _ = _tokens(test_user)
     old_headers = {"Authorization": f"Bearer {access}"}
 
     resp = await client.post(

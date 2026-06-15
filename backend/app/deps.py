@@ -65,3 +65,36 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     return await user_from_access_token(creds.credentials, db)
+
+
+async def user_from_media_ticket(ticket: str | None, db: AsyncSession) -> User:
+    """Resolve a User from a short-lived media ticket (SSE/WS/file-raw URLs).
+
+    Tickets carry no API authority and expire fast — used where the browser
+    can't send an Authorization header.
+    """
+    user_id = await redis_core.resolve_media_ticket(ticket)
+    if not user_id:
+        raise _reject("bad_ticket", "票据无效或已过期")
+    try:
+        uid = uuid.UUID(user_id)
+    except ValueError:
+        raise _reject("bad_ticket", "票据无效或已过期")
+    user = await user_service.get_by_id(db, uid)
+    if user is None or not user.is_active:
+        raise _reject("inactive", "用户不存在或已停用")
+    return user
+
+
+async def user_from_ticket_or_header(
+    ticket: str | None, request, db: AsyncSession
+) -> User:
+    """Auth for file-raw downloads: prefer a media ticket (URL), fall back to a
+    Bearer header (programmatic callers). Never accepts a raw access token in the
+    query string."""
+    if ticket:
+        return await user_from_media_ticket(ticket, db)
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        return await user_from_access_token(auth_header[len("Bearer "):], db)
+    raise HTTPException(status_code=401, detail="未认证")

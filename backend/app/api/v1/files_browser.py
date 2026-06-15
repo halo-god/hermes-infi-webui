@@ -7,7 +7,7 @@ import uuid
 
 import urllib.parse
 
-from fastapi import APIRouter, Depends, File as FastApiFile, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File as FastApiFile, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models.conversation import Conversation, Message
 from app.db.models.user import User
 from app.db.models.workspace import WorkspaceFile
-from app.deps import get_current_user, get_db
+from app.deps import get_current_user, get_db, user_from_ticket_or_header
 from app.core import object_storage
 from app.core.files import read_upload_capped
 from app.config import settings
@@ -421,10 +421,12 @@ async def upload_standalone_file(
 @router.get("/files/{file_id}/raw")
 async def get_file_raw(
     file_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    request: Request,
+    ticket: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Download a standalone file by ID."""
+    """Download a standalone file by ID. Auth via media ticket (URL) or Bearer."""
+    user = await user_from_ticket_or_header(ticket, request, db)
     wf = await _require_file_owner(db, file_id, user)
 
     content: bytes | None = None
