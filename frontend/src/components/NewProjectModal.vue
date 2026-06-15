@@ -36,10 +36,10 @@ const form = reactive({
   icon: props.project?.icon || ICONS[0],
   summary: props.project?.summary || "",
   deadline: props.project?.deadline || defaultDeadline(),
-  sections: (props.project as any)?.sections || ["concept", "spec", "rollout"],
-  pinnedAgents: (props.project as any)?.pinned_agents || [] as string[],
-  members: props.project ? ((props.project as any)?.member_ids || []) : props.members.slice(0, 2).map((m) => m.user_id),
-  visibility: (props.project as any)?.visibility || "team",
+  sections: props.project?.sections || ["concept", "spec", "rollout"],
+  pinnedAgents: props.project?.pinned_agents || [] as string[],
+  members: props.project ? (props.project?.member_ids || []) : props.members.slice(0, 2).map((m) => m.user_id),
+  visibility: props.project?.visibility || "team",
 });
 
 const agentItems = computed(() => {

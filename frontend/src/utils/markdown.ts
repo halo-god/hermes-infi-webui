@@ -153,7 +153,7 @@ async function ensureMermaid() {
       theme: isDark ? "dark" : "default",
       securityLevel: "loose",
     });
-    (window as any).__mermaid = mermaid;
+    (window as Window & { __mermaid?: unknown }).__mermaid = mermaid;
     mermaidReady = true;
   } catch {
     // mermaid not available — skip diagram rendering
@@ -169,7 +169,7 @@ async function renderMermaidBlocks(html: string): Promise<string> {
   await ensureMermaid();
   if (!mermaidReady) return html;
 
-  const mermaid = (window as any).__mermaid;
+  const mermaid = (window as Window & { __mermaid?: { render: (id: string, code: string) => Promise<{ svg: string }> } }).__mermaid;
   // Replace <code class="language-mermaid"> with rendered SVG
   const regex = /<pre><code class="language-mermaid">([\s\S]*?)<\/code><\/pre>/g;
   const matches = [...html.matchAll(regex)];
@@ -177,6 +177,10 @@ async function renderMermaidBlocks(html: string): Promise<string> {
   for (const match of matches) {
     const code = md.utils.unescapeAll(match[1]);
     const id = `mermaid-${++mermaidId}`;
+    if (!mermaid) {
+      html = html.replace(match[0], `<div class="mermaid-error"><pre>${md.utils.escapeHtml(code)}</pre></div>`);
+      continue;
+    }
     try {
       const { svg } = await mermaid.render(id, code);
       html = html.replace(match[0], `<div class="mermaid-wrapper">${svg}</div>`);
@@ -214,7 +218,7 @@ export async function renderMarkdownAsync(src: string): Promise<string> {
  * Copy code button handler — attach to window for inline onclick.
  */
 if (typeof window !== "undefined") {
-  (window as any).copyCode = function (btn: HTMLButtonElement) {
+  (window as Window & { copyCode?: (btn: HTMLButtonElement) => void }).copyCode = function (btn: HTMLButtonElement) {
     const wrapper = btn.closest(".code-block-wrapper");
     if (!wrapper) return;
     const code = wrapper.querySelector("code");

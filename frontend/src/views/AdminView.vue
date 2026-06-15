@@ -162,10 +162,10 @@ function loadMore() {
   loadAudit();
 }
 async function loadSettings() {
-  const raw = (await adminApi.getSettings()).data ?? {};
+  const raw = (await adminApi.getSettings()).data ?? {} as Record<string, unknown>;
   settings.value = {
-    branding: { tenant_name: "", display: "Hermes", login_tagline: "", accent: "#b8852a", ...((raw as any).branding || {}) },
-    model_gateway: { default_model: "claude-sonnet-4-6", monthly_token_quota: 1000000, rate_limit_per_min: 20, overage: "soft", ...((raw as any).model_gateway || {}) },
+    branding: { tenant_name: "", display: "Hermes", login_tagline: "", accent: "#b8852a", ...((raw.branding as Record<string, unknown>) || {}) },
+    model_gateway: { default_model: "claude-sonnet-4-6", monthly_token_quota: 1000000, rate_limit_per_min: 20, overage: "soft", ...((raw.model_gateway as Record<string, unknown>) || {}) },
   };
 }
 async function loadRoles() {

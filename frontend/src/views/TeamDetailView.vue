@@ -684,7 +684,7 @@ async function deleteTeam() {
       :project-id="editingMembersProject.id"
       :project-name="editingMembersProject.name"
       :team-members="members"
-      :current-member-ids="(editingMembersProject as any).member_ids || []"
+      :current-member-ids="editingMembersProject.member_ids || []"
       @close="editingMembersProject = null"
       @updated="load()"
     />

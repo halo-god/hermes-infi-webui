@@ -381,8 +381,8 @@ async function saveNotifyPrefs() {
                 <div class="up-toggle-nm">{{ label }}</div>
               </div>
               <label class="cfg-toggle-wrap">
-                <input type="checkbox" v-model="(notifyPrefs as any)[key]" style="display:none" />
-                <span class="cfg-toggle" :class="{ on: (notifyPrefs as any)[key] }" @click="(notifyPrefs as any)[key] = !(notifyPrefs as any)[key]"></span>
+                <input type="checkbox" v-model="notifyPrefs[key as keyof typeof notifyPrefs]" style="display:none" />
+                <span class="cfg-toggle" :class="{ on: notifyPrefs[key as keyof typeof notifyPrefs] }" @click="notifyPrefs[key as keyof typeof notifyPrefs] = !notifyPrefs[key as keyof typeof notifyPrefs]"></span>
               </label>
             </div>
           </div>
