@@ -195,9 +195,16 @@ async function renderMermaidBlocks(html: string): Promise<string> {
   return html;
 }
 
+// ── Pre-processing: collapse excessive newlines ──
+function collapseNewlines(text: string): string {
+  // Replace 3+ consecutive newlines with 2 (preserves paragraph breaks)
+  return text.replace(/\n{3,}/g, "\n\n");
+}
+
 // ── Main export ──
 export function renderMarkdown(src: string): string {
-  let html = md.render(src || "");
+  const collapsed = collapseNewlines(src || "");
+  let html = md.render(collapsed);
   html = postProcessBlockquotes(html);
   html = postProcessKnowledgeRefs(html);
   return html;
@@ -208,7 +215,8 @@ export function renderMarkdown(src: string): string {
  * Use this in components that need diagrams.
  */
 export async function renderMarkdownAsync(src: string): Promise<string> {
-  let html = md.render(src || "");
+  const collapsed = collapseNewlines(src || "");
+  let html = md.render(collapsed);
   html = postProcessBlockquotes(html);
   html = postProcessKnowledgeRefs(html);
   return renderMermaidBlocks(html);
