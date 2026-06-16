@@ -45,12 +45,14 @@ export const useAuthStore = defineStore("auth", () => {
       }
       const restored = await tokenStore.restore();
       if (!restored) {
+        // Refresh token failed - user needs to login again
         ready.value = true;
         return;
       }
     }
     try {
       user.value = await authApi.me();
+      // Start media ticket AFTER successful auth - it needs valid access token
       startMediaTicket();
     } catch (e) {
       console.error("[auth] bootstrap failed:", e);
