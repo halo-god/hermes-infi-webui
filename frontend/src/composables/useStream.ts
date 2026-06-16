@@ -129,7 +129,8 @@ export function useStream() {
       let url: string;
       try {
         url = await urlFactory();
-      } catch {
+      } catch (e) {
+        console.warn("[stream] SSE url/ticket failed, will retry with backoff:", e);
         scheduleReconnect();  // couldn't mint a ticket → retry with backoff
         return;
       }
@@ -150,19 +151,34 @@ export function useStream() {
         connected.value = true;
         consecutiveErrors = 0;
         backoff = SSE_INITIAL_BACKOFF;
+        console.debug("[stream] SSE connected");
       };
     }
 
     void connect();
 
     return new Promise<void>((resolve) => {
+      let settled = false;
+      const done = (viaTimeout: boolean) => {
+        if (settled) return;
+        settled = true;
+        if (viaTimeout) {
+          // Resolved before the socket reported open. The connection may still
+          // be in flight — callers that rely on a durable `since` anchor are
+          // unaffected, but this flags the timing window that drops events when
+          // they don't.
+          console.warn(`[stream] SSE openSSE resolved via ${timeoutMs}ms timeout (not yet connected)`);
+        }
+        resolve();
+      };
       // Resolve once connected or after timeout
       const check = () => {
-        if (connected.value) { resolve(); return; }
+        if (settled) return;
+        if (connected.value) { done(false); return; }
         setTimeout(check, 100);
       };
       setTimeout(check, 100);
-      setTimeout(resolve, timeoutMs);
+      setTimeout(() => done(true), timeoutMs);
     });
   }
 

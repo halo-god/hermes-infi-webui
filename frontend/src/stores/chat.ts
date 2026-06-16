@@ -347,10 +347,20 @@ export const useChatStore = defineStore("chat", () => {
     };
     messages.value.push(optimisticUser);
 
+    // Anchor the stream BEFORE the POST. The runner publishes start/token/done
+    // only after the prompt is enqueued (post-POST), so anything from this
+    // anchor onward belongs to this turn. Passing `since` makes the SSE replay
+    // durable: even if the EventSource connects late (openSSE resolves on its
+    // timeout before the socket is truly open), the server replays from here
+    // instead of capturing last_id past the already-published events — which
+    // would otherwise leave the agent bubble blank while Redis holds the reply.
+    const since = `&since=${Math.max(Date.now() - 1, 0)}-0`;
+    console.debug(`[chat] sendSingle: opening SSE conv=${id} since=${since}`);
     await stream.openSSE(async () => {
       const ticket = await mediaTicket.ensure();
-      return `${API_BASE}/conversations/${id}/stream?ticket=${encodeURIComponent(ticket)}`;
+      return `${API_BASE}/conversations/${id}/stream?ticket=${encodeURIComponent(ticket)}${since}`;
     });
+    console.debug(`[chat] sendSingle: SSE ${stream.connected.value ? "connected" : "pending"}, POSTing message`);
 
     const res = await conversationsApi.send(id, text, opts);
     // Replace the optimistic user message with the real one (server-assigned id)
