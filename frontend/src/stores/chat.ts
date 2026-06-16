@@ -73,9 +73,14 @@ export const useChatStore = defineStore("chat", () => {
 
   async function loadConversations() {
     // First page; pagination state reset. Append further pages via loadMore.
-    const page = await conversationsApi.list({ limit: CONVO_PAGE, offset: 0 });
-    conversations.value = page;
-    hasMoreConversations.value = page.length >= CONVO_PAGE;
+    try {
+      const page = await conversationsApi.list({ limit: CONVO_PAGE, offset: 0 });
+      conversations.value = page;
+      hasMoreConversations.value = page.length >= CONVO_PAGE;
+    } catch (e) {
+      console.error("[chat] loadConversations failed:", e);
+      // Don't clear existing conversations on transient errors
+    }
   }
 
   async function loadMoreConversations() {

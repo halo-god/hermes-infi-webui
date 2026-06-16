@@ -79,6 +79,7 @@ export const mediaTicket = {
   clear() {
     _ticket = null;
     _ticketExp = 0;
+    _ticketInflight = null;
   },
   async ensure(): Promise<string> {
     // Refresh well before the 5-min TTL so the cached value stays valid for the
@@ -93,6 +94,9 @@ export const mediaTicket = {
           _ticket = data.ticket;
           _ticketExp = Date.now() + data.expires_in * 1000;
           return _ticket;
+        } catch (e) {
+          console.error("[media] failed to mint ticket:", e);
+          throw e; // Re-throw so SSE can retry
         } finally {
           _ticketInflight = null;
         }

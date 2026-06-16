@@ -10,6 +10,7 @@ import SearchPalette from "@/components/SearchPalette.vue";
 import NotificationPanel from "@/components/NotificationPanel.vue";
 import ToastContainer from "@/components/ToastContainer.vue";
 import { useChatStore } from "@/stores/chat";
+import { useAuthStore } from "@/stores/auth";
 import { usePresence } from "@/composables/usePresence";
 
 const chat = useChatStore();
@@ -38,11 +39,17 @@ function onKey(e: KeyboardEvent) {
   }
 }
 
-onMounted(() => {
-  chat.loadConversations();
-  chat.loadProfiles();
-  chat.loadTeams();
-  chat.loadConfig();
+onMounted(async () => {
+  // Ensure auth is ready before loading data
+  const auth = useAuthStore();
+  if (!auth.ready) await auth.bootstrap();
+
+  // Load data with individual error handling
+  chat.loadConversations().catch((e) => console.error("[layout] loadConversations:", e));
+  chat.loadProfiles().catch((e) => console.error("[layout] loadProfiles:", e));
+  chat.loadTeams().catch((e) => console.error("[layout] loadTeams:", e));
+  chat.loadConfig().catch((e) => console.error("[layout] loadConfig:", e));
+
   startHeartbeat();
   window.addEventListener("keydown", onKey);
   window.addEventListener("hermes:search", openSearch);
