@@ -446,10 +446,12 @@ async def conversation_ws(
                         continue
                     file_ids = payload.get("attached_file_ids") or []
                     p_id = payload.get("profileId") or payload.get("profile_id") or None
-                    async with async_session_maker() as db2:
-                        c = await svc.get_conversation(db2, conversation_id, user_id)
+                    # Use a fresh DB session for each message to avoid detached instances.
+                    # The initial `db` session is invalid after the first await in the loop.
+                    async with async_session_maker() as msg_db:
+                        c = await svc.get_conversation(msg_db, conversation_id, user_id)
                         if c:
-                            await svc.dispatch(db2, c, text, attached_file_ids=file_ids, owner_id=user_id, profile_id_override=p_id)
+                            await svc.dispatch(msg_db, c, text, attached_file_ids=file_ids, owner_id=user_id, profile_id_override=p_id)
             elif action == "cancel":
                 await redis_core.request_cancel(cid)
     except WebSocketDisconnect:
