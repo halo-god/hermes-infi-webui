@@ -3,7 +3,7 @@ import { computed, ref } from "vue";
 import { conversationsApi } from "@/api/conversations";
 import { agentsApi } from "@/api/agents";
 import { teamsApi } from "@/api/teams";
-import { mediaTicket } from "@/api/client";
+import { mediaTicket, tokenStore } from "@/api/client";
 import { useStream } from "@/composables/useStream";
 import { registerStreamHandlers } from "@/stores/chatStream";
 import type { ClarifyEntry, Conversation, Message, Team, WorkspaceFile, ConfirmationRequest, PlanEntry } from "@/types";
@@ -321,6 +321,16 @@ export const useChatStore = defineStore("chat", () => {
     closeStream();
     streamingConvoId.value = id;
     setupStreamHandlers();
+
+    // Ensure access token is available (restore if needed)
+    if (!tokenStore.access) {
+      const restored = await tokenStore.restore();
+      if (!restored) {
+        console.error("[chat] Cannot send message: no access token");
+        streamingConvoId.value = null;
+        return;
+      }
+    }
 
     // Optimistic user bubble — push BEFORE opening SSE so the user message
     // always appears above the agent's streaming bubble, even if SSE "start"
