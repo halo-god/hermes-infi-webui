@@ -5,7 +5,7 @@
  */
 import { conversationsApi } from "@/api/conversations";
 import { useNotificationStore } from "@/stores/notifications";
-import { useI18n } from "vue-i18n";
+import i18n from "@/i18n";
 import type { ConfirmationRequest, Message, StreamEvent } from "@/types";
 import type { Ref } from "vue";
 
@@ -118,7 +118,7 @@ export function registerStreamHandlers(
     if (merged && merged.status === "streaming") merged.text += ev.delta;
   }, activeId));
 
-  const { t } = useI18n();
+  const t = i18n.global.t;
 
   stream.on("tool_call", scoped((ev) => {
     const m = find(ev.message_id);
