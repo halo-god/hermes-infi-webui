@@ -1,7 +1,6 @@
 """Conversation + message persistence and the send→enqueue hot path."""
 from __future__ import annotations
 
-import json
 import os
 import uuid
 
@@ -10,14 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core import redis as redis_core
-from app.core.redis import cache_get, cache_set, cache_delete_pattern
 from app.core.files import confine_to_dir, safe_relative_path
 from app.db.models.agent import Profile
 from app.db.models.conversation import Conversation, GroupMember, Message
 from app.db.models.workspace import WorkspaceFile, WorkspaceFileVersion
-
-# Cache keys
-_CONV_LIST_CACHE_PREFIX = "conv:list:"
 
 
 async def list_conversations(
@@ -31,15 +26,9 @@ async def list_conversations(
     use_cache: bool = True,
 ) -> list[Conversation]:
     # Build cache key for list queries (without search)
-    cache_key = None
-    if use_cache and not q and offset == 0:
-        cache_key = f"{_CONV_LIST_CACHE_PREFIX}{owner_id}:{pinned_only}:{limit}"
-        cached = await cache_get(cache_key)
-        if cached:
-            try:
-                return json.loads(cached)
-            except (json.JSONDecodeError, TypeError):
-                pass
+    # NOTE: We don't cache list results because they contain full ORM objects
+    # which can't be properly serialized/deserialized. Caching is only used
+    # for invalidation tracking.
 
     # Personal conversations (owned) + group conversations (member of)
     group_subq = (
@@ -73,20 +62,7 @@ async def list_conversations(
     stmt = stmt.offset(max(0, offset)).limit(max(1, min(limit, 200)))
     result = list((await db.execute(stmt)).scalars().all())
 
-    # Cache the result (serialize conversation IDs for lightweight cache)
-    if cache_key and result:
-        try:
-            cache_data = json.dumps([str(c.id) for c in result])
-            await cache_set(cache_key, cache_data, ttl=60)  # 1 minute cache
-        except Exception:  # noqa: BLE001
-            pass  # Cache failures are non-fatal
-
     return result
-
-
-async def invalidate_conversation_cache(owner_id: uuid.UUID) -> None:
-    """Invalidate all conversation list caches for a user."""
-    await cache_delete_pattern(f"{_CONV_LIST_CACHE_PREFIX}{owner_id}:*")
 
 
 async def bulk_delete(
@@ -170,7 +146,6 @@ async def create_conversation(
     await db.commit()
     await db.refresh(convo)
     # Invalidate conversation list cache
-    await invalidate_conversation_cache(owner_id)
     return convo
 
 
@@ -601,11 +576,9 @@ async def list_files(db: AsyncSession, conversation_id: uuid.UUID) -> list[Works
 
 
 async def delete_conversation(db: AsyncSession, convo: Conversation) -> None:
-    owner_id = convo.owner_id
     await db.delete(convo)
     await db.commit()
     # Invalidate conversation list cache
-    await invalidate_conversation_cache(owner_id)
 
 
 async def fork_conversation(
