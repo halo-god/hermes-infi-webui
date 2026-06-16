@@ -37,22 +37,36 @@ export const tokenStore = {
   /**
    * Restore access token from refresh token on page reload.
    * Returns true if restoration succeeded.
+   * Uses a single-flight pattern to prevent concurrent refresh attempts.
    */
+  _restoreInflight: null as Promise<boolean> | null,
+
   async restore(): Promise<boolean> {
-    const refresh = localStorage.getItem(REFRESH_KEY);
-    if (!refresh) return false;
-    try {
-      const { data } = await axios.post(`${API_BASE}/auth/refresh`, {
-        refresh_token: refresh,
-      });
-      this._access = data.access_token;
-      localStorage.setItem(REFRESH_KEY, data.refresh_token);
-      return true;
-    } catch (e) {
-      console.error("[auth] token refresh failed:", e);
-      this.clear();
-      return false;
+    // Single-flight: prevent concurrent refresh attempts
+    if (this._restoreInflight) {
+      return this._restoreInflight;
     }
+
+    this._restoreInflight = (async () => {
+      const refresh = localStorage.getItem(REFRESH_KEY);
+      if (!refresh) return false;
+      try {
+        const { data } = await axios.post(`${API_BASE}/auth/refresh`, {
+          refresh_token: refresh,
+        });
+        this._access = data.access_token;
+        localStorage.setItem(REFRESH_KEY, data.refresh_token);
+        return true;
+      } catch (e) {
+        console.error("[auth] token refresh failed:", e);
+        this.clear();
+        return false;
+      } finally {
+        this._restoreInflight = null;
+      }
+    })();
+
+    return this._restoreInflight;
   },
 };
 

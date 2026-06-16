@@ -44,11 +44,31 @@ onMounted(async () => {
   const auth = useAuthStore();
   if (!auth.ready) await auth.bootstrap();
 
-  // Load data with individual error handling
-  chat.loadConversations().catch((e) => console.error("[layout] loadConversations:", e));
-  chat.loadProfiles().catch((e) => console.error("[layout] loadProfiles:", e));
-  chat.loadTeams().catch((e) => console.error("[layout] loadTeams:", e));
-  chat.loadConfig().catch((e) => console.error("[layout] loadConfig:", e));
+  // Wait for auth to be fully ready before loading data
+  // This prevents race condition where API calls happen before token is restored
+  await new Promise(resolve => setTimeout(resolve, 100));
+
+  // Load data sequentially to ensure token is available
+  try {
+    await chat.loadConversations();
+  } catch (e) {
+    console.error("[layout] loadConversations:", e);
+  }
+  try {
+    await chat.loadProfiles();
+  } catch (e) {
+    console.error("[layout] loadProfiles:", e);
+  }
+  try {
+    await chat.loadTeams();
+  } catch (e) {
+    console.error("[layout] loadTeams:", e);
+  }
+  try {
+    await chat.loadConfig();
+  } catch (e) {
+    console.error("[layout] loadConfig:", e);
+  }
 
   startHeartbeat();
   window.addEventListener("keydown", onKey);
