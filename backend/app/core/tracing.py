@@ -24,7 +24,7 @@ from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
     ConsoleSpanExporter,
 )
-from opentelemetry.sdk.trace.export.otlp.proto.grpc.trace_exporter import (
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
     OTLPSpanExporter,
 )
 
