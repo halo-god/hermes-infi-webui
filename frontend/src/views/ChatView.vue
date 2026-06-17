@@ -242,6 +242,11 @@ function getUserDisplay(msg: Message): { name: string; initials: string; color: 
 // ── Group: reply / reactions / edit / recall / typing ──
 const replyTarget = ref<{ id: string; label: string; snippet: string } | null>(null);
 const REACTION_EMOJIS = ["👍", "❤️", "😄", "🎉", "👀", "🙏"];
+const openEmojiFor = ref<string | null>(null);
+function toggleEmojiPicker(msgId: string) {
+  openEmojiFor.value = openEmojiFor.value === msgId ? null : msgId;
+}
+function closeEmojiPicker() { openEmojiFor.value = null; }
 
 function setReply(msg: Message) {
   const label = msg.role === "user"
@@ -1059,9 +1064,9 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                   </div>
                   <div v-if="!chat.messages[row.index].id.startsWith('tmp-')" class="group-actions">
                     <button title="回复" @click="setReply(chat.messages[row.index])"><Icon name="quote" :size="12" /></button>
-                    <div class="react-wrap">
-                      <button title="表情"><Icon name="thumbs_up" :size="12" /></button>
-                      <div class="react-pop">
+                    <div class="react-wrap" @mouseleave="closeEmojiPicker()">
+                      <button title="表情" @click.stop="toggleEmojiPicker(chat.messages[row.index].id)"><Icon name="thumbs_up" :size="12" /></button>
+                      <div v-if="openEmojiFor === chat.messages[row.index].id" class="react-pop">
                         <button v-for="e in REACTION_EMOJIS" :key="e" @click="toggleReaction(chat.messages[row.index], e)">{{ e }}</button>
                       </div>
                     </div>
@@ -1083,8 +1088,7 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                 <div v-if="chat.messages[row.index].role === 'agent' && chat.messages[row.index].status !== 'streaming'" class="msg-tools">
                   <button title="复制" @click="copyMessage(chat.messages[row.index].content.text)"><Icon name="copy" :size="12" /></button>
                   <button title="重新生成" @click="regenerate(chat.messages[row.index].id)"><Icon name="refresh" :size="12" /></button>
-                  <button title="引用回复" @click="quoteReply(chat.messages[row.index].content.text)"><Icon name="quote" :size="12" /></button>
-                  <button title="点赞"><Icon name="thumbs_up" :size="12" /></button>
+
                   <button title="分享" @click="shareMessage(chat.messages[row.index].conversation_id)"><Icon name="share" :size="12" /></button>
                 </div>
                 <!-- Smart follow-up suggestion chips -->
@@ -1240,7 +1244,7 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
   box-shadow: var(--shadow-md);
   z-index: 20;
 }
-.react-wrap:hover .react-pop { display: flex; }
+.react-pop { display: flex; }
 .react-pop button { font-size: 15px; padding: 2px 4px; border: none; background: transparent; cursor: pointer; border-radius: 5px; }
 .react-pop button:hover { background: var(--accent-tint); }
 .typing-indicator {
