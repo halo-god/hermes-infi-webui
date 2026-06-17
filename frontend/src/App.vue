@@ -4,10 +4,12 @@ import { darkTheme, NConfigProvider, NMessageProvider, NDialogProvider } from "n
 import { useAuthStore } from "@/stores/auth";
 import { useTheme } from "@/composables/useTheme";
 import { usePresence } from "@/composables/usePresence";
+import { useNotificationStream } from "@/composables/useNotificationStream";
 
 const auth = useAuthStore();
 const { theme } = useTheme();
 const { startHeartbeat, stopHeartbeat } = usePresence();
+const notifyStream = useNotificationStream();
 
 const naiveTheme = computed(() => (theme.value === "dark" ? darkTheme : null));
 const themeOverrides = computed(() => ({
@@ -27,6 +29,7 @@ onMounted(async () => {
   // Start heartbeat after bootstrap confirms user is authenticated
   if (auth.user) {
     startHeartbeat();
+    notifyStream.start();
   }
 });
 
@@ -34,8 +37,10 @@ onMounted(async () => {
 watch(() => auth.user, (user, oldUser) => {
   if (user && !oldUser) {
     startHeartbeat();
+    notifyStream.start();
   } else if (!user && oldUser) {
     stopHeartbeat();
+    notifyStream.stop();
   }
 });
 </script>

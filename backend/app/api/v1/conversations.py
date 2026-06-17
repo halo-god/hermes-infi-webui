@@ -35,10 +35,13 @@ from app.schemas.conversation import (
     ConversationOut,
     ConversationUpdate,
     ConfirmRequest,
+    EditMessageRequest,
     GroupCreate,
     AddMemberRequest,
     GroupMemberOut,
+    MarkReadResponse,
     MessageOut,
+    ReactionRequest,
     SendMessageRequest,
     SendMessageResponse,
     SetAgentsRequest,
@@ -77,12 +80,31 @@ async def _enrich_messages_with_files(
             {"id": str(f.id), "name": f.name, "kind": f.kind}
         )
 
+    # Batch-load referenced (reply-to) messages for the quote preview.
+    from app.db.models.conversation import Message as MessageModel
+    from app.schemas.conversation import ReplyRef
+
+    ref_ids = {m.reply_to_id for m in msgs if m.reply_to_id}
+    refs_by_id: dict[uuid.UUID, ReplyRef] = {}
+    if ref_ids:
+        rres = await db.execute(
+            select(MessageModel).where(MessageModel.id.in_(ref_ids))
+        )
+        for r in rres.scalars().all():
+            snippet = (r.content or {}).get("text") or ""
+            refs_by_id[r.id] = ReplyRef(
+                id=r.id, role=r.role, owner_id=r.owner_id,
+                agent_id=r.agent_id, snippet=snippet[:80],
+            )
+
     result = []
     for m in msgs:
         out = MessageOut.model_validate(m)
         file_list = files_by_msg.get(m.id)
         if file_list:
             out.content = {**out.content, "files": file_list}
+        if m.reply_to_id:
+            out.reply_to = refs_by_id.get(m.reply_to_id)
         result.append(out)
     return result
 
@@ -152,9 +174,17 @@ async def list_groups(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """列出用户参与的所有群聊。"""
+    """列出用户参与的所有群聊（附带未读数与@提醒标记）。"""
     convos = await svc.list_group_conversations(db, user.id)
-    return [ConversationOut.model_validate(c).model_dump() for c in convos]
+    summary = await svc.unread_summary(db, user.id, [c.id for c in convos])
+    out = []
+    for c in convos:
+        d = ConversationOut.model_validate(c).model_dump()
+        s = summary.get(str(c.id), {})
+        d["unread"] = s.get("unread", 0)
+        d["has_mention"] = s.get("mention", False)
+        out.append(d)
+    return out
 
 
 @router.get("/{conversation_id}", response_model=ConversationDetail)
@@ -285,6 +315,7 @@ async def send_message(
             owner_id=user.id,
             skip_agent=payload.skip_agent,
             profile_id_override=payload.profile_id,
+            reply_to_id=payload.reply_to_id,
         )
     else:
         user_msg, agent_msg = await svc.dispatch(
@@ -436,6 +467,14 @@ async def conversation_ws(
             if action == "ping":
                 await websocket.send_text(json.dumps({"type": "pong"}))
                 continue
+            if action == "typing":
+                # Ephemeral presence ping — broadcast to other members, not persisted.
+                await redis_core.publish_event(cid, {
+                    "type": "typing",
+                    "user_id": str(user_id),
+                    "name": payload.get("name") or "",
+                })
+                continue
             if action == "send":
                 text = (payload.get("text") or "").strip()
                 if text:
@@ -446,11 +485,26 @@ async def conversation_ws(
                         continue
                     file_ids = payload.get("attached_file_ids") or []
                     p_id = payload.get("profileId") or payload.get("profile_id") or None
+                    mentions = payload.get("mentions") or []
+                    reply_raw = payload.get("reply_to_id")
+                    reply_to_id = None
+                    if reply_raw:
+                        try:
+                            reply_to_id = uuid.UUID(str(reply_raw))
+                        except (ValueError, TypeError):
+                            reply_to_id = None
                     # Use a fresh DB session for each message to avoid detached instances.
                     # The initial `db` session is invalid after the first await in the loop.
                     async with async_session_maker() as msg_db:
                         c = await svc.get_conversation(msg_db, conversation_id, user_id)
-                        if c:
+                        if c and c.type == "group":
+                            # Group: route via @mentions (human↔human / human↔AI / roundtable).
+                            await svc.dispatch_group(
+                                msg_db, c, text, mentions,
+                                attached_file_ids=file_ids, owner_id=user_id,
+                                profile_id_override=p_id, reply_to_id=reply_to_id,
+                            )
+                        elif c:
                             await svc.dispatch(msg_db, c, text, attached_file_ids=file_ids, owner_id=user_id, profile_id_override=p_id)
             elif action == "cancel":
                 await redis_core.request_cancel(cid)
@@ -841,8 +895,10 @@ async def get_members(
     if convo.type != "group":
         raise HTTPException(status_code=400, detail="该会话不是群聊")
     members = await svc.get_group_members(db, conversation_id)
-    # Enrich with user names
+    # Enrich with user names + live presence (online/offline).
     from app.db.models.user import User as UserModel
+    human_ids = [str(m.user_id) for m in members if m.user_id]
+    presence = await redis_core.presence_status(human_ids) if human_ids else {}
     result = []
     for m in members:
         data = GroupMemberOut.model_validate(m).model_dump()
@@ -850,6 +906,7 @@ async def get_members(
             u = await db.get(UserModel, m.user_id)
             if u:
                 data["user_name"] = u.name or u.email or str(m.user_id)[:8]
+            data["presence"] = presence.get(str(m.user_id), "offline")
         result.append(data)
     return result
 
@@ -889,3 +946,77 @@ async def remove_member(
         raise HTTPException(status_code=400, detail="该会话不是群聊")
     # member_id could be user_id — try removing by user_id
     await svc.remove_group_member(db, conversation_id, user_id=member_id)
+
+
+# ── Read state · message edit / recall / reactions ──────────────────────────
+
+
+@router.post("/{conversation_id}/read", response_model=MarkReadResponse)
+async def mark_read(
+    conversation_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """把当前用户在该群聊的已读游标推进到现在。"""
+    await _require_convo(db, conversation_id, user)
+    last_read = await svc.mark_read(db, conversation_id, user.id)
+    return MarkReadResponse(ok=True, last_read_at=last_read)
+
+
+async def _require_message(db, conversation_id: uuid.UUID, message_id: uuid.UUID, user: User):
+    """加载消息并校验属于该会话 + 用户有权访问。"""
+    await _require_convo(db, conversation_id, user)
+    from app.db.models.conversation import Message as MessageModel
+    msg = await db.get(MessageModel, message_id)
+    if msg is None or msg.conversation_id != conversation_id:
+        raise HTTPException(status_code=404, detail="消息不存在")
+    return msg
+
+
+@router.patch("/{conversation_id}/messages/{message_id}", response_model=MessageOut)
+async def edit_message(
+    conversation_id: uuid.UUID,
+    message_id: uuid.UUID,
+    payload: EditMessageRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """编辑消息（仅作者本人、未撤回的用户消息）。"""
+    msg = await _require_message(db, conversation_id, message_id, user)
+    if msg.owner_id != user.id or msg.role != "user":
+        raise HTTPException(status_code=403, detail="只能编辑自己发送的消息")
+    if msg.deleted_at is not None:
+        raise HTTPException(status_code=400, detail="消息已撤回")
+    msg = await svc.edit_message(db, msg, payload.text)
+    return MessageOut.model_validate(msg)
+
+
+@router.delete("/{conversation_id}/messages/{message_id}", response_model=MessageOut)
+async def recall_message(
+    conversation_id: uuid.UUID,
+    message_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """撤回消息（作者本人，或群管理员）。"""
+    msg = await _require_message(db, conversation_id, message_id, user)
+    is_author = msg.owner_id == user.id
+    is_admin = await svc.is_group_admin(db, conversation_id, user.id)
+    if not is_author and not is_admin:
+        raise HTTPException(status_code=403, detail="无权撤回该消息")
+    msg = await svc.recall_message(db, msg)
+    return MessageOut.model_validate(msg)
+
+
+@router.post("/{conversation_id}/messages/{message_id}/reactions", response_model=MessageOut)
+async def toggle_reaction(
+    conversation_id: uuid.UUID,
+    message_id: uuid.UUID,
+    payload: ReactionRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """切换对某条消息的表情回应。"""
+    msg = await _require_message(db, conversation_id, message_id, user)
+    msg = await svc.toggle_reaction(db, msg, user.id, payload.emoji)
+    return MessageOut.model_validate(msg)

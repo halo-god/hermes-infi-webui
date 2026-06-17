@@ -143,4 +143,18 @@ export const conversationsApi = {
       profile_id: profileId || null,
     })).data;
   },
+
+  // ── Read state · message edit / recall / reactions ──
+  async read(id: string): Promise<{ ok: boolean; last_read_at: string | null }> {
+    return (await http.post(`/conversations/${id}/read`)).data;
+  },
+  async editMessage(id: string, messageId: string, text: string): Promise<Message> {
+    return (await http.patch(`/conversations/${id}/messages/${messageId}`, { text })).data;
+  },
+  async recallMessage(id: string, messageId: string): Promise<Message> {
+    return (await http.delete(`/conversations/${id}/messages/${messageId}`)).data;
+  },
+  async toggleReaction(id: string, messageId: string, emoji: string): Promise<Message> {
+    return (await http.post(`/conversations/${id}/messages/${messageId}/reactions`, { emoji })).data;
+  },
 };

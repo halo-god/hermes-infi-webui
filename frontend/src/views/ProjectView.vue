@@ -28,6 +28,19 @@ const uploadingDoc = ref(false);
 const agents = ref<Agent[]>([]);
 const editingTaskId = ref<string | null>(null);
 const editDraft = ref("");
+const openingGroup = ref(false);
+async function openProjectGroup() {
+  if (openingGroup.value) return;
+  openingGroup.value = true;
+  try {
+    const { channel } = await teamsApi.getProjectGroup(projectId);
+    router.push({ path: "/", query: { c: channel.id } });
+  } catch {
+    /* ignore */
+  } finally {
+    openingGroup.value = false;
+  }
+}
 const newTaskTitle = ref("");
 const menuOpen = ref(false);
 const editingProject = ref(false);
@@ -210,6 +223,7 @@ async function removeProject() {
           </div>
         </div>
         <div class="team-actions">
+          <button class="btn" :disabled="openingGroup" @click="openProjectGroup"><Icon name="users" /> 项目群聊</button>
           <button class="btn primary" @click="router.push({ path: '/', query: { project: projectId } })"><Icon name="chat" /> 在项目中开会话</button>
           <div style="position: relative">
             <button class="icon-btn" @click.stop="menuOpen = !menuOpen"><Icon name="settings" /></button>

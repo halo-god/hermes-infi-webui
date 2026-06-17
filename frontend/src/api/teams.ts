@@ -77,6 +77,9 @@ export const teamsApi = {
   async getChannel(id: string): Promise<{ channel: import("@/types").Conversation; channel_mode: string }> {
     return (await http.get(`/teams/${id}/channel`)).data;
   },
+  async getProjectGroup(projectId: string): Promise<{ channel: import("@/types").Conversation; channel_mode: string }> {
+    return (await http.get(`/projects/${projectId}/group`)).data;
+  },
   async setChannelMode(id: string, channel_mode: string): Promise<{ channel_mode: string }> {
     return (await http.patch(`/teams/${id}/channel/mode`, { channel_mode })).data;
   },

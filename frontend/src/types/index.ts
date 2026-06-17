@@ -150,6 +150,14 @@ export interface RoundtableContent {
   merged: { text: string; status: "pending" | "streaming" | "complete" | "cancelled" };
 }
 
+export interface ReplyRef {
+  id: string;
+  role: string;
+  owner_id?: string | null;
+  agent_id?: string | null;
+  snippet: string;
+}
+
 export interface Message {
   id: string;
   conversation_id: string;
@@ -164,6 +172,11 @@ export interface Message {
   thinking?: string;
   plan?: PlanEntry[];
   usage?: { input_tokens: number; output_tokens: number; context_size?: number; context_used?: number };
+  reply_to_id?: string | null;
+  reply_to?: ReplyRef | null;
+  edited_at?: string | null;
+  deleted_at?: string | null;
+  reactions?: Record<string, string[]>;
 }
 
 export interface Conversation {
@@ -184,6 +197,8 @@ export interface Conversation {
   project_name: string | null;
   created_at: string;
   updated_at: string;
+  unread?: number;
+  has_mention?: boolean;
 }
 
 export interface ConversationDetail extends Conversation {
@@ -197,6 +212,8 @@ export interface GroupMember {
   agent_id: string | null;
   role: "admin" | "member";
   joined_at: string;
+  last_read_at?: string | null;
+  presence?: string | null;
 }
 
 // Generic file item usable by both WorkspacePanel and KnowledgePanel.
@@ -289,6 +306,11 @@ export type StreamEvent = (
   | { type: "plan"; message_id: string; entries: PlanEntry[] }
   | { type: "usage"; message_id: string; input_tokens?: number; output_tokens?: number; context_size?: number; context_used?: number }
   | { type: "session_info"; title?: string }
+  | { type: "message"; message: Message }
+  | { type: "message_update"; message_id: string; patch: Partial<Message> }
+  | { type: "typing"; user_id: string; name?: string }
+  | { type: "members_changed" }
+  | { type: "notify"; title?: string; snippet?: string; mention?: boolean; unread?: number }
 ) & { conversation_id?: string };
 
 // ── Teams / projects / tasks (P3 backend; frontend added here) ──

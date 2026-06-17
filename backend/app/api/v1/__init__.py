@@ -1,7 +1,7 @@
 """Aggregate v1 API router."""
 from fastapi import APIRouter
 
-from app.api.v1 import admin, agents, analytics, auth, conversations, files_browser, health, memory, presence, teams, terminal, users
+from app.api.v1 import admin, agents, analytics, auth, conversations, files_browser, health, memory, notifications, presence, teams, terminal, users
 
 api_router = APIRouter()
 api_router.include_router(health.router, tags=["health"])
@@ -17,4 +17,5 @@ api_router.include_router(analytics.router, tags=["analytics"])
 api_router.include_router(files_browser.router, tags=["files"])
 api_router.include_router(terminal.router, tags=["terminal"])
 api_router.include_router(presence.router, tags=["presence"])
+api_router.include_router(notifications.router, tags=["notifications"])
 api_router.include_router(memory.router)

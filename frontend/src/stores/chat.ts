@@ -32,6 +32,9 @@ export const useChatStore = defineStore("chat", () => {
   const CONVO_PAGE = 100;
   const hasMoreConversations = ref(true);
   const loadingMoreConvos = ref(false);
+  // Group chat: persistent WS id + live typing indicators for the open group.
+  const groupStreamId = ref<string | null>(null);
+  const typingUsers = ref<{ user_id: string; name: string }[]>([]);
 
   // ── Stream composable ──
   const stream = useStream();
@@ -105,6 +108,38 @@ export const useChatStore = defineStore("chat", () => {
   function closeStream() {
     stream.close();
     stream.offAll();
+    groupStreamId.value = null;
+    typingUsers.value = [];
+  }
+
+  /** Open a persistent WebSocket for a group conversation (peer messages,
+   *  typing, agent turns all flow over this one socket while it's open). */
+  async function openGroupStream(id: string) {
+    setupStreamHandlers();
+    const wsBase = API_BASE.startsWith("http")
+      ? API_BASE.replace(/^http/, "ws")
+      : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${API_BASE}`;
+    await stream.openWS(async () => {
+      const ticket = await mediaTicket.ensure();
+      return `${wsBase}/conversations/${id}/ws?ticket=${encodeURIComponent(ticket)}`;
+    });
+    groupStreamId.value = id;
+  }
+
+  /** Mark the open group as read and clear its local unread badge. */
+  async function markRead(id: string) {
+    try {
+      await conversationsApi.read(id);
+    } catch { /* non-fatal */ }
+    const c = conversations.value.find((c) => c.id === id);
+    if (c) { c.unread = 0; c.has_mention = false; }
+  }
+
+  /** Broadcast an ephemeral typing ping over the open group socket. */
+  function sendTyping(name: string) {
+    if (groupStreamId.value && groupStreamId.value === activeId.value) {
+      stream.send({ action: "typing", name });
+    }
   }
 
   async function openConversation(id: string) {
@@ -135,6 +170,14 @@ export const useChatStore = defineStore("chat", () => {
       }
       syncActiveProfiles();
       files.value = await conversationsApi.files(id);
+
+      // Group chat: open a persistent WS for realtime peer messages + typing,
+      // and mark the channel read (clears its unread/@ badge).
+      if (detail.type === "group") {
+        await openGroupStream(id);
+        markRead(id).catch(() => {});
+        return;
+      }
 
       // Reconnect SSE if conversation has a streaming message
       const streamingMsg = messages.value.find((m) => m.status === "streaming");
@@ -230,7 +273,9 @@ export const useChatStore = defineStore("chat", () => {
 
   function refreshAfterTurn() {
     streamingConvoId.value = null;
-    closeStream();
+    // Keep a group's persistent WS open so peer messages keep flowing; only
+    // tear down the per-turn SSE/WS of a personal conversation.
+    if (!groupStreamId.value) closeStream();
     if (activeId.value) {
       conversationsApi.files(activeId.value).then((f) => (files.value = f)).catch(() => {});
     }
@@ -248,6 +293,7 @@ export const useChatStore = defineStore("chat", () => {
       contextTokens,
       contextSize,
       files,
+      typingUsers,
       find,
       refreshAfterTurn,
     });
@@ -256,7 +302,7 @@ export const useChatStore = defineStore("chat", () => {
   async function send(
     text: string,
     agentId = "hermes",
-    opts?: { profileId?: string; webSearch?: boolean; deepThink?: boolean; stagedFiles?: File[]; mentions?: string[] },
+    opts?: { profileId?: string; webSearch?: boolean; deepThink?: boolean; stagedFiles?: File[]; mentions?: string[]; replyToId?: string },
   ) {
     if (!activeId.value) await newConversation(agentId, opts?.profileId);
     const id = activeId.value!;
@@ -276,40 +322,42 @@ export const useChatStore = defineStore("chat", () => {
     const activeConvo = conversations.value.find((c) => c.id === id);
     const isGroup = activeConvo?.type === "group";
 
-    if (isGroup && opts?.mentions?.length) {
-      // Group chat with @mentions: use sendWithMentions
-      closeStream();
-      streamingConvoId.value = id;
-      const res = await conversationsApi.sendWithMentions(id, text, opts.mentions, fileIds, opts.profileId);
-      handleSendResponse(res);
-    } else if (isGroup && !opts?.mentions?.length) {
-      // Group chat without mentions: pure human-to-human, skip agent
-      closeStream();
-      streamingConvoId.value = id;
-      const res = await conversationsApi.sendWithMentions(id, text, [], fileIds, opts?.profileId);
-      handleSendResponse(res);
+    if (isGroup) {
+      // Group chat: send over the persistent WS so peer/agent events + typing
+      // all flow back over one socket. dispatch_group routes server-side.
+      if (groupStreamId.value !== id) await openGroupStream(id);
+      const mentions = opts?.mentions || [];
+      // An agent reply is expected when an AI is @-ed, all-AI is requested, or
+      // the channel auto-replies (always mode) without an @所有真人 broadcast.
+      const expectAgent =
+        mentions.some((m) => m === "__all_agents__" || (!m.startsWith("user:") && m !== "__all_humans__")) ||
+        (activeConvo?.channel_mode === "always" && !mentions.includes("__all_humans__"));
+      if (expectAgent) streamingConvoId.value = id;
+      // Optimistic user bubble — reconciled by the `message` echo (same text).
+      messages.value.push({
+        id: `tmp-${crypto.randomUUID?.() ?? Math.random().toString(36).slice(2) + Date.now().toString(36)}`,
+        conversation_id: id,
+        owner_id: null,
+        role: "user",
+        agent_id: null,
+        content: { text },
+        status: "complete",
+        created_at: new Date().toISOString(),
+      });
+      stream.send({
+        action: "send",
+        text,
+        mentions,
+        reply_to_id: opts?.replyToId,
+        profileId: opts?.profileId,
+        attached_file_ids: fileIds,
+      });
     } else {
       // Personal conversation: existing logic
       const passOpts = { profileId: opts?.profileId, fileIds };
       if (activeAgents.value.length > 1) await sendRoundtable(id, text, passOpts);
       else await sendSingle(id, text, passOpts);
     }
-  }
-
-  function handleSendResponse(res: { user_message: Message; agent_message: Message | null }) {
-    // Ensure user message is in the list
-    if (!messages.value.find((m) => m.id === res.user_message.id)) {
-      messages.value.push(res.user_message);
-    }
-    if (res.agent_message) {
-      if (!messages.value.find((m) => m.id === res.agent_message!.id)) {
-        messages.value.push(res.agent_message);
-      }
-      if (res.agent_message.status === "streaming") {
-        streamingConvoId.value = activeId.value;
-      }
-    }
-    refreshAfterTurn();
   }
 
   function isActivelyStreaming(id: string) {
@@ -493,5 +541,9 @@ export const useChatStore = defineStore("chat", () => {
     deleteConversation,
     respondConfirmation,
     isActivelyStreaming,
+    typingUsers,
+    groupStreamId,
+    markRead,
+    sendTyping,
   };
 });

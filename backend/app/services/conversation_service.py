@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import os
 import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import json as _json
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -332,17 +335,20 @@ async def send_message(
     system_prompt: str | None = None,
     existing_user_msg: Message | None = None,
     profile_dir: str | None = None,
+    agent_id_override: str | None = None,
 ) -> tuple[Message, Message]:
     """Persist the user turn + an empty streaming agent turn, then enqueue ACP work.
 
     The per-token hot path does NOT touch the DB — the runner streams events
     and writes the agent message once on completion. Pass existing_user_msg
     when the caller already persisted the user turn (group dispatch) to avoid
-    a duplicate user row.
+    a duplicate user row. Pass agent_id_override to attribute the reply to a
+    specific @-mentioned agent without mutating the conversation's default.
     """
     # NOTE: read acp_session_id before any commit expires the instance —
     # _clarify_directives needs it to detect first-turn vs follow-up.
     is_first_turn = convo.acp_session_id is None
+    reply_agent_id = agent_id_override or convo.primary_agent_id
 
     attached = await _resolve_attached_files(db, attached_file_ids or [], conversation_id=str(convo.id))
     if existing_user_msg is None:
@@ -362,7 +368,7 @@ async def send_message(
     agent_msg = Message(
         conversation_id=convo.id,
         role="agent",
-        agent_id=convo.primary_agent_id,
+        agent_id=reply_agent_id,
         content={"text": ""},
         status="streaming",
     )
@@ -415,7 +421,7 @@ async def send_message(
             "type": "single",
             "conversation_id": str(convo.id),
             "message_id": str(agent_msg.id),
-            "agent_id": convo.primary_agent_id,
+            "agent_id": reply_agent_id,
             "text": full_text,
             "content_blocks": prompt_blocks if len(prompt_blocks) > 1 else None,
             "system_prompt": system_prompt,
@@ -435,16 +441,24 @@ async def send_roundtable(
     system_prompt: str | None = None,
     mentions: list[str] | None = None,
     profile_dir: str | None = None,
+    existing_user_msg: Message | None = None,
 ) -> tuple[Message, Message]:
     """Multi-agent turn: one roundtable message holding per-agent replies + a
-    synthesized merge. The runner streams each reply in parallel, then merges."""
+    synthesized merge. The runner streams each reply in parallel, then merges.
+
+    Pass existing_user_msg when the caller already persisted the user turn
+    (group dispatch) to avoid a duplicate user row.
+    """
     attached = await _resolve_attached_files(db, attached_file_ids or [], conversation_id=str(convo.id))
-    user_content: dict = {"text": text}
-    if attached:
-        user_content["files"] = attached
-    user_msg = Message(
-        conversation_id=convo.id, owner_id=owner_id, role="user", content=user_content, mentions=mentions or [], status="complete"
-    )
+    if existing_user_msg is None:
+        user_content: dict = {"text": text}
+        if attached:
+            user_content["files"] = attached
+        user_msg = Message(
+            conversation_id=convo.id, owner_id=owner_id, role="user", content=user_content, mentions=mentions or [], status="complete"
+        )
+    else:
+        user_msg = existing_user_msg
     rt_msg = Message(
         conversation_id=convo.id,
         role="roundtable",
@@ -457,7 +471,10 @@ async def send_roundtable(
         },
         status="streaming",
     )
-    db.add_all([user_msg, rt_msg])
+    if existing_user_msg is None:
+        db.add_all([user_msg, rt_msg])
+    else:
+        db.add(rt_msg)
     if convo.title == "新会话":
         convo.title = text[:40]
     await db.commit()
@@ -894,66 +911,181 @@ async def is_group_member(
     return res.scalar_one_or_none() is not None
 
 
+async def is_group_admin(
+    db: AsyncSession,
+    conversation_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> bool:
+    """检查用户是否是群聊管理员（群主）。"""
+    res = await db.execute(
+        select(GroupMember).where(
+            GroupMember.conversation_id == conversation_id,
+            GroupMember.user_id == user_id,
+            GroupMember.role == "admin",
+        )
+    )
+    return res.scalar_one_or_none() is not None
+
+
+@dataclass
+class ResolvedMentions:
+    """@提及解析结果：Agent 桶 + 人类桶 + 全体标记。"""
+    agent_ids: list[str] = field(default_factory=list)
+    user_ids: list[uuid.UUID] = field(default_factory=list)
+    all_humans: bool = False
+    all_agents: bool = False
+
+
 async def resolve_mentions(
     db: AsyncSession,
     conversation_id: uuid.UUID,
     mentions: list[str],
-) -> list[str]:
-    """将 @mention 文本解析为 agent_id 列表。"""
+) -> ResolvedMentions:
+    """把前端发来的稳定 ID 解析成结构化结果。
+
+    前端已发送稳定标识，无需再做名称模糊匹配：
+    - "__all_agents__" → 群内全部 Agent
+    - "__all_humans__" → all_humans 标记（仅通知，不触发 AI）
+    - "user:{uuid}"    → 人类成员（校验确为成员）
+    - 裸 agent id       → Agent（校验确在群内）
+    """
+    out = ResolvedMentions()
     if not mentions:
-        return []
+        return out
 
-    # @all_agents → all AI agents in the group
-    if "__all_agents__" in mentions:
-        members = await get_group_members(db, conversation_id)
-        return [m.agent_id for m in members if m.agent_id]
-
-    # @all_humans → no AI agents to resolve, just a notification marker
-    if "__all_humans__" in mentions:
-        return []
-
-    # Get group's agent members
     members = await get_group_members(db, conversation_id)
     group_agents = [m.agent_id for m in members if m.agent_id]
+    group_user_ids = {str(m.user_id) for m in members if m.user_id}
 
-    resolved = []
+    if "__all_agents__" in mentions:
+        out.all_agents = True
+        out.agent_ids = list(dict.fromkeys(group_agents))
+    if "__all_humans__" in mentions:
+        out.all_humans = True
+
     for mention in mentions:
-        # Direct match
-        if mention in group_agents:
-            resolved.append(mention)
+        if mention in ("__all_agents__", "__all_humans__"):
             continue
-
-        # Match by profile name
-        from sqlalchemy import or_
-        res = await db.execute(
-            select(Profile).where(
-                Profile.is_active.is_(True),
-                or_(
-                    Profile.name == mention,
-                    Profile.handle == mention,
-                    Profile.default_agent_id == mention,
-                ),
-            )
-        )
-        profile = res.scalars().first()
-        if profile and profile.default_agent_id in group_agents:
-            resolved.append(profile.default_agent_id)
+        if mention.startswith("user:"):
+            uid_str = mention.split(":", 1)[1]
+            if uid_str in group_user_ids:
+                try:
+                    uid = uuid.UUID(uid_str)
+                except ValueError:
+                    continue
+                if uid not in out.user_ids:
+                    out.user_ids.append(uid)
             continue
+        # Bare agent id — trust it only if it is actually a group agent
+        if mention in group_agents and mention not in out.agent_ids:
+            out.agent_ids.append(mention)
 
-        # Fuzzy: prefix match on name
-        for agent_id in group_agents:
-            res2 = await db.execute(
-                select(Profile).where(
-                    Profile.default_agent_id == agent_id,
-                    Profile.is_active.is_(True),
-                ).limit(1)
-            )
-            p = res2.scalars().first()
-            if p and (mention in p.name or p.name.startswith(mention)):
-                resolved.append(agent_id)
-                break
+    return out
 
-    return list(set(resolved))  # deduplicate
+
+# ── Realtime fan-out helpers ───────────────────────────────────────────────
+
+
+async def _build_reply_ref(db: AsyncSession, reply_to_id: uuid.UUID | None) -> dict | None:
+    """被引用消息的精简摘要（用于渲染回复引用条）。"""
+    if not reply_to_id:
+        return None
+    ref = await db.get(Message, reply_to_id)
+    if ref is None:
+        return None
+    snippet = (ref.content or {}).get("text") or ""
+    return {
+        "id": str(ref.id),
+        "role": ref.role,
+        "owner_id": str(ref.owner_id) if ref.owner_id else None,
+        "agent_id": ref.agent_id,
+        "snippet": snippet[:80],
+    }
+
+
+async def message_to_event_dict(db: AsyncSession, msg: Message) -> dict:
+    """把 Message ORM 转成 MessageOut 形状的纯 dict，供实时事件使用。"""
+    return {
+        "id": str(msg.id),
+        "conversation_id": str(msg.conversation_id),
+        "owner_id": str(msg.owner_id) if msg.owner_id else None,
+        "role": msg.role,
+        "agent_id": msg.agent_id,
+        "content": msg.content or {},
+        "status": msg.status,
+        "mentions": msg.mentions or [],
+        "created_at": msg.created_at.isoformat() if msg.created_at else None,
+        "reply_to_id": str(msg.reply_to_id) if msg.reply_to_id else None,
+        "reply_to": await _build_reply_ref(db, msg.reply_to_id),
+        "edited_at": msg.edited_at.isoformat() if msg.edited_at else None,
+        "deleted_at": msg.deleted_at.isoformat() if msg.deleted_at else None,
+        "reactions": msg.reactions or {},
+    }
+
+
+async def _publish_user_message(
+    db: AsyncSession,
+    convo: Conversation,
+    user_msg: Message,
+    resolved: ResolvedMentions,
+) -> None:
+    """广播人类消息给会话流（含发送者回显），并对被通知的人类成员推送 notify。"""
+    msg_dict = await message_to_event_dict(db, user_msg)
+    await redis_core.publish_event(str(convo.id), {"type": "message", "message": msg_dict})
+
+    members = await get_group_members(db, convo.id)
+    snippet = (user_msg.content or {}).get("text", "")[:80]
+    mentioned_ids = set(resolved.user_ids)
+    r = redis_core.get_redis()
+    pipe = r.pipeline()
+    for m in members:
+        if not m.user_id or m.user_id == user_msg.owner_id:
+            continue
+        mention = resolved.all_humans or (m.user_id in mentioned_ids)
+        event = _json.dumps({
+            "type": "notify",
+            "conversation_id": str(convo.id),
+            "title": convo.title,
+            "snippet": snippet,
+            "mention": bool(mention),
+        })
+        uid = str(m.user_id)
+        pipe.xadd(redis_core.user_stream(uid), {"data": event}, maxlen=redis_core.USER_STREAM_MAXLEN, approximate=True)
+        pipe.expire(redis_core.user_stream(uid), redis_core.USER_STREAM_TTL)
+    if len(pipe):
+        await pipe.execute()
+
+
+async def _persist_group_user_msg(
+    db: AsyncSession,
+    convo: Conversation,
+    text: str,
+    mentions: list[str],
+    owner_id: uuid.UUID | None,
+    *,
+    attached_file_ids: list[str] | None = None,
+    reply_to_id: uuid.UUID | None = None,
+) -> Message:
+    """持久化群聊用户消息（统一入口，附带文件 + 回复引用）。"""
+    attached = await _resolve_attached_files(db, attached_file_ids or [], conversation_id=str(convo.id))
+    content: dict = {"text": text}
+    if attached:
+        content["files"] = attached
+    user_msg = Message(
+        conversation_id=convo.id,
+        owner_id=owner_id,
+        role="user",
+        content=content,
+        mentions=mentions or [],
+        reply_to_id=reply_to_id,
+        status="complete",
+    )
+    db.add(user_msg)
+    if convo.title == "新会话":
+        convo.title = text[:40]
+    await db.commit()
+    await db.refresh(user_msg)
+    return user_msg
 
 
 async def dispatch_group(
@@ -965,83 +1097,45 @@ async def dispatch_group(
     owner_id: uuid.UUID | None = None,
     skip_agent: bool = False,
     profile_id_override: str | None = None,
+    reply_to_id: uuid.UUID | None = None,
 ) -> tuple[Message, Message | None]:
-    """群聊消息路由：按 channel_mode + mentions 决定走人→人 / 人→机 / 圆桌。"""
+    """群聊消息路由：按 channel_mode + mentions 决定走人→人 / 人→机 / 圆桌。
+
+    无论是否触发 AI，人类消息总是先持久化并实时广播给全体成员（含发送者回显）。
+    """
     resolved = await resolve_mentions(db, convo.id, mentions)
-
-    # @all_humans → always just save the message (notification only, no AI trigger)
-    is_human_broadcast = "__all_humans__" in (mentions or [])
-
-    # channel_mode gating
     mode = getattr(convo, "channel_mode", "mention") or "mention"
 
-    if mode == "off" or skip_agent or is_human_broadcast:
-        # off模式或前端显式跳过：只存消息，不触发Agent
-        user_msg = Message(
-            conversation_id=convo.id,
-            owner_id=owner_id,
-            role="user",
-            content={"text": text},
-            mentions=mentions,
-            status="complete",
-        )
-        db.add(user_msg)
-        if convo.title == "新会话":
-            convo.title = text[:40]
-        await db.commit()
-        await db.refresh(user_msg)
-        return user_msg, None
-
-    if mode == "always" and not resolved:
-        # always模式：没有@特定人时，所有agent都回复（圆桌）
+    # 计算 Agent 目标
+    agent_targets = list(resolved.agent_ids)
+    if mode == "always" and not agent_targets and not resolved.all_humans and not skip_agent:
         members = await get_group_members(db, convo.id)
-        all_agents = [m.agent_id for m in members if m.agent_id]
-        if all_agents:
-            resolved = all_agents
+        agent_targets = [m.agent_id for m in members if m.agent_id]
 
-    if not resolved:
-        # mention模式 + 没有@任何Agent：只存消息，不触发Agent
-        user_msg = Message(
-            conversation_id=convo.id,
-            owner_id=owner_id,
-            role="user",
-            content={"text": text},
-            mentions=mentions,
-            status="complete",
-        )
-        db.add(user_msg)
-        if convo.title == "新会话":
-            convo.title = text[:40]
-        await db.commit()
-        await db.refresh(user_msg)
+    save_only = (
+        mode == "off" or skip_agent or resolved.all_humans or not agent_targets
+    )
+
+    # 始终先落库 + 广播人类消息
+    user_msg = await _persist_group_user_msg(
+        db, convo, text, mentions, owner_id,
+        attached_file_ids=attached_file_ids, reply_to_id=reply_to_id,
+    )
+    await _publish_user_message(db, convo, user_msg, resolved)
+
+    if save_only:
         return user_msg, None
 
-    if len(resolved) == 1:
-        # 人→机模式：单Agent
-        user_msg = Message(
-            conversation_id=convo.id,
-            owner_id=owner_id,
-            role="user",
-            content={"text": text},
-            mentions=mentions,
-            status="complete",
-        )
-        db.add(user_msg)
-        if convo.title == "新会话":
-            convo.title = text[:40]
-        await db.commit()
-        await db.refresh(user_msg)
-
-        # Route to single agent
+    if len(agent_targets) == 1:
+        # 人→机模式：单 Agent
         system_prompt = None
         profile_dir = None
-        # Priority: explicit profile_id_override > @mentioned agent's profile > conversation default
+        # 优先级：显式 profile_id_override > 被@Agent 的 profile > 会话默认
         effective_profile_id = profile_id_override or convo.profile_id
-        if not profile_id_override and resolved:
-            # No explicit override — try to find the @mentioned agent's profile
+        if not profile_id_override:
             res_p = await db.execute(
                 select(Profile).where(
-                    Profile.default_agent_id == resolved[0],
+                    Profile.default_agent_id == agent_targets[0],
                     Profile.is_active.is_(True),
                 ).limit(1)
             )
@@ -1054,17 +1148,14 @@ async def dispatch_group(
                 system_prompt = profile.system_prompt or None
                 profile_dir = _profile_dir(profile)
 
-        # Inject the user's long-term agent memory
         memory_prompt = await _build_memory_prompt(db, owner_id)
         if memory_prompt:
             system_prompt = f"{system_prompt}\n\n{memory_prompt}" if system_prompt else memory_prompt
-
-        # Anti-clarify for short follow-ups
         if convo.acp_session_id:
             system_prompt = f"{system_prompt}\n\n{_ANTI_CLARIFY}" if system_prompt else _ANTI_CLARIFY
 
-        # Reuse the user message persisted above — send_message used to create
-        # a second user row for every group @single-agent message.
+        # Attribute the reply to the @-mentioned agent without mutating the
+        # conversation's stable primary_agent_id default.
         _, agent_msg = await send_message(
             db, convo, text,
             attached_file_ids=attached_file_ids,
@@ -1072,10 +1163,11 @@ async def dispatch_group(
             system_prompt=system_prompt,
             existing_user_msg=user_msg,
             profile_dir=profile_dir,
+            agent_id_override=agent_targets[0],
         )
         return user_msg, agent_msg
 
-    # 圆桌模式：多Agent并行
+    # 圆桌模式：多 Agent 并行
     system_prompt = None
     profile_dir = None
     effective_profile_id = profile_id_override or convo.profile_id
@@ -1085,16 +1177,295 @@ async def dispatch_group(
             system_prompt = profile.system_prompt or None
             profile_dir = _profile_dir(profile)
 
-    # Inject the user's long-term agent memory
     memory_prompt = await _build_memory_prompt(db, owner_id)
     if memory_prompt:
         system_prompt = f"{system_prompt}\n\n{memory_prompt}" if system_prompt else memory_prompt
 
     return await send_roundtable(
-        db, convo, text, resolved,
+        db, convo, text, agent_targets,
         attached_file_ids=attached_file_ids,
         owner_id=owner_id,
         system_prompt=system_prompt,
         mentions=mentions,
         profile_dir=profile_dir,
+        existing_user_msg=user_msg,
     )
+
+
+# ── Read state · unread badges ─────────────────────────────────────────────
+
+
+async def mark_read(
+    db: AsyncSession, conversation_id: uuid.UUID, user_id: uuid.UUID
+):
+    """把成员的已读游标推进到现在。"""
+    res = await db.execute(
+        select(GroupMember).where(
+            GroupMember.conversation_id == conversation_id,
+            GroupMember.user_id == user_id,
+        )
+    )
+    gm = res.scalar_one_or_none()
+    if gm is None:
+        return None
+    gm.last_read_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(gm)
+    return gm.last_read_at
+
+
+async def unread_summary(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    conversation_ids: list[uuid.UUID],
+) -> dict[str, dict]:
+    """一次分组查询返回 {conv_id: {unread, mention}}。手工组装，避免懒加载。"""
+    out: dict[str, dict] = {
+        str(cid): {"unread": 0, "mention": False} for cid in conversation_ids
+    }
+    if not conversation_ids:
+        return out
+
+    gm = GroupMember
+    mention_row = or_(
+        Message.mentions.contains([f"user:{user_id}"]),
+        Message.mentions.contains(["__all_humans__"]),
+    )
+    stmt = (
+        select(
+            Message.conversation_id,
+            func.count(Message.id),
+            func.bool_or(mention_row),
+        )
+        .select_from(Message)
+        .join(
+            gm,
+            and_(
+                gm.conversation_id == Message.conversation_id,
+                gm.user_id == user_id,
+            ),
+        )
+        .where(
+            Message.conversation_id.in_(conversation_ids),
+            or_(Message.owner_id.is_(None), Message.owner_id != user_id),
+            or_(gm.last_read_at.is_(None), Message.created_at > gm.last_read_at),
+        )
+        .group_by(Message.conversation_id)
+    )
+    res = await db.execute(stmt)
+    for conv_id, count, has_mention in res.all():
+        out[str(conv_id)] = {"unread": int(count or 0), "mention": bool(has_mention)}
+    return out
+
+
+# ── Message edit · recall · reactions ──────────────────────────────────────
+
+
+async def edit_message(db: AsyncSession, msg: Message, text: str) -> Message:
+    """编辑（仅文本），打 edited_at 标记并广播。"""
+    msg.content = {**(msg.content or {}), "text": text}
+    msg.edited_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(msg)
+    await redis_core.publish_event(str(msg.conversation_id), {
+        "type": "message_update",
+        "message_id": str(msg.id),
+        "patch": {
+            "content": msg.content,
+            "edited_at": msg.edited_at.isoformat() if msg.edited_at else None,
+        },
+    })
+    return msg
+
+
+async def recall_message(db: AsyncSession, msg: Message) -> Message:
+    """撤回（软删），清空内容并广播墓碑。"""
+    msg.deleted_at = datetime.now(timezone.utc)
+    msg.content = {"text": ""}
+    await db.commit()
+    await db.refresh(msg)
+    await redis_core.publish_event(str(msg.conversation_id), {
+        "type": "message_update",
+        "message_id": str(msg.id),
+        "patch": {
+            "deleted_at": msg.deleted_at.isoformat() if msg.deleted_at else None,
+            "content": {"text": ""},
+        },
+    })
+    return msg
+
+
+async def toggle_reaction(
+    db: AsyncSession, msg: Message, user_id: uuid.UUID, emoji: str
+) -> Message:
+    """切换某 emoji 的回应（重新赋值 JSONB 以触发脏检测），并广播聚合结果。"""
+    reactions = {k: list(v) for k, v in (msg.reactions or {}).items()}
+    uid = str(user_id)
+    users = reactions.get(emoji, [])
+    if uid in users:
+        users.remove(uid)
+    else:
+        users.append(uid)
+    if users:
+        reactions[emoji] = users
+    else:
+        reactions.pop(emoji, None)
+    msg.reactions = reactions
+    await db.commit()
+    await db.refresh(msg)
+    await redis_core.publish_event(str(msg.conversation_id), {
+        "type": "message_update",
+        "message_id": str(msg.id),
+        "patch": {"reactions": reactions},
+    })
+    return msg
+
+
+# ── Canonical team / project groups ────────────────────────────────────────
+
+
+async def _team_member_ids(db: AsyncSession, team_id: uuid.UUID) -> list[uuid.UUID]:
+    from app.db.models.team import TeamMember as TM
+    res = await db.execute(select(TM.user_id).where(TM.team_id == team_id))
+    return [row[0] for row in res.all()]
+
+
+async def _resolve_team_agents(db: AsyncSession, team) -> list[str]:
+    """团队共享 Agent + 共享 Profile 解析出的 Agent。"""
+    agent_ids = list(team.shared_agents or ["hermes"]) or ["hermes"]
+    for pid in (team.shared_profile_ids or []):
+        try:
+            p = await db.get(Profile, uuid.UUID(pid))
+        except (ValueError, TypeError):
+            continue
+        if p and p.default_agent_id and p.default_agent_id not in agent_ids:
+            agent_ids.append(p.default_agent_id)
+    return agent_ids
+
+
+async def sync_group_membership(
+    db: AsyncSession,
+    convo: Conversation,
+    *,
+    human_user_ids: list[uuid.UUID],
+    agent_ids: list[str],
+) -> None:
+    """把群成员与团队/项目成员集做差量增删；admin 成员保留。"""
+    members = await get_group_members(db, convo.id)
+    existing_users = {m.user_id for m in members if m.user_id}
+    existing_agents = {m.agent_id for m in members if m.agent_id}
+    desired_users = set(human_user_ids)
+    desired_agents = set(agent_ids)
+    changed = False
+
+    for uid in desired_users - existing_users:
+        db.add(GroupMember(conversation_id=convo.id, user_id=uid, role="member"))
+        changed = True
+    for aid in desired_agents - existing_agents:
+        db.add(GroupMember(conversation_id=convo.id, agent_id=aid, role="member"))
+        changed = True
+    for m in members:
+        if m.user_id and m.user_id not in desired_users and m.role != "admin":
+            await db.delete(m)
+            changed = True
+        elif m.agent_id and m.agent_id not in desired_agents:
+            await db.delete(m)
+            changed = True
+
+    if changed:
+        if desired_agents:
+            convo.active_agent_ids = list(desired_agents)
+        await db.commit()
+        await redis_core.publish_event(str(convo.id), {"type": "members_changed"})
+
+
+async def get_or_create_team_group(
+    db: AsyncSession, team, owner_id: uuid.UUID
+) -> Conversation:
+    """取或建团队的唯一固定群。
+
+    用 is_channel=True 唯一标识"团队固定群"，与通过 /conversations/group 创建的
+    临时群（同样带 team_id 但 is_channel=False）区分开。
+    """
+    res = await db.execute(
+        select(Conversation).where(
+            Conversation.team_id == team.id,
+            Conversation.is_channel.is_(True),
+        ).limit(1)
+    )
+    convo = res.scalar_one_or_none()
+    if convo is not None and convo.type != "group":
+        # 收编历史 is_channel 频道，统一到 group 模型
+        convo.type = "group"
+        convo.visibility = "team"
+        await db.flush()
+
+    human_ids = await _team_member_ids(db, team.id)
+    if owner_id not in human_ids:
+        human_ids.append(owner_id)
+    agents = await _resolve_team_agents(db, team)
+
+    if convo is None:
+        convo = Conversation(
+            title=f"{team.name} · 群聊",
+            owner_id=owner_id,
+            type="group",
+            primary_agent_id=agents[0],
+            active_agent_ids=agents,
+            team_id=team.id,
+            channel_mode=team.channel_mode or "mention",
+            visibility="team",
+            is_channel=True,
+        )
+        db.add(convo)
+        await db.flush()
+        db.add(GroupMember(conversation_id=convo.id, user_id=owner_id, role="admin"))
+        await db.commit()
+        await db.refresh(convo)
+
+    await sync_group_membership(db, convo, human_user_ids=human_ids, agent_ids=agents)
+    return convo
+
+
+async def get_or_create_project_group(
+    db: AsyncSession, project, owner_id: uuid.UUID
+) -> Conversation:
+    """取或建项目的唯一固定群。成员取 project.member_ids，Agent 取 pinned_agents。"""
+    res = await db.execute(
+        select(Conversation).where(
+            Conversation.project_id == project.id,
+            Conversation.type == "group",
+        ).limit(1)
+    )
+    convo = res.scalar_one_or_none()
+
+    human_ids: list[uuid.UUID] = []
+    for x in (project.member_ids or []):
+        try:
+            human_ids.append(uuid.UUID(str(x)))
+        except (ValueError, TypeError):
+            continue
+    if owner_id not in human_ids:
+        human_ids.append(owner_id)
+    agents = list(project.pinned_agents or ["hermes"]) or ["hermes"]
+
+    if convo is None:
+        convo = Conversation(
+            title=f"{project.name} · 群聊",
+            owner_id=owner_id,
+            type="group",
+            primary_agent_id=agents[0],
+            active_agent_ids=agents,
+            team_id=project.team_id,
+            project_id=project.id,
+            channel_mode="mention",
+            visibility="team",
+        )
+        db.add(convo)
+        await db.flush()
+        db.add(GroupMember(conversation_id=convo.id, user_id=owner_id, role="admin"))
+        await db.commit()
+        await db.refresh(convo)
+
+    await sync_group_membership(db, convo, human_user_ids=human_ids, agent_ids=agents)
+    return convo
