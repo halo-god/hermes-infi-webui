@@ -7,10 +7,8 @@ edit/recall/reactions.
 import uuid
 
 import pytest
-from sqlalchemy import select
 
 from app.core import redis as redis_core
-from app.db.models.conversation import Conversation, GroupMember, Message
 from app.db.models.team import Team, TeamMember
 from app.db.models.user import User
 from app.services import conversation_service as svc
