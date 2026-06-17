@@ -668,8 +668,24 @@ class Runner:
             await self._fail(conversation_id, acc["current_msg_id"], f"{exc.__class__.__name__}")
             return
 
-        status = "cancelled" if acc["cancelled"] else "complete"
-        if status == "complete" and acc["text"]:
+        if acc["cancelled"]:
+            status = "cancelled"
+        elif not acc["text"].strip():
+            # Agent returned empty text (e.g. context overflow → 400 → refusal).
+            # Don't silently mark as complete — surface the error to the user.
+            logger.warning(
+                "Agent returned empty text for %s (stop_reason=%s)",
+                conversation_id[:8], stop_reason,
+            )
+            await self._fail(
+                conversation_id, acc["current_msg_id"],
+                "模型返回空响应（上下文可能过长，请减少附件大小或缩短对话后重试）",
+            )
+            return
+        else:
+            status = "complete"
+
+        if status == "complete":
             await self._extract_and_save_files(
                 conversation_id, acc["current_msg_id"], agent_id, acc["text"]
             )

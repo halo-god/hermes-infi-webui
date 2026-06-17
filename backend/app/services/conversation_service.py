@@ -302,11 +302,16 @@ def _profile_dir(profile: Profile | None) -> str | None:
     return os.path.dirname(os.path.expanduser(profile.path))
 
 
-def _build_attached_prompt(text: str, attached: list[dict]) -> str:
-    """Build prompt text with attached files inlined.
+_INLINE_LIMIT = 8000  # chars — files smaller than this are inlined in full
 
-    Handles text truncation and empty file messages consistently.
-    Images are referenced as placeholders (actual image blocks handled separately).
+
+def _build_attached_prompt(text: str, attached: list[dict]) -> str:
+    """Build prompt text with attached files.
+
+    Small files (< _INLINE_LIMIT chars) are inlined in full.
+    Large files get a reference only — the agent reads them via read_file tool
+    using the workspace path already provided by resource_link blocks.
+    This prevents prompt token overflow when users attach knowledge-base documents.
     """
     if not attached:
         return text
@@ -316,11 +321,17 @@ def _build_attached_prompt(text: str, attached: list[dict]) -> str:
             parts.append(f"[图片附件: {f['name']}]")
         else:
             content = f.get("content", "")
-            if content:
-                orig_len = len(content)
-                if orig_len > 200000:
-                    content = content[:200000] + f"\n\n... [文件截断，共 {orig_len} 字符]"
+            ws_path = f.get("workspace_path", "")
+            if content and len(content) <= _INLINE_LIMIT:
+                # Small file: inline in full
                 parts.append(f"【附件: {f['name']}】\n```\n{content}\n```")
+            elif content:
+                # Large file: reference only — agent reads via read_file tool
+                size_kb = len(content) / 1024
+                ref = f"【附件: {f['name']}】（{size_kb:.0f}KB，内容过长不内嵌）"
+                if ws_path:
+                    ref += f"\n文件路径: {ws_path}\n请用 read_file 工具分段读取需要的部分。"
+                parts.append(ref)
             else:
                 parts.append(f"【附件: {f['name']}】（文件内容为空）")
     return f"{text}\n\n" + "\n\n".join(parts)
