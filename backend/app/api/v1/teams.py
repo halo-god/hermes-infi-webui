@@ -118,41 +118,37 @@ class ChannelModeUpdate(_BaseModel):
 async def get_team_channel(
     team_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
-    """Return (or create) the team's shared channel conversation."""
-    from app.db.models.conversation import Conversation
+    """Return (or create) the team's canonical fixed group chat.
+
+    Unified onto the type="group" + GroupMember model: membership stays synced
+    with the team roster + shared agents on every fetch.
+    """
+    from app.services import conversation_service as conv_svc
     from app.schemas.conversation import ConversationOut
-    from sqlalchemy import and_
     team, _ = await svc.require_membership(db, team_id, user.id)
-    res = await db.execute(
-        select(Conversation).where(
-            and_(Conversation.team_id == team_id, Conversation.is_channel.is_(True))
-        ).limit(1)
-    )
-    channel = res.scalar_one_or_none()
-    if channel is None:
-        # Use first shared profile's agent as the channel agent, fallback to "hermes"
-        primary_aid = "hermes"
-        if team.shared_profile_ids:
-            from app.db.models.agent import Profile as ProfileModel
-            first_pid_str = team.shared_profile_ids[0]
-            try:
-                import uuid as _uuid
-                p = await db.get(ProfileModel, _uuid.UUID(first_pid_str))
-                if p and p.default_agent_id:
-                    primary_aid = p.default_agent_id
-            except Exception:
-                pass
-        channel = Conversation(
-            owner_id=user.id,
-            title=f"{team.name} · 群聊频道",
-            primary_agent_id=primary_aid,
-            team_id=team_id,
-            is_channel=True,
-        )
-        db.add(channel)
-        await db.commit()
-        await db.refresh(channel)
-    return {"channel": ConversationOut.model_validate(channel), "channel_mode": team.channel_mode}
+    channel = await conv_svc.get_or_create_team_group(db, team, user.id)
+    return {
+        "channel": ConversationOut.model_validate(channel),
+        "channel_mode": channel.channel_mode or team.channel_mode,
+    }
+
+
+@router.get("/projects/{project_id}/group")
+async def get_project_group(
+    project_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    """Return (or create) the project's canonical fixed group chat."""
+    from app.services import conversation_service as conv_svc
+    from app.schemas.conversation import ConversationOut
+    project = await svc.get_project(db, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    await svc.require_membership(db, project.team_id, user.id)
+    group = await conv_svc.get_or_create_project_group(db, project, user.id)
+    return {
+        "channel": ConversationOut.model_validate(group),
+        "channel_mode": group.channel_mode,
+    }
 
 
 @router.patch("/teams/{team_id}/channel/mode")
@@ -160,12 +156,16 @@ async def set_channel_mode(
     team_id: uuid.UUID, payload: ChannelModeUpdate,
     user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
 ):
+    from app.services import conversation_service as conv_svc
     team, member = await svc.require_membership(db, team_id, user.id)
     if member.role not in ("owner", "admin"):
         raise HTTPException(status_code=403, detail="仅所有者/管理员可修改频道设置")
     if payload.channel_mode not in ("off", "mention", "always"):
         raise HTTPException(status_code=422, detail="channel_mode 无效")
     team.channel_mode = payload.channel_mode
+    # Mirror onto the canonical group conversation (the live source of truth).
+    group = await conv_svc.get_or_create_team_group(db, team, user.id)
+    group.channel_mode = payload.channel_mode
     await db.commit()
     return {"channel_mode": team.channel_mode}
 
@@ -175,17 +175,13 @@ async def clear_channel_messages(
     team_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
     """Clear all messages in the team channel. Requires channel.clear permission."""
-    from app.db.models.conversation import Conversation, Message
-    from sqlalchemy import delete as sa_delete, and_
+    from app.db.models.conversation import Message
+    from app.services import conversation_service as conv_svc
+    from sqlalchemy import delete as sa_delete
     team, member = await svc.require_membership(db, team_id, user.id)
     if not gov.can(team.policy, "channel.clear", member.role):
         raise HTTPException(status_code=403, detail="无权清空频道记录")
-    res = await db.execute(
-        select(Conversation).where(
-            and_(Conversation.team_id == team_id, Conversation.is_channel.is_(True))
-        ).limit(1)
-    )
-    channel = res.scalar_one_or_none()
+    channel = await conv_svc.get_or_create_team_group(db, team, user.id)
     if channel:
         await db.execute(sa_delete(Message).where(Message.conversation_id == channel.id))
         await db.commit()

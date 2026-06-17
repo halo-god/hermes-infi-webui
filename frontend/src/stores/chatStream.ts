@@ -17,6 +17,7 @@ interface StreamHandlersDeps {
   contextTokens: Ref<number>;
   contextSize: Ref<number>;
   files: Ref<{ id: string }[]>;
+  typingUsers: Ref<{ user_id: string; name: string }[]>;
   find: (id: string) => Message | undefined;
   refreshAfterTurn: () => void;
 }
@@ -42,9 +43,56 @@ export function registerStreamHandlers(
   },
   deps: StreamHandlersDeps,
 ) {
-  const { activeId, messages, conversations, pendingConfirmations, contextTokens, contextSize, files, find, refreshAfterTurn } = deps;
+  const { activeId, messages, conversations, pendingConfirmations, contextTokens, contextSize, files, typingUsers, find, refreshAfterTurn } = deps;
 
   stream.offAll();
+
+  // ── Group chat: realtime peer messages, edits, typing, membership ──
+  stream.on("message", scoped((ev) => {
+    const incoming = ev.message;
+    if (!incoming) return;
+    if (find(incoming.id)) return; // already have it (echo dedupe)
+    // Reconcile the sender's optimistic bubble (temp id, same text) if present.
+    if (incoming.role === "user") {
+      const idx = messages.value.findIndex(
+        (m) => m.id.startsWith("tmp-") && m.role === "user" &&
+          (m.content?.text || "") === (incoming.content?.text || ""),
+      );
+      if (idx !== -1) { messages.value.splice(idx, 1, incoming); return; }
+    }
+    messages.value.push(incoming);
+  }, activeId));
+
+  stream.on("message_update", scoped((ev) => {
+    const m = find(ev.message_id);
+    if (!m) return;
+    const p = ev.patch || {};
+    if (p.content !== undefined) m.content = { ...m.content, ...p.content };
+    if (p.edited_at !== undefined) m.edited_at = p.edited_at;
+    if (p.deleted_at !== undefined) m.deleted_at = p.deleted_at;
+    if (p.reactions !== undefined) m.reactions = p.reactions;
+  }, activeId));
+
+  // Typing indicators expire after 4s; refresh the timer on each ping.
+  const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  stream.on("typing", scoped((ev) => {
+    if (!ev.user_id) return;
+    const existing = typingUsers.value.find((u) => u.user_id === ev.user_id);
+    if (existing) existing.name = ev.name || existing.name;
+    else typingUsers.value.push({ user_id: ev.user_id, name: ev.name || "" });
+    const prev = typingTimers.get(ev.user_id);
+    if (prev) clearTimeout(prev);
+    typingTimers.set(ev.user_id, setTimeout(() => {
+      typingUsers.value = typingUsers.value.filter((u) => u.user_id !== ev.user_id);
+      typingTimers.delete(ev.user_id);
+    }, 4000));
+  }, activeId));
+
+  stream.on("members_changed", scoped((ev) => {
+    window.dispatchEvent(new CustomEvent("hermes:members-changed", {
+      detail: { conversation_id: ev.conversation_id },
+    }));
+  }, activeId));
 
   stream.on("token", scoped((ev) => {
     const m = find(ev.message_id);

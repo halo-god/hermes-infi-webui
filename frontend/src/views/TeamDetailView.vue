@@ -129,8 +129,19 @@ watch(tab, (newTab) => {
 });
 
 // ── Group channel ──
-
-
+const openingGroup = ref(false);
+async function openTeamGroup() {
+  if (openingGroup.value) return;
+  openingGroup.value = true;
+  try {
+    const { channel } = await teamsApi.getChannel(teamId.value);
+    router.push({ path: "/", query: { c: channel.id } });
+  } catch {
+    /* ignore */
+  } finally {
+    openingGroup.value = false;
+  }
+}
 
 
 
@@ -387,6 +398,7 @@ async function deleteTeam() {
             <div v-if="team.members.length > 4" class="mem-more">+{{ team.members.length - 4 }}</div>
           </div>
           <button v-if="can('member.invite')" class="btn" @click="showInvite = true"><Icon name="plus" /> 邀请成员</button>
+          <button class="btn" :disabled="openingGroup" @click="openTeamGroup"><Icon name="users" /> 团队群聊</button>
           <button class="btn primary" @click="router.push({ path: '/', query: { team: teamId } })"><Icon name="chat" /> 在团队中开会话</button>
           <button class="icon-btn" @click="tab = 'settings'" title="团队设置"><Icon name="settings" /></button>
         </div>

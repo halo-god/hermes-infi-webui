@@ -23,6 +23,7 @@ const props = defineProps<{
   isGroup?: boolean;
   groupAgents?: { agent_id: string; name: string; color: string; icon: string }[];
   groupMembers?: { id: string; user_id: string | null; user_name?: string; agent_id: string | null }[];
+  replyTo?: { id: string; label: string; snippet: string } | null;
 }>();
 export interface SendOptions {
   profileId?: string;
@@ -30,9 +31,10 @@ export interface SendOptions {
   knowledgeIds?: string[];
   attachedFileIds?: string[];
   mentions?: string[];
+  replyToId?: string;
 }
 
-const emit = defineEmits<{ "update:modelValue": [string]; send: [SendOptions]; cancel: []; command: [string] }>();
+const emit = defineEmits<{ "update:modelValue": [string]; send: [SendOptions]; cancel: []; command: [string]; typing: []; "cancel-reply": [] }>();
 
 const ta = ref<HTMLTextAreaElement | null>(null);
 const wrap = ref<HTMLElement | null>(null);
@@ -217,8 +219,8 @@ function onInput(e: Event) {
     showSlashMenu.value = false;
   }
 
-  // Detect @mention trigger
-  if (props.isGroup && props.groupAgents?.length) {
+  // Detect @mention trigger (works in any group, even with zero AI agents)
+  if (props.isGroup) {
     const cursor = (e.target as HTMLTextAreaElement).selectionStart || val.length;
     const beforeCursor = val.slice(0, cursor);
     const atMatch = beforeCursor.match(/@(\S*)$/);
@@ -229,8 +231,16 @@ function onInput(e: Event) {
       showMentionPicker.value = false;
       mentionQuery.value = "";
     }
+    // Throttled typing ping so other members see "正在输入…".
+    const now = Date.now();
+    if (now - _lastTyping > 2000) {
+      _lastTyping = now;
+      emit("typing");
+    }
   }
 }
+
+let _lastTyping = 0;
 function onKey(e: KeyboardEvent) {
   // Slash command navigation
   if (showSlashMenu.value && slashFiltered.value.length) {
@@ -266,7 +276,7 @@ function doSend() {
   // Clear saved draft on send
   if (props.conversationId) localStorage.removeItem(`draft:${props.conversationId}`);
 
-  emit("send", { profileId: selected.value?.id, stagedFiles: files, knowledgeIds: kIds, attachedFileIds: fIds, mentions });
+  emit("send", { profileId: selected.value?.id, stagedFiles: files, knowledgeIds: kIds, attachedFileIds: fIds, mentions, replyToId: props.replyTo?.id });
 }
 
 function selectMention(agent: { agent_id: string; name: string }) {
@@ -423,6 +433,13 @@ function isImageFile(f: File) {
     <!-- Drag handle for resizing composer height -->
     <div class="composer-resize-handle" @mousedown="onResizeStart" title="拖拽调整高度"></div>
     <input ref="fileInput" type="file" accept="image/*,.pdf,.md,.txt,.json,.csv,.html,.js,.ts,.py,.go,.rs,.yaml,.yml,.toml,.sh,.xml,.css,.diff" style="display:none" @change="onFileSelected" />
+    <!-- reply quote bar -->
+    <div v-if="replyTo" class="reply-bar">
+      <Icon name="corner-up-left" :size="13" />
+      <span class="reply-label">回复 {{ replyTo.label }}：</span>
+      <span class="reply-snippet">{{ replyTo.snippet }}</span>
+      <button class="reply-cancel" @click="emit('cancel-reply')" title="取消回复">&times;</button>
+    </div>
     <!-- staged file chips -->
     <div v-if="stagedFiles.length || stagedKnowledge.length || stagedFileRefs.length" class="staged-files">
       <span v-for="(f, i) in stagedFiles" :key="'f'+i" class="staged-chip" :class="{ 'staged-chip-image': isImageFile(f) }">
@@ -664,6 +681,27 @@ function isImageFile(f: File) {
   font-size: 11px;
   color: var(--ink-mute);
 }
+
+/* ── Reply quote bar ── */
+.reply-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  margin-bottom: 4px;
+  background: var(--accent-tint);
+  border-left: 2px solid var(--accent);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--ink-mute);
+}
+.reply-label { font-weight: 600; color: var(--ink); flex-shrink: 0; }
+.reply-snippet { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.reply-cancel {
+  border: none; background: transparent; cursor: pointer;
+  font-size: 16px; line-height: 1; color: var(--ink-faint); padding: 0 2px;
+}
+.reply-cancel:hover { color: var(--ink); }
 
 /* ── Mention picker (existing) ── */
 .mention-picker {

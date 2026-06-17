@@ -169,6 +169,59 @@ async def read_events(
     return out
 
 
+# ── Per-user notification stream (cross-conversation badges, Slack-style) ──
+# One capped Stream per user; the frontend opens a single /me/stream and reads
+# `notify` events here so unread/@-mention badges update even when the relevant
+# group conversation isn't open. Same mechanics as the per-conversation stream.
+USER_STREAM_MAXLEN = 500
+USER_STREAM_TTL = 86_400  # seconds
+
+
+def user_stream(user_id: str) -> str:
+    return f"evt:user:{user_id}"
+
+
+async def publish_user_event(user_id: str, event: dict) -> None:
+    """Append a notification event to a user's personal stream (best-effort)."""
+    event.setdefault("user_id", str(user_id))
+    payload = _json.dumps(event)
+    key = user_stream(str(user_id))
+    for attempt in (1, 2):
+        try:
+            r = get_redis()
+            pipe = r.pipeline()
+            pipe.xadd(key, {"data": payload}, maxlen=USER_STREAM_MAXLEN, approximate=True)
+            pipe.expire(key, USER_STREAM_TTL)
+            await pipe.execute()
+            return
+        except Exception:
+            if attempt == 2:
+                raise
+            await _asyncio.sleep(0.05)
+
+
+async def latest_user_event_id(user_id: str) -> str:
+    """Return the id of the newest event in the user's stream ('0-0' if empty)."""
+    entries = await get_redis().xrevrange(user_stream(str(user_id)), count=1)
+    return entries[0][0] if entries else "0-0"
+
+
+async def read_user_events(
+    user_id: str, last_id: str, block_ms: int = 8000, count: int = 256
+) -> list[tuple[str, str]]:
+    """Blocking read of a user's notification events after `last_id`."""
+    resp = await get_redis().xread(
+        {user_stream(str(user_id)): last_id}, count=count, block=block_ms
+    )
+    out: list[tuple[str, str]] = []
+    for _key, entries in resp or []:
+        for entry_id, fields in entries:
+            data = fields.get("data")
+            if data is not None:
+                out.append((entry_id, data))
+    return out
+
+
 async def request_cancel(conversation_id: str) -> None:
     await get_redis().set(cancel_key(conversation_id), "1", ex=120)
 

@@ -33,6 +33,9 @@ class GroupMemberOut(BaseModel):
     agent_id: str | None = None
     role: str
     joined_at: datetime
+    user_name: str | None = None
+    last_read_at: datetime | None = None
+    presence: str | None = None  # "online" | "offline"; assembled in route
 
 
 class AddMemberRequest(BaseModel):
@@ -47,6 +50,15 @@ class ConversationUpdate(BaseModel):
     channel_mode: str | None = None
 
 
+class ReplyRef(BaseModel):
+    """被引用消息的精简摘要（用于渲染回复引用条）。"""
+    id: uuid.UUID
+    role: str
+    owner_id: uuid.UUID | None = None
+    agent_id: str | None = None
+    snippet: str = ""
+
+
 class MessageOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -59,6 +71,11 @@ class MessageOut(BaseModel):
     status: str
     mentions: list[str] | None = None
     created_at: datetime
+    reply_to_id: uuid.UUID | None = None
+    reply_to: ReplyRef | None = None  # 路由内手工组装，避免懒加载
+    edited_at: datetime | None = None
+    deleted_at: datetime | None = None
+    reactions: dict = Field(default_factory=dict)  # {emoji: [user_id_str, ...]}
 
 
 class ConversationOut(BaseModel):
@@ -80,6 +97,8 @@ class ConversationOut(BaseModel):
     channel_mode: str = "mention"
     created_at: datetime
     updated_at: datetime
+    unread: int = 0  # 仅群聊列表填充
+    has_mention: bool = False  # 仅群聊列表填充
 
 
 class ConversationDetail(ConversationOut):
@@ -92,6 +111,20 @@ class SendMessageRequest(BaseModel):
     skip_agent: bool = False
     mentions: list[str] = Field(default_factory=list)
     profile_id: str | None = None  # override conversation's default profile
+    reply_to_id: uuid.UUID | None = None
+
+
+class MarkReadResponse(BaseModel):
+    ok: bool = True
+    last_read_at: datetime | None = None
+
+
+class EditMessageRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=100000)
+
+
+class ReactionRequest(BaseModel):
+    emoji: str = Field(min_length=1, max_length=16)
 
 
 class SetAgentsRequest(BaseModel):

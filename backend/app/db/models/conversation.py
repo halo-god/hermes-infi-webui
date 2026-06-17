@@ -75,7 +75,14 @@ class Message(UUIDPrimaryKey, Timestamps, Base):
     tokens_in: Mapped[int] = mapped_column(Integer, default=0)
     tokens_out: Mapped[int] = mapped_column(Integer, default=0)
     mentions: Mapped[list | None] = mapped_column(JSONB, nullable=True)
-    # 提及的Agent列表 ["hermes", "coder"]，用于追踪@mention
+    # 提及列表：Agent id ["hermes"]、人类 "user:{uuid}"、"__all_agents__"、"__all_humans__"
+    reply_to_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("messages.id", ondelete="SET NULL"), nullable=True
+    )  # 引用回复的目标消息
+    edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # 撤回(软删)
+    # 表情回应：{emoji: [user_id_str, ...]}。用 JSONB 内联存储，避免序列化时触发懒加载关系
+    reactions: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
 
     conversation: Mapped["Conversation"] = relationship(back_populates="messages")
 

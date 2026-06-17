@@ -71,7 +71,9 @@ Auth: `Depends(get_current_user)` in `app/deps.py`. Admin routes use `_require_a
 | Key | Purpose |
 |-----|---------|
 | `acp:prompt` | Stream: API → runner (prompt tasks) |
-| `evt:conv:{id}` | Stream: runner → API (streaming events; capped, replayable) |
+| `evt:conv:{id}` | Stream: runner/API → clients (streaming + group events; capped, replayable). Group adds `message` (human peer msg), `message_update` (edit/recall/reaction), `typing` (ephemeral), `members_changed` |
+| `evt:user:{id}` | Stream: API → one per-user `/me/stream` (cross-conversation `notify` for unread/@-mention badges; capped, replayable) |
+| `presence:{user}` | User online presence (SET ex=60; heartbeat every ~30s) |
 | `hermes:clarify:req:{sid}` | List: agent → runner clarify requests (RPUSH / LPOP) |
 | `hermes:clarify:resp:{sid}:{cid}` | List: runner → agent clarify answer (RPUSH / BLPOP) |
 | `rl:msg:{user}` | Rate-limit counter |

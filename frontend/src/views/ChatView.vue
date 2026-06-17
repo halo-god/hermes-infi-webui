@@ -10,6 +10,7 @@ import Composer from "@/components/Composer.vue";
 import ConfirmModal from "@/components/ConfirmModal.vue";
 import ConvoSeal from "@/components/ConvoSeal.vue";
 import { useChatStore } from "@/stores/chat";
+import { useAuthStore } from "@/stores/auth";
 import { useNotificationStore } from "@/stores/notifications";
 import { conversationsApi } from "@/api/conversations";
 import { filesApi } from "@/api/files";
@@ -27,6 +28,7 @@ const ExtractItemsModal = defineAsyncComponent(() => import("@/components/Extrac
 const MemberPanel = defineAsyncComponent(() => import("@/components/MemberPanel.vue"));
 
 const chat = useChatStore();
+const auth = useAuthStore();
 const ns = useNotificationStore();
 const route = useRoute();
 const router = useRouter();
@@ -221,12 +223,94 @@ function highlightMentions(html: string): string {
 }
 
 // ── Get user display info for group chat messages ──
-function getUserDisplay(msg: Message): { name: string; initials: string; color: string } {
-  if (msg.owner_id) {
-    return { name: '用户', initials: 'U', color: '#666' };
-  }
-  return { name: '你', initials: '我', color: 'var(--accent)' };
+function colorForId(id: string): string {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 360;
+  return `hsl(${h}, 52%, 48%)`;
 }
+function getUserDisplay(msg: Message): { name: string; initials: string; color: string } {
+  const meId = auth.user?.id;
+  // owner_id null = local optimistic bubble = self; or owner matches me = self.
+  if (!msg.owner_id || (meId && msg.owner_id === meId)) {
+    return { name: '你', initials: '我', color: 'var(--accent)' };
+  }
+  const m = groupMembers.value.find((gm) => gm.user_id === msg.owner_id);
+  const name = m?.user_name || '成员';
+  return { name, initials: name.slice(0, 1).toUpperCase(), color: colorForId(msg.owner_id) };
+}
+
+// ── Group: reply / reactions / edit / recall / typing ──
+const replyTarget = ref<{ id: string; label: string; snippet: string } | null>(null);
+const REACTION_EMOJIS = ["👍", "❤️", "😄", "🎉", "👀", "🙏"];
+
+function setReply(msg: Message) {
+  const label = msg.role === "user"
+    ? getUserDisplay(msg).name
+    : (chat.profiles.find((p) => p.default_agent_id === msg.agent_id)?.name || msg.agent_id || "AI");
+  replyTarget.value = { id: msg.id, label, snippet: (msg.content?.text || "").slice(0, 60) };
+}
+function clearReply() { replyTarget.value = null; }
+
+async function toggleReaction(msg: Message, emoji: string) {
+  if (!chat.activeId || msg.id.startsWith("tmp-")) return;
+  try {
+    const updated = await conversationsApi.toggleReaction(chat.activeId, msg.id, emoji);
+    msg.reactions = updated.reactions;
+  } catch { ns.toast("操作失败"); }
+}
+function reactionEntries(msg: Message): { emoji: string; count: number; mine: boolean }[] {
+  const r = msg.reactions || {};
+  const meId = auth.user?.id || "";
+  return Object.entries(r).map(([emoji, users]) => ({
+    emoji, count: users.length, mine: users.includes(meId),
+  }));
+}
+
+async function editMsg(msg: Message) {
+  if (!chat.activeId) return;
+  const next = window.prompt("编辑消息", msg.content?.text || "");
+  if (next == null || next.trim() === "" || next === msg.content?.text) return;
+  try {
+    const updated = await conversationsApi.editMessage(chat.activeId, msg.id, next.trim());
+    msg.content = { ...msg.content, ...updated.content };
+    msg.edited_at = updated.edited_at;
+  } catch { ns.toast("编辑失败"); }
+}
+async function recallMsg(msg: Message) {
+  if (!chat.activeId || !window.confirm("撤回这条消息？")) return;
+  try {
+    const updated = await conversationsApi.recallMessage(chat.activeId, msg.id);
+    msg.content = { ...msg.content, text: "" };
+    msg.deleted_at = updated.deleted_at;
+  } catch { ns.toast("撤回失败"); }
+}
+function canModify(msg: Message): boolean {
+  return msg.role === "user" && !msg.deleted_at && !msg.id.startsWith("tmp-") &&
+    (!msg.owner_id || msg.owner_id === auth.user?.id);
+}
+
+function onComposerTyping() {
+  const me = auth.user?.name || auth.user?.email || "有人";
+  chat.sendTyping(me);
+}
+const typingText = computed(() => {
+  const names = chat.typingUsers
+    .filter((u) => u.user_id !== auth.user?.id)
+    .map((u) => u.name || "成员");
+  if (!names.length) return "";
+  if (names.length === 1) return `${names[0]} 正在输入…`;
+  return `${names.slice(0, 2).join("、")} 等正在输入…`;
+});
+
+// Refetch members when the server signals a membership change.
+function onMembersChanged(e: Event) {
+  const cid = (e as CustomEvent).detail?.conversation_id;
+  if (cid && cid === chat.activeId && isGroup.value) {
+    conversationsApi.getMembers(cid).then((m) => (groupMembers.value = m)).catch(() => {});
+  }
+}
+onMounted(() => window.addEventListener("hermes:members-changed", onMembersChanged));
+onUnmounted(() => window.removeEventListener("hermes:members-changed", onMembersChanged));
 
 // Post-process Mermaid blocks after DOM updates
 watch(() => chat.messages.length, async () => {
@@ -352,6 +436,7 @@ async function onSend(opts?: SendOptions) {
     }
   }
   await chat.send(text, landingProfile.value?.default_agent_id || "hermes", opts);
+  clearReply();
   await scrollDown();
 }
 
@@ -941,7 +1026,12 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                   </template>
                   <div v-else-if="chat.messages[row.index].role === 'agent'" class="md-body" v-html="highlightMentions(mdSearch(chat.messages[row.index].content.text))" />
                   <template v-else>
-                    <div v-if="displayText(chat.messages[row.index].content.text)" class="md-body" v-html="highlightMentions(displayHtml(chat.messages[row.index].content.text))"></div>
+                    <div v-if="isGroup && chat.messages[row.index].reply_to" class="reply-quote">
+                      <Icon name="corner-up-left" :size="11" />
+                      <span class="rq-label">{{ chat.messages[row.index].reply_to!.snippet }}</span>
+                    </div>
+                    <div v-if="chat.messages[row.index].deleted_at" class="recalled-msg">该消息已撤回</div>
+                    <div v-else-if="displayText(chat.messages[row.index].content.text)" class="md-body" v-html="highlightMentions(displayHtml(chat.messages[row.index].content.text))"></div>
                     <div v-if="displayText(chat.messages[row.index].content.text) && extractKnowledgeRefs(chat.messages[row.index].content.text).length" class="knowledge-refs-badge">
                       <Icon name="doc" :size="11" /> 引用了知识库: {{ extractKnowledgeRefs(chat.messages[row.index].content.text).join(', ') }}
                     </div>
@@ -955,6 +1045,30 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                     </div>
                   </template>
                 </div>
+                <!-- group: reactions + edited marker + hover actions -->
+                <template v-if="isGroup && !chat.messages[row.index].deleted_at">
+                  <div v-if="reactionEntries(chat.messages[row.index]).length || chat.messages[row.index].edited_at" class="msg-reactions">
+                    <button
+                      v-for="r in reactionEntries(chat.messages[row.index])"
+                      :key="r.emoji"
+                      class="reaction-pill"
+                      :class="{ mine: r.mine }"
+                      @click="toggleReaction(chat.messages[row.index], r.emoji)"
+                    >{{ r.emoji }} {{ r.count }}</button>
+                    <span v-if="chat.messages[row.index].edited_at" class="edited-tag">(已编辑)</span>
+                  </div>
+                  <div v-if="!chat.messages[row.index].id.startsWith('tmp-')" class="group-actions">
+                    <button title="回复" @click="setReply(chat.messages[row.index])"><Icon name="quote" :size="12" /></button>
+                    <div class="react-wrap">
+                      <button title="表情"><Icon name="thumbs_up" :size="12" /></button>
+                      <div class="react-pop">
+                        <button v-for="e in REACTION_EMOJIS" :key="e" @click="toggleReaction(chat.messages[row.index], e)">{{ e }}</button>
+                      </div>
+                    </div>
+                    <button v-if="canModify(chat.messages[row.index])" title="编辑" @click="editMsg(chat.messages[row.index])"><Icon name="edit" :size="12" /></button>
+                    <button v-if="canModify(chat.messages[row.index])" title="撤回" @click="recallMsg(chat.messages[row.index])"><Icon name="trash" :size="12" /></button>
+                  </div>
+                </template>
                 <div v-if="chat.messages[row.index].role === 'agent' && chat.messages[row.index].content.files?.length" class="msg-files" style="margin-top:6px">
                   <div v-for="f in chat.messages[row.index].content.files" :key="f.id" class="msg-file-chip-wrap">
                     <button class="msg-file-chip" @click="openFile(f.id)">
@@ -991,6 +1105,7 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
       </div>
 
       <div class="dock">
+        <div v-if="isGroup && typingText" class="typing-indicator">{{ typingText }}</div>
         <Composer
           v-model="draft"
           placeholder="继续对话…"
@@ -1003,7 +1118,10 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
           :is-group="isGroup"
           :group-agents="groupAgents"
           :group-members="groupMembers"
+          :reply-to="replyTarget"
           @send="onSend"
+          @typing="onComposerTyping"
+          @cancel-reply="clearReply"
           @cancel="chat.cancel()"
           @command="handleComposerCommand"
         />
@@ -1042,3 +1160,93 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
     @created="(pid) => { showExtractModal = false; router.push(`/projects/${pid}`); }"
   />
 </template>
+
+<style scoped>
+/* ── Group chat: reply quote / reactions / actions / typing ── */
+.reply-quote {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--ink-mute);
+  padding: 3px 8px;
+  margin-bottom: 4px;
+  border-left: 2px solid var(--accent);
+  background: var(--accent-tint, rgba(184, 133, 42, 0.1));
+  border-radius: 4px;
+}
+.reply-quote .rq-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 320px;
+}
+.recalled-msg {
+  font-size: 12.5px;
+  font-style: italic;
+  color: var(--ink-faint);
+}
+.msg-reactions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.reaction-pill {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 11px;
+  padding: 1px 7px;
+  font-size: 12px;
+  cursor: pointer;
+  line-height: 1.5;
+}
+.reaction-pill.mine {
+  border-color: var(--accent);
+  background: var(--accent-tint, rgba(184, 133, 42, 0.14));
+}
+.edited-tag { font-size: 11px; color: var(--ink-faint); margin-left: 2px; }
+.group-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 3px;
+  opacity: 0;
+  transition: opacity 120ms;
+}
+.msg:hover .group-actions { opacity: 1; }
+.group-actions button {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--ink-mute);
+  padding: 3px;
+  border-radius: 5px;
+  display: inline-flex;
+}
+.group-actions button:hover { background: var(--accent-tint); color: var(--accent); }
+.react-wrap { position: relative; display: inline-flex; }
+.react-pop {
+  position: absolute;
+  bottom: 120%;
+  left: 0;
+  display: none;
+  gap: 2px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-md);
+  z-index: 20;
+}
+.react-wrap:hover .react-pop { display: flex; }
+.react-pop button { font-size: 15px; padding: 2px 4px; border: none; background: transparent; cursor: pointer; border-radius: 5px; }
+.react-pop button:hover { background: var(--accent-tint); }
+.typing-indicator {
+  font-size: 11.5px;
+  color: var(--ink-mute);
+  padding: 2px 10px 4px;
+  font-style: italic;
+}
+</style>
