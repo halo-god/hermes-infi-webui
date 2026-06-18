@@ -35,7 +35,7 @@ from app.db.base import async_session_maker
 from app.db.models.agent import Agent
 from app.db.models.conversation import Conversation, Message
 from agent_runner import discovery, storage
-from agent_runner.acp_client import ACPTimeout
+from agent_runner.acp_client import ACPError, ACPTimeout
 from agent_runner.session_pool import SessionPool
 from agent_runner.metrics import (
     TASKS_ENQUEUED,
@@ -52,6 +52,27 @@ def _write_text(path: str, content: str) -> None:
     """Synchronous file write for use with asyncio.to_thread."""
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(content)
+
+
+def _friendly_prompt_error(exc: Exception) -> str:
+    """Turn a prompt-loop exception into a user-facing message.
+
+    Previously we surfaced only ``exc.__class__.__name__`` — so a user who
+    attached a big file would see a bare "ValueError" with no clue what to do.
+    Keep it short but actionable, and fold in a trimmed detail for diagnosis.
+    """
+    detail = (str(exc) or "").strip()
+    if len(detail) > 300:
+        detail = detail[:300] + "…"
+    # Oversized output line / closed subprocess after a large response — the
+    # classic large-attachment failure mode.
+    lowered = detail.lower()
+    if isinstance(exc, ValueError) or "subprocess closed" in lowered or "separator is not found" in lowered:
+        return "附件或响应内容过大导致会话中断，请缩小附件或让助手分段读取后重试"
+    if isinstance(exc, ACPError):
+        return f"助手连接异常：{detail}" if detail else "助手连接异常"
+    base = exc.__class__.__name__
+    return f"会话出错：{detail}" if detail else f"会话出错（{base}）"
 
 
 # ── Stability constants ──
@@ -665,7 +686,9 @@ class Runner:
         except Exception as exc:  # noqa: BLE001
             logger.exception("prompt failed")
             await self.pool.drop(conversation_id)
-            await self._fail(conversation_id, acc["current_msg_id"], f"{exc.__class__.__name__}")
+            await self._fail(
+                conversation_id, acc["current_msg_id"], _friendly_prompt_error(exc),
+            )
             return
 
         if acc["cancelled"]:

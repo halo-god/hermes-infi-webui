@@ -36,6 +36,14 @@ SESSION_TIMEOUT = 30     # session/new
 PROMPT_TIMEOUT = settings.acp_prompt_timeout
 CANCEL_TIMEOUT = 5       # session/cancel (fire-and-forget)
 
+# Max bytes for a single JSON-RPC line on the agent's stdout/stderr. asyncio's
+# StreamReader defaults to 64KB; a real agent that streams a large file's
+# content (e.g. after read_file on a big attachment) easily emits a single
+# line bigger than that, and readline() then raises ValueError — surfacing to
+# the user as a bare "ValueError" and killing the session. 16MB gives ample
+# headroom for legitimately large lines.
+STDIO_LIMIT = 16 * 1024 * 1024
+
 OnUpdate = Callable[[dict], Awaitable[None]]
 OnFsWrite = Callable[[str, str], Awaitable[None]]  # (path, content)
 
@@ -110,6 +118,7 @@ class ACPClient:
             stderr=asyncio.subprocess.PIPE,
             preexec_fn=sandbox.preexec_fn(),
             env=spawn_env,
+            limit=STDIO_LIMIT,
         )
         self._reader_task = asyncio.create_task(self._read_loop())
         # Drain stderr so a chatty real CLI can't deadlock on a full pipe buffer.
@@ -298,7 +307,15 @@ class ACPClient:
         assert self._proc and self._proc.stdout
         try:
             while not self._closed:
-                line = await self._proc.stdout.readline()
+                try:
+                    line = await self._proc.stdout.readline()
+                except (ValueError, asyncio.LimitOverrunError) as exc:
+                    # A single line exceeded STDIO_LIMIT. readline() already
+                    # drained the offending bytes from the buffer, so we can
+                    # skip it and keep the session alive instead of letting the
+                    # whole conversation die with a bare "ValueError".
+                    logger.warning("ACP dropped oversized stdout line: %s", exc)
+                    continue
                 if not line:
                     break
                 line = line.strip()

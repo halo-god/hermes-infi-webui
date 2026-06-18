@@ -198,23 +198,38 @@ async def _resolve_attached_files(
             mime = MIME_MAP.get(ext, "application/octet-stream")
             is_image = ext in IMAGE_EXTS
             is_text = ext in TEXT_EXTS
-
-            # Write file content to workspace so agent can read it — confine
-            # the (possibly agent-authored) name so it can't escape ws_dir.
+            # A small image is inlined as a base64 ImageContentBlock; a large one
+            # would blow past the agent's own stdin line limit, so it goes to disk
+            # and is referenced via resource_link instead.
+            inline_image = is_image and bool(file_content) and len(file_content) <= _IMAGE_INLINE_LIMIT
+            # Write to workspace so the agent can read it from disk: all text
+            # files, and any non-inline (large) image. Confine the (possibly
+            # agent-authored) name so it can't escape ws_dir.
             rel_name = safe_relative_path(f.name)
-            if ws_dir and file_content and not is_image:
+            write_to_disk = bool(ws_dir and file_content and (not is_image or not inline_image))
+            if write_to_disk:
                 fpath = confine_to_dir(ws_dir, rel_name)
                 os.makedirs(os.path.dirname(fpath), exist_ok=True)
-                with open(fpath, "w", encoding="utf-8") as fh:
-                    fh.write(file_content)
+                if is_image:
+                    import base64
+                    try:
+                        raw = base64.b64decode(file_content)
+                    except Exception:
+                        raw = file_content.encode("utf-8")
+                    with open(fpath, "wb") as fh:
+                        fh.write(raw)
+                else:
+                    with open(fpath, "w", encoding="utf-8") as fh:
+                        fh.write(file_content)
 
             result.append({
                 "id": str(f.id), "name": f.name, "kind": f.kind,
-                "workspace_path": f"attachments/{rel_name}" if ws_dir and file_content else None,
+                "workspace_path": f"attachments/{rel_name}" if write_to_disk else None,
                 "content": file_content,
                 "size_bytes": f.size_bytes or len(file_content),
                 "mime_type": mime,
                 "is_image": is_image,
+                "inline_image": inline_image,
                 "is_text": is_text,
             })
     return result
@@ -303,6 +318,9 @@ def _profile_dir(profile: Profile | None) -> str | None:
 
 
 _INLINE_LIMIT = 8000  # chars — files smaller than this are inlined in full
+# base64 chars — images larger than this go to disk + resource_link instead of
+# being inlined as a single (potentially multi-MB) JSON line to the agent.
+_IMAGE_INLINE_LIMIT = 1024 * 1024
 
 
 def _build_attached_prompt(text: str, attached: list[dict]) -> str:
@@ -318,7 +336,14 @@ def _build_attached_prompt(text: str, attached: list[dict]) -> str:
     parts = []
     for f in attached:
         if f.get("is_image"):
-            parts.append(f"[图片附件: {f['name']}]")
+            if f.get("inline_image"):
+                parts.append(f"[图片附件: {f['name']}]")
+            else:
+                ws_path = f.get("workspace_path", "")
+                ref = f"【图片附件: {f['name']}】（图片较大，未内联）"
+                if ws_path:
+                    ref += f"\n文件路径: {ws_path}"
+                parts.append(ref)
         else:
             content = f.get("content", "")
             ws_path = f.get("workspace_path", "")
@@ -403,10 +428,12 @@ async def send_message(
     full_text = f"{_FILE_WRITE_PREAMBLE}{_clarify_directives(is_first_turn, text)}\n\n{prompt_text}"
     prompt_blocks.append({"type": "text", "text": full_text})
 
-    # Add Resource Link blocks for attached files (agent can read from workspace)
+    # Add Resource Link blocks for attached files (agent can read from workspace).
+    # Text files and large (non-inline) images that were written to disk both
+    # carry a workspace_path; small inline images do not.
     for f in attached:
         ws_path = f.get("workspace_path")
-        if ws_path and not f.get("is_image"):
+        if ws_path:
             cwd = os.path.join(settings.workspace_root, str(convo.id))
             abs_path = os.path.join(cwd, ws_path)
             prompt_blocks.append({
@@ -417,9 +444,10 @@ async def send_message(
                 "size": f.get("size_bytes", 0),
             })
 
-    # Add ImageContentBlock for image attachments
+    # Add ImageContentBlock only for small images — large ones are referenced
+    # via resource_link above to avoid a multi-MB single-line prompt.
     for f in attached:
-        if f.get("is_image") and f.get("content"):
+        if f.get("inline_image") and f.get("content"):
             prompt_blocks.append({
                 "type": "image",
                 "mimeType": f.get("mime_type", "image/png"),

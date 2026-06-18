@@ -339,7 +339,40 @@ async function scrollDown() {
   await nextTick();
   if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight;
 }
-watch(() => chat.messages.map((m) => m.content.text).join("|"), scrollDown);
+
+// True when the user is already pinned to (or near) the bottom of the thread.
+// Used to avoid yanking a user who has scrolled up to read back history.
+function isNearBottom(threshold = 160) {
+  const el = scroller.value;
+  if (!el) return true;
+  return el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+}
+
+// A signature that changes whenever any message's rendered size could change.
+// Crucially includes roundtable replies + merge text, so group-chat streaming
+// triggers a virtualizer re-measure (otherwise items keep the stale 120px
+// estimate and overlap the previous message).
+function messagesSizeSignature(): string {
+  return chat.messages
+    .map((m) => {
+      if (m.role === "roundtable") {
+        const replies = (m.content.replies || [])
+          .map((r) => `${r.text?.length || 0}:${r.status}`)
+          .join(",");
+        const merged = `${m.content.merged?.text?.length || 0}:${m.content.merged?.status || ""}`;
+        return `rt|${replies}|${merged}|${m.status}`;
+      }
+      return `${m.content.text?.length || 0}|${m.status}`;
+    })
+    .join("~");
+}
+
+// Follow streaming output, but only when the user is already at the bottom and
+// we're not in the middle of prepending older history (which would jump them).
+watch(messagesSizeSignature, () => {
+  if (chat.loadingOlder) return;
+  if (isNearBottom()) scrollDown();
+});
 watch(() => chat.activeId, scrollDown);
 
 // ── Route query watcher: handle ?c= changes while already in ChatView ──
@@ -364,7 +397,10 @@ const virtualizer = useVirtualizer({
 // Update virtualizer count when messages change
 watch(() => chat.messages.length, (newCount) => {
   virtualizer.value.options.count = newCount;
-  // Auto-scroll to bottom for new messages
+  // Older messages prepended via "load more" must NOT scroll to bottom — that
+  // would fight the scroll-position preservation in setupLoadMoreObserver and
+  // make new content overlap the old. Only follow genuinely new (appended) ones.
+  if (chat.loadingOlder) return;
   nextTick(() => {
     virtualizer.value.scrollToIndex(newCount - 1, { align: "end" });
   });
@@ -377,15 +413,19 @@ function onMeasure(el: HTMLElement, _index: number) {
   }
 }
 
-// Re-measure virtual items when streaming message content grows.
-// Without this, the virtualizer keeps the initially-measured height
-// while the DOM grows, causing content to appear clipped / "not refreshing".
-watch(
-  () => chat.messages.map((m) => m.content.text).join("|"),
-  () => {
-    nextTick(() => virtualizer.value.measure());
-  },
-);
+// Re-measure virtual items when streaming message content grows. Without this,
+// the virtualizer keeps the initially-measured height while the DOM grows,
+// causing content to appear clipped or — for roundtable/group messages whose
+// text lives in content.replies[]/content.merged — to overlap the next item.
+watch(messagesSizeSignature, () => {
+  nextTick(() => virtualizer.value.measure());
+});
+
+// Re-measure when switching conversations so stale heights from the previous
+// conversation don't carry over and misposition the new message list.
+watch(() => chat.activeId, () => {
+  nextTick(() => virtualizer.value.measure());
+});
 
 const openFileId = ref<string | null>(null);
 
@@ -684,15 +724,6 @@ function getAgentPhase(msg: Message): string | null {
   if (runningStep) return `🔧 ${runningStep.title}`;
   if (msg.thinking && !hasText) return "💭 推理中…";
   return "🔍 分析问题…";
-}
-
-// ── Quote reply ──
-function quoteReply(text: string) {
-  const lines = text.trim().split("\n").slice(0, 3).join("\n");
-  const truncated = lines.length > 80 ? lines.slice(0, 80) + "…" : lines;
-  const summary = truncated.split("\n")[0].slice(0, 60);
-  draft.value = `<quote summary="${summary}">\n${truncated}\n</quote>\n\n`;
-  nextTick(() => (document.querySelector(".dock .composer-input") as HTMLTextAreaElement)?.focus());
 }
 
 // ── Regenerate ──
