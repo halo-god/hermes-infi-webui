@@ -154,13 +154,23 @@ async def create_conversation(
 
 async def _resolve_attached_files(
     db: AsyncSession, file_ids: list[str], conversation_id: str | None = None,
+    team_id: uuid.UUID | None = None,
 ) -> list[dict]:
-    """Look up workspace files by id, write to agent workspace dir, return metadata + content.
+    """Look up referenced files by id, write to agent workspace dir, return metadata + content.
 
-    Returns [{id, name, kind, workspace_path, content, size_bytes, mime_type}].
+    Resolves two kinds of reference by id: conversation/standalone ``WorkspaceFile``
+    rows and (when ``team_id`` is given) ``TeamKnowledge`` entries belonging to the
+    same team. Both are persisted into the conversation workspace so the agent can
+    ``read_file`` them on any later turn — referencing a knowledge doc no longer
+    "amnesias" once the inlining turn scrolls out of context.
+
+    Returns [{id, name, kind, workspace_path, content, size_bytes, mime_type,
+    is_image, inline_image, is_text, source}].
     """
     if not file_ids:
         return []
+
+    from app.db.models.team import TeamKnowledge
 
     # MIME type mapping
     MIME_MAP = {
@@ -191,47 +201,57 @@ async def _resolve_attached_files(
             fid = uuid.UUID(str(raw_id))
         except ValueError:
             continue
+        # Resolve either a workspace/standalone file or a team-knowledge entry.
         f = await db.get(WorkspaceFile, fid)
-        if f is not None:
-            file_content = f.content or ""
-            ext = (f.kind or "").lower()
-            mime = MIME_MAP.get(ext, "application/octet-stream")
-            is_image = ext in IMAGE_EXTS
-            is_text = ext in TEXT_EXTS
-            # A small image is inlined as a base64 ImageContentBlock; a large one
-            # would blow past the agent's own stdin line limit, so it goes to disk
-            # and is referenced via resource_link instead.
-            inline_image = is_image and bool(file_content) and len(file_content) <= _IMAGE_INLINE_LIMIT
-            # Write to workspace so the agent can read it from disk: all text
-            # files, and any non-inline (large) image. Confine the (possibly
-            # agent-authored) name so it can't escape ws_dir.
-            rel_name = safe_relative_path(f.name)
-            write_to_disk = bool(ws_dir and file_content and (not is_image or not inline_image))
-            if write_to_disk:
-                fpath = confine_to_dir(ws_dir, rel_name)
-                os.makedirs(os.path.dirname(fpath), exist_ok=True)
-                if is_image:
-                    import base64
-                    try:
-                        raw = base64.b64decode(file_content)
-                    except Exception:
-                        raw = file_content.encode("utf-8")
-                    with open(fpath, "wb") as fh:
-                        fh.write(raw)
-                else:
-                    with open(fpath, "w", encoding="utf-8") as fh:
-                        fh.write(file_content)
+        source = "file"
+        if f is None and team_id is not None:
+            k = await db.get(TeamKnowledge, fid)
+            if k is not None and k.team_id == team_id:
+                f = k
+                source = "knowledge"
+        if f is None:
+            continue
 
-            result.append({
-                "id": str(f.id), "name": f.name, "kind": f.kind,
-                "workspace_path": f"attachments/{rel_name}" if write_to_disk else None,
-                "content": file_content,
-                "size_bytes": f.size_bytes or len(file_content),
-                "mime_type": mime,
-                "is_image": is_image,
-                "inline_image": inline_image,
-                "is_text": is_text,
-            })
+        file_content = f.content or ""
+        ext = (f.kind or "").lower()
+        mime = MIME_MAP.get(ext, "application/octet-stream")
+        is_image = ext in IMAGE_EXTS
+        is_text = ext in TEXT_EXTS
+        # A small image is inlined as a base64 ImageContentBlock; a large one
+        # would blow past the agent's own stdin line limit, so it goes to disk
+        # and is referenced via resource_link instead.
+        inline_image = is_image and bool(file_content) and len(file_content) <= _IMAGE_INLINE_LIMIT
+        # Write to workspace so the agent can read it from disk: all text
+        # files, and any non-inline (large) image. Confine the (possibly
+        # agent-authored) name so it can't escape ws_dir.
+        rel_name = safe_relative_path(f.name)
+        write_to_disk = bool(ws_dir and file_content and (not is_image or not inline_image))
+        if write_to_disk:
+            fpath = confine_to_dir(ws_dir, rel_name)
+            os.makedirs(os.path.dirname(fpath), exist_ok=True)
+            if is_image:
+                import base64
+                try:
+                    raw = base64.b64decode(file_content)
+                except Exception:
+                    raw = file_content.encode("utf-8")
+                with open(fpath, "wb") as fh:
+                    fh.write(raw)
+            else:
+                with open(fpath, "w", encoding="utf-8") as fh:
+                    fh.write(file_content)
+
+        result.append({
+            "id": str(f.id), "name": f.name, "kind": f.kind,
+            "workspace_path": f"attachments/{rel_name}" if write_to_disk else None,
+            "content": file_content,
+            "size_bytes": f.size_bytes or len(file_content),
+            "mime_type": mime,
+            "is_image": is_image,
+            "inline_image": inline_image,
+            "is_text": is_text,
+            "source": source,
+        })
     return result
 
 
@@ -386,7 +406,10 @@ async def send_message(
     is_first_turn = convo.acp_session_id is None
     reply_agent_id = agent_id_override or convo.primary_agent_id
 
-    attached = await _resolve_attached_files(db, attached_file_ids or [], conversation_id=str(convo.id))
+    attached = await _resolve_attached_files(
+        db, attached_file_ids or [], conversation_id=str(convo.id),
+        team_id=getattr(convo, "team_id", None),
+    )
     if existing_user_msg is None:
         user_content: dict = {"text": text}
         if attached:
@@ -488,7 +511,10 @@ async def send_roundtable(
     Pass existing_user_msg when the caller already persisted the user turn
     (group dispatch) to avoid a duplicate user row.
     """
-    attached = await _resolve_attached_files(db, attached_file_ids or [], conversation_id=str(convo.id))
+    attached = await _resolve_attached_files(
+        db, attached_file_ids or [], conversation_id=str(convo.id),
+        team_id=getattr(convo, "team_id", None),
+    )
     if existing_user_msg is None:
         user_content: dict = {"text": text}
         if attached:
@@ -1106,7 +1132,10 @@ async def _persist_group_user_msg(
     reply_to_id: uuid.UUID | None = None,
 ) -> Message:
     """持久化群聊用户消息（统一入口，附带文件 + 回复引用）。"""
-    attached = await _resolve_attached_files(db, attached_file_ids or [], conversation_id=str(convo.id))
+    attached = await _resolve_attached_files(
+        db, attached_file_ids or [], conversation_id=str(convo.id),
+        team_id=getattr(convo, "team_id", None),
+    )
     content: dict = {"text": text}
     if attached:
         content["files"] = attached

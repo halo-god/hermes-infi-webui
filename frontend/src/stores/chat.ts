@@ -302,7 +302,7 @@ export const useChatStore = defineStore("chat", () => {
   async function send(
     text: string,
     agentId = "hermes",
-    opts?: { profileId?: string; webSearch?: boolean; deepThink?: boolean; stagedFiles?: File[]; mentions?: string[]; replyToId?: string },
+    opts?: { profileId?: string; webSearch?: boolean; deepThink?: boolean; stagedFiles?: File[]; attachedFileIds?: string[]; knowledgeIds?: string[]; mentions?: string[]; replyToId?: string },
   ) {
     if (!activeId.value) await newConversation(agentId, opts?.profileId);
     const id = activeId.value!;
@@ -317,6 +317,11 @@ export const useChatStore = defineStore("chat", () => {
         console.error("[chat] file upload failed:", e);
       }
     }
+    // Referenced file-manager files and knowledge entries are resolved server-side
+    // (written to the conversation workspace + read_file), not inlined into the
+    // message text — so they show as a clean chip and survive across turns.
+    if (opts?.attachedFileIds?.length) fileIds = [...fileIds, ...opts.attachedFileIds];
+    if (opts?.knowledgeIds?.length) fileIds = [...fileIds, ...opts.knowledgeIds];
 
     // Check if this is a group conversation
     const activeConvo = conversations.value.find((c) => c.id === id);

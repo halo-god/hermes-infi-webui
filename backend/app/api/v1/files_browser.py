@@ -229,14 +229,18 @@ async def list_standalone_files(
             else:
                 subfolders.add(fp)
 
-        # Real folders from DB
+        # Real folders from DB. Report folder_path as the folder's OWN full path
+        # (parent + name) — matching the virtual-subfolder entries below — so the
+        # picker can navigate INTO it. f.folder_path alone is only the parent.
         for f in db_folders:
+            parent = f.folder_path or "/"
+            full = parent.rstrip("/") + "/" + f.name if parent != "/" else "/" + f.name
             result.append(FileItem(
                 id=str(f.id),
                 name=f.name,
                 created_at=f.created_at.isoformat() if f.created_at else "",
                 source="folder",
-                folder_path=f.folder_path or "/",
+                folder_path=full,
                 is_folder=True,
             ))
         # Virtual subfolders (from file paths)

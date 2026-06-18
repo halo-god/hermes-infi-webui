@@ -13,7 +13,6 @@ import { useChatStore } from "@/stores/chat";
 import { useAuthStore } from "@/stores/auth";
 import { useNotificationStore } from "@/stores/notifications";
 import { conversationsApi } from "@/api/conversations";
-import { filesApi } from "@/api/files";
 import { teamsApi } from "@/api/teams";
 import { projectsApi } from "@/api/projects";
 import { renderMarkdown, renderMarkdownAsync } from "@/utils/markdown";
@@ -439,47 +438,15 @@ watch(() => chat.files.length, (newLen, oldLen) => {
 });
 
 async function onSend(opts?: SendOptions) {
-  let text = draft.value.trim();
+  const text = draft.value.trim();
   if (!text) return;
   if (chat.isActivelyStreaming(chat.activeId || "")) return;
   draft.value = "";
   if (opts?.stagedFiles?.length) showWorkspace.value = true;
-  // Prepend knowledge content inline
-  console.log('[onSend] knowledgeIds:', opts?.knowledgeIds, 'team_id:', activeConvo.value?.team_id, 'teamKnowledge:', teamKnowledge.value.length);
-  if (opts?.knowledgeIds?.length && activeConvo.value?.team_id) {
-    const tid = activeConvo.value.team_id;
-    const blocks: string[] = [];
-    for (const kid of opts.knowledgeIds) {
-      try {
-        const content = await teamsApi.knowledgeContent(tid, kid);
-        const item = teamKnowledge.value.find((k) => k.id === kid);
-        console.log('[onSend] knowledge', kid, 'content length:', content?.length, 'name:', item?.name);
-        if (content) blocks.push(`【知识库: ${item?.name || kid}】\n${content}`);
-      } catch (e) { console.error('[onSend] knowledge fetch failed:', kid, e); }
-    }
-    if (blocks.length) {
-      // Wrap knowledge content in markers so it can be hidden in display but sent to AI
-      const knowledgeBlock = blocks.map(b => `<knowledge>${b}</knowledge>`).join("\n\n");
-      text = knowledgeBlock + "\n\n" + text;
-      console.log('[onSend] final text length:', text.length);
-    }
-  }
-  // Prepend referenced file content inline
-  if (opts?.attachedFileIds?.length) {
-    const fileBlocks: string[] = [];
-    for (const fid of opts.attachedFileIds) {
-      try {
-        const fileContent = await filesApi.content(fid);
-        if (fileContent?.content) {
-          fileBlocks.push(`【文件: ${fileContent.name}】\n${fileContent.content}`);
-        }
-      } catch (e) { console.error('[onSend] file fetch failed:', fid, e); }
-    }
-    if (fileBlocks.length) {
-      const fileBlock = fileBlocks.map(b => `<file>${b}</file>`).join("\n\n");
-      text = fileBlock + "\n\n" + text;
-    }
-  }
+  // Referenced file-manager files and knowledge entries are sent by id and
+  // resolved server-side (workspace + read_file) — no longer fetched and
+  // inlined into the message text here, which used to dump raw content into
+  // the bubble and was forgotten by the agent on later turns.
   await chat.send(text, landingProfile.value?.default_agent_id || "hermes", opts);
   clearReply();
   await scrollDown();
@@ -699,8 +666,12 @@ function extractKnowledgeRefs(text: string): string[] {
   return refs;
 }
 function displayText(text: string): string {
-  // Remove <knowledge>...</knowledge> blocks, keep the rest
-  return text.replace(/<knowledge>[\s\S]*?<\/knowledge>\s*/g, "").trim();
+  // Strip legacy reference blocks (older messages inlined content into the text;
+  // references are now resolved server-side and shown as chips). Keep the rest.
+  return text
+    .replace(/<knowledge>[\s\S]*?<\/knowledge>\s*/g, "")
+    .replace(/<file>[\s\S]*?<\/file>\s*/g, "")
+    .trim();
 }
 function displayHtml(text: string): string {
   // Strip knowledge blocks then render markdown (handles <quote> etc.)
@@ -1075,9 +1046,15 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                       <Icon name="doc" :size="11" /> 已发送知识库: {{ extractKnowledgeRefs(chat.messages[row.index].content.text).join(', ') }}
                     </div>
                     <div v-if="chat.messages[row.index].content.files?.length" class="msg-files">
-                      <button v-for="f in chat.messages[row.index].content.files" :key="f.id" class="msg-file-chip" @click="openFile(f.id)">
-                        <Icon name="paperclip" :size="11" /> {{ f.name }}
-                      </button>
+                      <template v-for="f in chat.messages[row.index].content.files" :key="f.id">
+                        <!-- knowledge reference: not a workspace file, so show a non-clickable doc chip -->
+                        <span v-if="f.source === 'knowledge'" class="msg-file-chip" style="cursor:default">
+                          <Icon name="doc" :size="11" /> 知识库: {{ f.name }}
+                        </span>
+                        <button v-else class="msg-file-chip" @click="openFile(f.id)">
+                          <Icon name="paperclip" :size="11" /> {{ f.name }}
+                        </button>
+                      </template>
                     </div>
                   </template>
                 </div>
