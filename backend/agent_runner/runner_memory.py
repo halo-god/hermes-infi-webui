@@ -31,7 +31,8 @@ CONSOLIDATE_PROMPT = """【记忆整理任务】你正在执行"做梦"式记忆
 3. soul（个性设定）：AI 应当以什么角色、语气、风格与该用户互动。
 4. notes（我的笔记）：值得长期记住的具体事项（进行中的项目、重要约定、待办背景等）。
 5. 三段内容总字数不得超过 {budget} 字。宁可精炼，不要堆砌。
-6. 只输出一个 JSON 对象，不要输出任何其他文字、解释或 markdown 代码块：
+6. 对话摘录中 AI 的某些回复可能包含对工具调用结果（如文件内容、搜索结果）的复述，这些属于执行任务的中间输出，不是用户主动提供的信息。整理时请忽略这类复述，只提取用户与 AI 之间的真实交流内容。
+7. 只输出一个 JSON 对象，不要输出任何其他文字、解释或 markdown 代码块：
 {{"user_profile": "...", "soul": "...", "notes": "..."}}
 
 【现有记忆】
@@ -96,15 +97,25 @@ def trim_memory_to_budget(mem: dict[str, str], budget: int) -> dict[str, str]:
 
 
 def _message_excerpt(msg: Message) -> str | None:
-    """One transcript line for the consolidation prompt; None to skip."""
+    """One transcript line for the consolidation prompt; None to skip.
+
+    Only genuine user<->agent dialogue is kept. Roundtable merges, system
+    prompts, error turns and bare tool-call stubs are discarded.
+    """
     content = msg.content or {}
     if msg.role == "system" or msg.status == "error":
         return None
+    # Roundtable messages are synthesized by the orchestrator, not raw
+    # user-to-agent dialogue, and often embed tool outputs / hidden prompts.
     if msg.role == "roundtable":
-        text = ((content.get("merged") or {}).get("text") or "").strip()
-        prefix = "AI(圆桌)"
-    elif msg.role == "agent":
+        return None
+    if msg.role == "agent":
         text = (content.get("text") or "").strip()
+        # Skip turns that are purely tool calls with no conversational text.
+        if not text:
+            return None
+        if content.get("tool_calls") and len(text) < 20:
+            return None
         prefix = "AI"
     elif msg.role == "user":
         text = (content.get("text") or "").strip()
