@@ -337,7 +337,12 @@ def _profile_dir(profile: Profile | None) -> str | None:
     return os.path.dirname(os.path.expanduser(profile.path))
 
 
-_INLINE_LIMIT = 8000  # chars — files smaller than this are inlined in full
+# chars — files at/below this are inlined in full; larger ones are referenced
+# (head preview + read_file). Configurable via settings; see config.py for why
+# it's kept modest (agent stdin line limit).
+_INLINE_LIMIT = settings.attachment_inline_char_limit
+# Head preview inlined for a large referenced doc so the model always has context.
+_REFERENCE_PREVIEW_CHARS = settings.attachment_reference_preview_chars
 # base64 chars — images larger than this go to disk + resource_link instead of
 # being inlined as a single (potentially multi-MB) JSON line to the agent.
 _IMAGE_INLINE_LIMIT = 1024 * 1024
@@ -371,11 +376,24 @@ def _build_attached_prompt(text: str, attached: list[dict]) -> str:
                 # Small file: inline in full
                 parts.append(f"【附件: {f['name']}】\n```\n{content}\n```")
             elif content:
-                # Large file: reference only — agent reads via read_file tool
+                # Large file: inline a bounded head preview + reference. The full
+                # document is on disk; the agent reads the rest on demand via the
+                # read_file tool (fs/read_text_file), which scales to 1M+ chars.
                 size_kb = len(content) / 1024
-                ref = f"【附件: {f['name']}】（{size_kb:.0f}KB，内容过长不内嵌）"
+                preview = content[:_REFERENCE_PREVIEW_CHARS]
+                truncated = len(content) > _REFERENCE_PREVIEW_CHARS
+                ref = (
+                    f"【附件: {f['name']}】（共 {size_kb:.0f}KB，以下为前 "
+                    f"{len(preview)} 字预览）\n```\n{preview}\n```"
+                )
+                if truncated:
+                    ref += "\n（预览已截断）"
                 if ws_path:
-                    ref += f"\n文件路径: {ws_path}\n请用 read_file 工具分段读取需要的部分。"
+                    ref += (
+                        f"\n完整内容见文件: {ws_path}\n"
+                        "如需预览之外的内容，请用 read_file 工具读取该文件"
+                        "（可用 line/limit 参数分段读取大文件）。"
+                    )
                 parts.append(ref)
             else:
                 parts.append(f"【附件: {f['name']}】（文件内容为空）")

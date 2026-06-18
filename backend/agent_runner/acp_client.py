@@ -297,6 +297,50 @@ class ACPClient:
     async def _respond(self, rid: Any, result: Any) -> None:
         await self._write({"jsonrpc": "2.0", "id": rid, "result": result})
 
+    async def _respond_error(self, rid: Any, code: int, message: str) -> None:
+        await self._write({"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}})
+
+    def _resolve_in_cwd(self, raw_path: str) -> str:
+        """Resolve an agent-supplied path to an absolute path confined to cwd.
+
+        Accepts ``file://`` URIs and relative paths. Raises ValueError if the
+        resolved real path escapes the workspace (prevents the agent from
+        reading arbitrary host files like /etc/passwd).
+        """
+        p = raw_path
+        if p.startswith("file://"):
+            p = p[len("file://"):]
+        p = os.path.expanduser(p)
+        if not os.path.isabs(p):
+            p = os.path.join(self.cwd, p)
+        real_cwd = os.path.realpath(self.cwd)
+        real_p = os.path.realpath(p)
+        if not (real_p == real_cwd or real_p.startswith(real_cwd + os.sep)):
+            raise ValueError("path escapes workspace")
+        return real_p
+
+    @staticmethod
+    def _read_text_slice(abs_path: str, line: Any = None, limit: Any = None) -> str:
+        """Read a text file, optionally a line-window for paginated large reads.
+
+        ``line`` is a 1-based start line; ``limit`` the max number of lines.
+        With neither, returns the whole file.
+        """
+        if not line and not limit:
+            with open(abs_path, "r", encoding="utf-8", errors="ignore") as fh:
+                return fh.read()
+        with open(abs_path, "r", encoding="utf-8", errors="ignore") as fh:
+            lines = fh.readlines()
+        try:
+            start = max(int(line) - 1, 0) if line else 0
+        except (TypeError, ValueError):
+            start = 0
+        try:
+            end = start + int(limit) if limit else len(lines)
+        except (TypeError, ValueError):
+            end = len(lines)
+        return "".join(lines[start:end])
+
     async def _write(self, obj: dict) -> None:
         assert self._proc and self._proc.stdin
         line = json.dumps(obj, ensure_ascii=False) + "\n"
@@ -437,6 +481,34 @@ class ACPClient:
                         "optionId": "allow_once" if approved else "deny",
                     },
                 })
+            elif method in ("fs/read_text_file", "fs/readTextFile"):
+                # Serve file reads the client advertised support for (initialize:
+                # clientCapabilities.fs.readTextFile). WITHOUT this, every
+                # read_file the agent attempts on a referenced/large attachment
+                # returned null → the agent produced no text → "empty response".
+                # Confined to cwd; supports line/limit for paginated reads of
+                # very large documents (1M+ chars) without loading the prompt.
+                raw_path = params.get("path") or ""
+                line = params.get("line")
+                limit = params.get("limit")
+                try:
+                    abs_path = self._resolve_in_cwd(raw_path)
+                except ValueError:
+                    await self._respond_error(
+                        msg["id"], -32001, f"path escapes workspace: {raw_path}",
+                    )
+                    return
+                try:
+                    content = await asyncio.to_thread(
+                        self._read_text_slice, abs_path, line, limit,
+                    )
+                except FileNotFoundError:
+                    await self._respond_error(msg["id"], -32002, f"file not found: {raw_path}")
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    await self._respond_error(msg["id"], -32003, f"read failed: {exc}")
+                    return
+                await self._respond(msg["id"], {"content": content})
             else:
                 # Unknown agent→client request: acknowledge with null.
                 await self._respond(msg["id"], None)

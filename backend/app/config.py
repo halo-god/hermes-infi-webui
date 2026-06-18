@@ -123,6 +123,16 @@ class Settings(BaseSettings):
     # ── Uploads ──
     max_upload_mb: int = 25  # reject uploads larger than this (per file)
 
+    # ── Attached/referenced documents ──
+    # Files at or below this char count are inlined whole into the prompt; larger
+    # ones are written to the workspace and read on demand via fs/read_text_file.
+    # Kept modest so the single-line JSON prompt stays well under the agent's
+    # stdin readline limit (CJK text ≈ 3 bytes/char in UTF-8).
+    attachment_inline_char_limit: int = 12000
+    # Head preview (chars) inlined for a large referenced doc so the model always
+    # has immediate context and can decide what to read_file next.
+    attachment_reference_preview_chars: int = 2000
+
     # ── Agent sandbox (P5) ──
     sandbox_enabled: bool = False         # apply POSIX rlimits to agent subprocesses
     sandbox_cpu_seconds: int = 120        # RLIMIT_CPU

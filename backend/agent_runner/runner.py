@@ -694,15 +694,20 @@ class Runner:
         if acc["cancelled"]:
             status = "cancelled"
         elif not acc["text"].strip():
-            # Agent returned empty text (e.g. context overflow → 400 → refusal).
-            # Don't silently mark as complete — surface the error to the user.
+            # Agent produced no text. Don't silently complete — surface it. Avoid
+            # blaming "context too long": with read_file working, the usual cause
+            # is the model declining or not reading a referenced file, not size.
             logger.warning(
-                "Agent returned empty text for %s (stop_reason=%s)",
-                conversation_id[:8], stop_reason,
+                "Agent returned empty text for %s (stop_reason=%s, tokens=%s, "
+                "had_thinking=%s, files_written=%s)",
+                conversation_id[:8], stop_reason, acc.get("total_tokens"),
+                bool(acc.get("thinking", "").strip()), len(acc.get("files") or []),
             )
             await self._fail(
                 conversation_id, acc["current_msg_id"],
-                "模型返回空响应（上下文可能过长，请减少附件大小或缩短对话后重试）",
+                "助手本轮没有输出文本回复（可能未读取引用文件或被模型拒绝）。"
+                "请重试，或把问题描述得更具体；若引用了大文档，可让助手"
+                "「先读取该文件再回答」。",
             )
             return
         else:
