@@ -4,7 +4,9 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { mediaTicket } from "@/api/client";
+import { useBrandingStore } from "@/stores/branding";
 
+const branding = useBrandingStore();
 const termContainer = ref<HTMLElement | null>(null);
 const connected = ref(false);
 const connecting = ref(false);
@@ -25,7 +27,7 @@ async function connect() {
   ws.onopen = () => {
     connected.value = true;
     connecting.value = false;
-    terminal?.writeln("\x1b[32m✓ Connected to Hermes Terminal\x1b[0m");
+    terminal?.writeln(`\x1b[32m✓ Connected to ${branding.shortName} Terminal\x1b[0m`);
   };
 
   ws.onmessage = (e) => {

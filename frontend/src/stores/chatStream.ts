@@ -5,9 +5,24 @@
  */
 import { conversationsApi } from "@/api/conversations";
 import { useNotificationStore } from "@/stores/notifications";
+import { useBrandingStore } from "@/stores/branding";
+import { getActivePinia } from "pinia";
 import i18n from "@/i18n";
 import type { ConfirmationRequest, Message, StreamEvent } from "@/types";
 import type { Ref } from "vue";
+
+/** Branding short-name for desktop-notification prefixes. Resolved lazily via
+ *  the active Pinia instance so this works outside a component setup context. */
+function brandPrefix(): string {
+  try {
+    const pinia = getActivePinia();
+    if (!pinia) return "";
+    const branding = useBrandingStore();
+    return (branding.shortName || "") + " · ";
+  } catch {
+    return "";
+  }
+}
 
 interface StreamHandlersDeps {
   activeId: Ref<string | null>;
@@ -233,7 +248,7 @@ export function registerStreamHandlers(
     const ns = useNotificationStore();
     ns.push({ title: t("stream.needsConfirmation"), body: ev.request.question || t("stream.aiNeedsConfirmation"), kind: "warn" });
     if (document.hidden && "Notification" in window && Notification.permission === "granted") {
-      new Notification("Hermes · " + t("stream.needsConfirmation"), { body: ev.request.question || t("stream.aiNeedsConfirmation"), tag: "hermes-confirm" });
+      new Notification(brandPrefix() + t("stream.needsConfirmation"), { body: ev.request.question || t("stream.aiNeedsConfirmation"), tag: "hermes-confirm" });
     }
   }, activeId));
 
@@ -262,7 +277,7 @@ export function registerStreamHandlers(
       const text = (ev.text || m?.content?.text || "").slice(0, 80);
       ns.push({ title: t("stream.aiReplyComplete"), body: text || t("stream.clickToView"), kind: "success", link: `/?c=${activeId.value}` });
       if (document.hidden && "Notification" in window && Notification.permission === "granted") {
-        new Notification("Hermes · " + t("stream.aiReplyComplete"), { body: text || t("stream.clickToView"), tag: "hermes-done" });
+        new Notification(brandPrefix() + t("stream.aiReplyComplete"), { body: text || t("stream.clickToView"), tag: "hermes-done" });
       }
     }
     scheduleRefresh();

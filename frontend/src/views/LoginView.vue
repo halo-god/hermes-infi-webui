@@ -1,16 +1,21 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { AxiosError } from "axios";
 import Icon from "@/components/Icon.vue";
 import { useAuthStore } from "@/stores/auth";
+import { useBrandingStore } from "@/stores/branding";
 import { authApi } from "@/api/auth";
 import { tokenStore } from "@/api/client";
 import type { ProviderInfo } from "@/types";
 
 const auth = useAuthStore();
+const branding = useBrandingStore();
 const router = useRouter();
 const route = useRoute();
+
+/** First character of the short brand name, used as the letter-mark fallback. */
+const brandInitial = computed(() => (branding.shortName || "H").trim().charAt(0) || "H");
 
 /** Only allow same-site relative redirects — blocks `?redirect=https://evil.com`
  *  open-redirect / `//evil.com` protocol-relative attacks. */
@@ -157,21 +162,23 @@ async function submit() {
     <!-- Brand panel -->
     <div class="login-brand">
       <div class="login-brand-top">
-        <div class="login-mark">H</div>
+        <img v-if="branding.logoUrl" class="login-mark-img" :src="branding.logoUrl" alt="" />
+        <div v-else class="login-mark">{{ brandInitial }}</div>
         <div>
-          <div class="login-wordmark">Hermes</div>
-          <div class="login-wordtag">信使 · MESSENGER</div>
+          <div class="login-wordmark">{{ branding.display }}</div>
+          <div class="login-wordtag">{{ branding.shortName }}</div>
         </div>
       </div>
       <div class="login-brand-mid">
-        <div class="login-quote">凡所欲遣，<br />皆可托<em>信使</em>。</div>
-        <div class="login-quote-sub">连接你的 Hermes Agent，开始协作。</div>
+        <div class="login-quote">{{ branding.tagline }}</div>
+        <div class="login-quote-sub">{{ branding.loginSubtitle }}</div>
       </div>
       <div class="login-brand-foot">
         <div class="login-foot-line"><span class="lf-dot" /> ACP 连接就绪</div>
         <div class="login-foot-meta">production · ACP v1</div>
       </div>
-      <div class="login-seal-bg">信</div>
+      <img v-if="branding.logoUrl" class="login-seal-bg" :src="branding.logoUrl" alt="" aria-hidden="true" />
+      <div v-else class="login-seal-bg">{{ brandInitial }}</div>
     </div>
 
     <!-- Auth card -->
@@ -317,6 +324,13 @@ async function submit() {
   font-weight: 600;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 2px 6px rgba(0, 0, 0, 0.3);
 }
+.login-mark-img {
+  width: 52px;
+  height: 52px;
+  border-radius: 13px;
+  object-fit: contain;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+}
 .login-wordmark {
   font-family: var(--font-serif);
   font-size: 26px;
@@ -392,6 +406,13 @@ async function submit() {
   pointer-events: none;
   z-index: 1;
   user-select: none;
+}
+img.login-seal-bg {
+  width: 320px;
+  height: 320px;
+  object-fit: contain;
+  opacity: 0.06;
+  font-size: initial;
 }
 .login-panel {
   display: grid;

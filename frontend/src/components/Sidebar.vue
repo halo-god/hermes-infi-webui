@@ -8,6 +8,7 @@ import Icon from "@/components/Icon.vue";
 import NewTeamModal from "@/components/NewTeamModal.vue";
 import NewGroupModal from "@/components/NewGroupModal.vue";
 import { useAuthStore } from "@/stores/auth";
+import { useBrandingStore } from "@/stores/branding";
 import { useChatStore } from "@/stores/chat";
 import { useNotificationStore } from "@/stores/notifications";
 import { useTheme } from "@/composables/useTheme";
@@ -16,6 +17,7 @@ import type { Conversation } from "@/types";
 
 const auth = useAuthStore();
 const chat = useChatStore();
+const branding = useBrandingStore();
 const ns = useNotificationStore();
 const router = useRouter();
 const route = useRoute();
@@ -175,10 +177,13 @@ async function shareConvo(id: string) {
   <aside class="side" @click="closeCtx">
     <div class="side-inner">
       <div class="brand">
-        <div class="brand-mark"><Icon name="brand" :size="22" /></div>
+        <div class="brand-mark">
+          <img v-if="branding.logoUrl" :src="branding.logoUrl" alt="" class="brand-mark-img" />
+          <Icon v-else name="brand" :size="22" />
+        </div>
         <div>
-          <div class="brand-name">Hermes</div>
-          <div class="brand-tag">信使 · MESSENGER</div>
+          <div class="brand-name">{{ branding.shortName }}</div>
+          <div class="brand-tag">{{ branding.tagline }}</div>
         </div>
       </div>
 

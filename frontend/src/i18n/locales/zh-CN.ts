@@ -49,15 +49,17 @@ export default {
     evening: "晚上好",
     askAnything: "今天有什么安排？",
     sub: "Ask me anything · 我会调度合适的助手为你完成。",
-    classical: "凡所欲遣，<em>皆可托信使</em>。",
     classicalSub: "Quidquid mittere vis, mihi crede.",
+  },
+  boot: {
+    preparing: "{brand} 正在准备…",
   },
   chat: {
     title: "对话",
     roundtable: "圆桌",
     agentsParallel: "位助手并行作答",
     agentsActive: "位并行",
-    hermesMerge: "Hermes 综合各方观点",
+    hermesMerge: "{brand} 综合各方观点",
     adopt: "采纳",
     followUp: "追问",
     copyToMe: "转给我",
@@ -88,7 +90,6 @@ export default {
     irreversible: "此操作不可恢复",
   },
   login: {
-    title: "连接你的 Hermes Agent",
     subtitle: "通过 ACP · v1 协议建立会话",
     emailOrUser: "邮箱或用户名",
     password: "密码",

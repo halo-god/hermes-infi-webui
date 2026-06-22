@@ -48,15 +48,17 @@ export default {
     evening: "Good evening",
     askAnything: "What's on the agenda today?",
     sub: "Ask me anything · I'll dispatch the right agent for you.",
-    classical: "Whatever you wish to send, <em>trust the messenger</em>.",
     classicalSub: "Quidquid mittere vis, mihi crede.",
+  },
+  boot: {
+    preparing: "{brand} is getting ready…",
   },
   chat: {
     title: "Chat",
     roundtable: "Roundtable",
     agentsParallel: "agents responding in parallel",
     agentsActive: "active",
-    hermesMerge: "Hermes synthesizes all perspectives",
+    hermesMerge: "{brand} synthesizes all perspectives",
     adopt: "Adopt",
     followUp: "Follow up",
     copyToMe: "Copy to me",
@@ -87,7 +89,6 @@ export default {
     irreversible: "This action cannot be undone",
   },
   login: {
-    title: "Connect your Hermes Agent",
     subtitle: "Establish session via ACP · v1 protocol",
     emailOrUser: "Email or username",
     password: "Password",

@@ -86,7 +86,14 @@ export interface AuditEntry {
 
 export interface SystemSettings {
   data: {
-    branding: { tenant_name: string; display: string; login_tagline: string; accent: string };
+    branding: {
+      tenant_name: string;
+      display: string;
+      short_name: string;
+      login_tagline: string;
+      login_subtitle: string;
+      accent: string;
+    };
     model_gateway: {
       default_model: string;
       monthly_token_quota: number;
@@ -95,6 +102,25 @@ export interface SystemSettings {
     };
   };
   updated_at: string;
+}
+
+/** Unauthenticated, front-facing branding payload (GET /branding). */
+export interface BrandingPublic {
+  tenant_name: string;
+  display: string;
+  short_name: string;
+  login_tagline: string;
+  login_subtitle: string;
+  accent: string;
+  favicon_url: string | null;
+  logo_url: string | null;
+}
+
+export interface BrandAssetOut {
+  kind: string;
+  mime: string;
+  updated_at: string;
+  url: string;
 }
 
 export interface IdentityProvider {

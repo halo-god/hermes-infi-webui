@@ -7,8 +7,10 @@ import ProfileListItem from "@/components/ProfileListItem.vue";
 import { agentsApi, type Profile } from "@/api/agents";
 import { filesApi, type FileItem } from "@/api/files";
 import { useNotificationStore } from "@/stores/notifications";
+import { useBrandingStore } from "@/stores/branding";
 
 const ns = useNotificationStore();
+const branding = useBrandingStore();
 
 const props = defineProps<{
   modelValue: string;
@@ -196,8 +198,8 @@ function onDocClick(e: MouseEvent) {
 const personal = computed(() => profiles.value.filter((p) => p.scope === "personal"));
 const team = computed(() => profiles.value.filter((p) => p.scope === "team"));
 const globalProfiles = computed(() => profiles.value.filter((p) => p.scope === "global"));
-const pillLabel = computed(() => selected.value?.name || props.agent?.label || "Hermes");
-const pillColor = computed(() => selected.value?.color || props.agent?.color || "#b8852a");
+const pillLabel = computed(() => selected.value?.name || props.agent?.label || branding.shortName);
+const pillColor = computed(() => selected.value?.color || props.agent?.color || branding.accent);
 const pillModel = computed(() => selected.value?.default_model || props.agent?.model || "ACP");
 
 function autoresize() {

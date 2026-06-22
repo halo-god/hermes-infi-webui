@@ -40,6 +40,28 @@ class SystemSettingsUpdate(BaseModel):
     data: dict
 
 
+class BrandingPublic(BaseModel):
+    """Unauthenticated, front-facing branding payload."""
+
+    tenant_name: str
+    display: str
+    short_name: str
+    login_tagline: str
+    login_subtitle: str
+    accent: str
+    favicon_url: str | None = None
+    logo_url: str | None = None
+
+
+class BrandAssetOut(BaseModel):
+    """Metadata echo after an admin asset upload/delete."""
+
+    kind: str
+    mime: str
+    updated_at: datetime
+    url: str
+
+
 class AdminStats(BaseModel):
     users: int
     teams: int

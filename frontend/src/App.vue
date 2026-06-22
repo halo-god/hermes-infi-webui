@@ -2,29 +2,38 @@
 import { computed, onMounted, watch } from "vue";
 import { darkTheme, NConfigProvider, NMessageProvider, NDialogProvider } from "naive-ui";
 import { useAuthStore } from "@/stores/auth";
+import { useBrandingStore } from "@/stores/branding";
 import { useTheme } from "@/composables/useTheme";
 import { usePresence } from "@/composables/usePresence";
 import { useNotificationStream } from "@/composables/useNotificationStream";
+import { useI18n } from "vue-i18n";
 
 const auth = useAuthStore();
+const branding = useBrandingStore();
 const { theme } = useTheme();
 const { startHeartbeat, stopHeartbeat } = usePresence();
 const notifyStream = useNotificationStream();
+const { t } = useI18n();
 
 const naiveTheme = computed(() => (theme.value === "dark" ? darkTheme : null));
 const themeOverrides = computed(() => ({
   common: {
-    primaryColor: "#b8852a",
-    primaryColorHover: "#d4a04a",
-    primaryColorPressed: "#8a6418",
-    primaryColorSuppl: "#d4a04a",
+    ...branding.accentOverrides,
     borderRadius: "10px",
     borderRadiusSmall: "6px",
     fontFamily: '"Inter", "Noto Sans SC", system-ui, -apple-system, sans-serif',
   },
 }));
 
+const bootMark = computed(() => {
+  if (branding.logoUrl) return null;
+  return (branding.shortName || "H").trim().charAt(0) || "H";
+});
+
 onMounted(async () => {
+  // Branding is public — fetch in parallel with session restore so the
+  // document title / favicon / accent are correct from the first paint.
+  void branding.fetchBranding();
   await auth.bootstrap();
   // Start heartbeat after bootstrap confirms user is authenticated
   if (auth.user) {
@@ -51,8 +60,9 @@ watch(() => auth.user, (user, oldUser) => {
       <NDialogProvider>
         <router-view v-if="auth.ready" />
         <div v-else class="boot-screen">
-          <div class="boot-mark">H</div>
-          <div class="boot-text">信使正在准备…</div>
+          <img v-if="branding.logoUrl" class="boot-mark-img" :src="branding.logoUrl" alt="" />
+          <div v-else class="boot-mark">{{ bootMark }}</div>
+          <div class="boot-text">{{ t('boot.preparing', { brand: branding.shortName }) }}</div>
         </div>
       </NDialogProvider>
     </NMessageProvider>
@@ -80,6 +90,12 @@ watch(() => auth.user, (user, oldUser) => {
   font-family: var(--font-serif);
   font-size: 26px;
   font-weight: 600;
+}
+.boot-mark-img {
+  width: 52px;
+  height: 52px;
+  border-radius: 13px;
+  object-fit: contain;
 }
 .boot-text {
   font-family: var(--font-serif);

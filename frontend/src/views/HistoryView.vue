@@ -6,10 +6,12 @@ import { useRouter } from "vue-router";
 import Icon from "@/components/Icon.vue";
 import { conversationsApi } from "@/api/conversations";
 import { useChatStore } from "@/stores/chat";
+import { useBrandingStore } from "@/stores/branding";
 import type { Conversation } from "@/types";
 
 const router = useRouter();
 const chat = useChatStore();
+const branding = useBrandingStore();
 
 const conversations = ref<Conversation[]>([]);
 const q = ref("");
@@ -30,7 +32,7 @@ async function reload() {
 
 function agentLookup(id: string) {
   const p = chat.profiles.find((pp) => pp.default_agent_id === id);
-  return { label: p?.name || "Hermes", color: p?.color || "#b8852a", icon: p?.icon || "brand" };
+  return { label: p?.name || branding.shortName, color: p?.color || branding.accent, icon: p?.icon || "brand" };
 }
 function bucketOf(iso: string): string {
   const d = new Date(iso).getTime();

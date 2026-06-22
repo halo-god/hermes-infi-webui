@@ -7,10 +7,12 @@
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import Icon from "@/components/Icon.vue";
 import { adminApi } from "@/api/admin";
+import { brandingApi } from "@/api/branding";
 import { http } from "@/api/client";
 import { fmtDate } from "@/utils/format";
 import { agentsApi, type Profile, type ProfileCreate } from "@/api/agents";
 import { useAuthStore } from "@/stores/auth";
+import { useBrandingStore } from "@/stores/branding";
 import { usePresence } from "@/composables/usePresence";
 import type {
   AdminRole,
@@ -24,6 +26,7 @@ import type {
 } from "@/types";
 
 const authStore = useAuthStore();
+const branding = useBrandingStore();
 const isSuperAdmin = computed(() => authStore.user?.role === "super_admin");
 const { queryPresence, getStatus } = usePresence();
 
@@ -43,6 +46,7 @@ const auditDateTo = ref("");
 let _auditTimer: ReturnType<typeof setInterval> | null = null;
 const settings = ref<SystemSettings["data"] | null>(null);
 const savingSettings = ref(false);
+const assetBusy = ref<"favicon" | "logo" | null>(null);
 const providers = ref<IdentityProvider[]>([]);
 const activeProvider = ref<string>("ldap");
 const ldap = ref<IdentityProvider | null>(null);
@@ -164,7 +168,7 @@ function loadMore() {
 async function loadSettings() {
   const raw = (await adminApi.getSettings()).data ?? {} as Record<string, unknown>;
   settings.value = {
-    branding: { tenant_name: "", display: "Hermes", login_tagline: "", accent: "#b8852a", ...((raw.branding as Record<string, unknown>) || {}) },
+    branding: { tenant_name: "", display: "", short_name: "", login_tagline: "", login_subtitle: "", accent: "#b8852a", ...((raw.branding as Record<string, unknown>) || {}) },
     model_gateway: { default_model: "claude-sonnet-4-6", monthly_token_quota: 1000000, rate_limit_per_min: 20, overage: "soft", ...((raw.model_gateway as Record<string, unknown>) || {}) },
   };
 }
@@ -272,8 +276,39 @@ async function saveSettings() {
   try {
     settings.value = (await adminApi.putSettings(settings.value)).data;
     await loadAudit();
+    // Reflect text changes across the app immediately.
+    await branding.fetchBranding();
   } finally {
     savingSettings.value = false;
+  }
+}
+
+/** Live favicon/logo URLs shown in the admin form (from the public branding endpoint). */
+const liveBranding = computed(() => branding.branding);
+
+async function onAssetPicked(kind: "favicon" | "logo", e: Event) {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  assetBusy.value = kind;
+  try {
+    await brandingApi.uploadAsset(kind, file);
+    await branding.fetchBranding();
+    await loadAudit();
+  } finally {
+    assetBusy.value = null;
+    input.value = "";
+  }
+}
+
+async function onAssetClear(kind: "favicon" | "logo") {
+  assetBusy.value = kind;
+  try {
+    await brandingApi.deleteAsset(kind);
+    await branding.fetchBranding();
+    await loadAudit();
+  } finally {
+    assetBusy.value = null;
   }
 }
 async function toggleProvider(p: IdentityProvider) {
@@ -553,10 +588,10 @@ async function handleImportFile(e: Event) {
     <div class="admin-hero">
       <div class="admin-hero-row">
         <span class="admin-badge"><Icon name="settings" :size="11" /> ADMIN CONSOLE</span>
-        <span style="font-size: 11.5px; color: var(--ink-mute); font-family: var(--font-mono)">{{ settings?.branding?.tenant_name || "Hermes" }}</span>
+        <span style="font-size: 11.5px; color: var(--ink-mute); font-family: var(--font-mono)">{{ settings?.branding?.tenant_name || branding.tenantName }}</span>
       </div>
       <h1 class="admin-title">后台<em>管理</em></h1>
-      <div class="admin-sub">用户、权限、连接器与日志——管理整个 Hermes 实例。</div>
+      <div class="admin-sub">用户、权限、连接器与日志——管理整个 {{ branding.shortName }} 实例。</div>
       <div class="admin-tabs">
         <button v-for="t in TABS" :key="t[0]" class="team-tab" :class="{ active: tab === t[0] }" @click="tab = t[0]">{{ t[1] }}</button>
       </div>
@@ -1331,10 +1366,37 @@ async function handleImportFile(e: Event) {
           <div class="section-card">
             <div class="section-head"><div class="section-title"><Icon name="sparkle" /> 品牌与外观</div></div>
             <div style="padding: 18px"><div class="cfg-grid">
-              <div class="lbl">租户名称</div><div class="val"><input class="cfg-input" v-model="settings.branding.tenant_name" /></div>
-              <div class="lbl">显示标识</div><div class="val"><input class="cfg-input" v-model="settings.branding.display" /></div>
-              <div class="lbl">登录页文案</div><div class="val"><input class="cfg-input" v-model="settings.branding.login_tagline" /></div>
-            </div></div>
+              <div class="lbl">租户名称</div><div class="val"><input class="cfg-input" v-model="settings.branding.tenant_name" placeholder="组织 / 租户名" /></div>
+              <div class="lbl">显示标识</div><div class="val"><input class="cfg-input" v-model="settings.branding.display" placeholder="浏览器标题、登录页主标题" /></div>
+              <div class="lbl">短名</div><div class="val"><input class="cfg-input" v-model="settings.branding.short_name" placeholder="侧栏、通知前缀、兜底名" /></div>
+              <div class="lbl">登录页文案</div><div class="val"><input class="cfg-input" v-model="settings.branding.login_tagline" placeholder="登录页 / 问候语 slogan" /></div>
+              <div class="lbl">登录页副标题</div><div class="val"><input class="cfg-input" v-model="settings.branding.login_subtitle" placeholder="登录页主标题下方的说明行" /></div>
+              <div class="lbl">主题强调色</div><div class="val"><div style="display:flex;align-items:center;gap:8px"><input type="color" v-model="settings.branding.accent" style="width:34px;height:28px;border:1px solid var(--rule);border-radius:6px;background:transparent;cursor:pointer;padding:2px" /><input class="cfg-input" style="flex:1;min-width:0" v-model="settings.branding.accent" placeholder="#b8852a" /></div></div>
+              <div class="lbl">网站图标</div><div class="val">
+                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                  <img v-if="liveBranding.favicon_url" :src="liveBranding.favicon_url" alt="" style="width:24px;height:24px;border-radius:5px;object-fit:contain;border:1px solid var(--rule)" />
+                  <span v-else style="font-size:11.5px;color:var(--ink-mute);font-style:italic">未上传</span>
+                  <label class="btn" style="cursor:pointer;font-size:11.5px;padding:4px 10px">
+                    {{ assetBusy === 'favicon' ? '上传中…' : (liveBranding.favicon_url ? '更换' : '上传') }}
+                    <input type="file" accept="image/png,image/svg+xml,image/webp,image/x-icon,image/vnd.microsoft.icon" style="display:none" :disabled="assetBusy === 'favicon'" @change="onAssetPicked('favicon', $event)" />
+                  </label>
+                  <button v-if="liveBranding.favicon_url" class="btn" style="font-size:11.5px;padding:4px 10px;color:var(--danger);border-color:color-mix(in srgb,var(--danger) 40%,var(--rule))" :disabled="assetBusy === 'favicon'" @click="onAssetClear('favicon')">清除</button>
+                </div>
+              </div>
+              <div class="lbl">品牌 Logo</div><div class="val">
+                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                  <img v-if="liveBranding.logo_url" :src="liveBranding.logo_url" alt="" style="width:34px;height:34px;border-radius:6px;object-fit:contain;border:1px solid var(--rule);background:var(--bg-canvas)" />
+                  <span v-else style="font-size:11.5px;color:var(--ink-mute);font-style:italic">未上传</span>
+                  <label class="btn" style="cursor:pointer;font-size:11.5px;padding:4px 10px">
+                    {{ assetBusy === 'logo' ? '上传中…' : (liveBranding.logo_url ? '更换' : '上传') }}
+                    <input type="file" accept="image/png,image/svg+xml,image/webp,image/jpeg" style="display:none" :disabled="assetBusy === 'logo'" @change="onAssetPicked('logo', $event)" />
+                  </label>
+                  <button v-if="liveBranding.logo_url" class="btn" style="font-size:11.5px;padding:4px 10px;color:var(--danger);border-color:color-mix(in srgb,var(--danger) 40%,var(--rule))" :disabled="assetBusy === 'logo'" @click="onAssetClear('logo')">清除</button>
+                </div>
+              </div>
+            </div>
+            <div style="padding:0 18px 14px;font-size:11px;color:var(--ink-mute);font-style:italic;line-height:1.5">图标与 Logo 即时生效；名称 / 文案 / 强调色需点击下方「保存设置」。</div>
+            </div>
           </div>
           <div class="section-card">
             <div class="section-head"><div class="section-title"><Icon name="bolt" /> 模型网关</div></div>

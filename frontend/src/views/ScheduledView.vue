@@ -4,13 +4,15 @@
 import { useRouter } from "vue-router";
 import Icon from "@/components/Icon.vue";
 import { useChatStore } from "@/stores/chat";
+import { useBrandingStore } from "@/stores/branding";
 
 const router = useRouter();
 const chat = useChatStore();
+const branding = useBrandingStore();
 
 function agentById(id: string) {
   const p = chat.profiles.find((pp) => pp.default_agent_id === id);
-  return { label: p?.name || id, color: p?.color || "#b8852a", icon: p?.icon || "sparkle" };
+  return { label: p?.name || id, color: p?.color || branding.accent, icon: p?.icon || "sparkle" };
 }
 
 const tasks = [
@@ -25,7 +27,7 @@ const tasks = [
     <div class="landing" style="padding-top: 80px">
       <div class="landing-inner">
         <h1 class="hello" style="font-size: 34px"><em>定时任务</em></h1>
-        <div class="hello-sub">让信使在指定时刻替你跑腿。</div>
+        <div class="hello-sub">让{{ branding.shortName }}在指定时刻替你跑腿。</div>
 
         <div style="width: 100%; max-width: 640px; margin-top: 24px; display: flex; flex-direction: column; gap: 10px">
           <div
@@ -36,7 +38,7 @@ const tasks = [
           >
             <div
               class="agent-icon"
-              :style="{ background: agentById(t.agent).color || '#b8852a', width: '30px', height: '30px', borderRadius: '8px', flexShrink: '0' }"
+              :style="{ background: agentById(t.agent).color || branding.accent, width: '30px', height: '30px', borderRadius: '8px', flexShrink: '0' }"
             >
               <Icon :name="agentById(t.agent).icon || 'sparkle'" :size="14" />
             </div>

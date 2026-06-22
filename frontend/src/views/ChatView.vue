@@ -11,6 +11,7 @@ import ConfirmModal from "@/components/ConfirmModal.vue";
 import ConvoSeal from "@/components/ConvoSeal.vue";
 import { useChatStore } from "@/stores/chat";
 import { useAuthStore } from "@/stores/auth";
+import { useBrandingStore } from "@/stores/branding";
 import { useNotificationStore } from "@/stores/notifications";
 import { conversationsApi } from "@/api/conversations";
 import { filesApi } from "@/api/files";
@@ -29,6 +30,7 @@ const MemberPanel = defineAsyncComponent(() => import("@/components/MemberPanel.
 
 const chat = useChatStore();
 const auth = useAuthStore();
+const branding = useBrandingStore();
 const ns = useNotificationStore();
 const route = useRoute();
 const router = useRouter();
@@ -109,8 +111,8 @@ const greeting = computed(() => {
   const timePart = hour < 6 ? "夜深了" : hour < 11 ? "早上好" : hour < 14 ? "中午好" : hour < 18 ? "下午好" : "晚上好";
   let voice = "warm";
   try { voice = JSON.parse(localStorage.getItem("hermes.tweaks") || "{}").voice || "warm"; } catch { /* noop */ }
-  if (voice === "classical") return { main: "凡所欲遣，<em>皆可托信使</em>。", sub: "Quidquid mittere vis, mihi crede." };
-  if (voice === "engineering") return { main: `> <em>hermes</em> ready —`, sub: `agents: ${chat.activeProfiles.length} active · model: ACP · uptime: 99.9%` };
+  if (voice === "classical") return { main: branding.tagline, sub: "Quidquid mittere vis, mihi crede." };
+  if (voice === "engineering") return { main: `> <em>${branding.shortName}</em> ready —`, sub: `agents: ${chat.activeProfiles.length} active · model: ACP · uptime: 99.9%` };
   return { main: `${timePart}，<em>今天有什么安排？</em>`, sub: "Ask me anything · 我会调度合适的助手为你完成。" };
 });
 
@@ -134,7 +136,7 @@ const groupAgents = computed(() => {
     return {
       agent_id: aid,
       name: p?.name || aid,
-      color: p?.color || "#b8852a",
+      color: p?.color || branding.accent,
       icon: p?.icon || "sparkle",
     };
   });
@@ -204,7 +206,7 @@ function profileByAgentId(agentId: string): Profile | undefined {
 
 // Display info from profile
 function profileDisplay(profile: Profile | null | undefined): { label: string; icon: string; color: string; description: string } {
-  return { label: profile?.name || "Hermes", icon: profile?.icon || "sparkle", color: profile?.color || "#b8852a", description: profile?.desc || "" };
+  return { label: profile?.name || branding.shortName, icon: profile?.icon || "sparkle", color: profile?.color || branding.accent, description: profile?.desc || "" };
 }
 
 function md(text: string) {
@@ -217,7 +219,7 @@ function highlightMentions(html: string): string {
   return html.replace(/@([\w-]+)/g, (_match, agentId) => {
     const profile = chat.profiles.find(p => p.default_agent_id === agentId);
     const name = profile?.name || agentId;
-    const color = profile?.color || '#b8852a';
+    const color = profile?.color || branding.accent;
     return `<span class="mention-tag" style="background:${color}22;color:${color};border:1px solid ${color}44">@${name}</span>`;
   });
 }
@@ -580,7 +582,7 @@ function download(blob: Blob, name: string) {
 function exportMd() {
   const title = activeConvo.value?.title || "conversation";
   const md_content = chat.messages.map((m) => {
-    const who = m.role === "user" ? "**用户**" : `**${primaryProfile.value?.name || "Hermes"}**`;
+    const who = m.role === "user" ? "**用户**" : `**${primaryProfile.value?.name || branding.shortName}**`;
     return `${who}\n\n${m.content.text || ""}`;
   }).join("\n\n---\n\n");
   download(new Blob([md_content], { type: "text/markdown" }), `${title}.md`);
@@ -686,15 +688,6 @@ function getAgentPhase(msg: Message): string | null {
   return "🔍 分析问题…";
 }
 
-// ── Quote reply ──
-function quoteReply(text: string) {
-  const lines = text.trim().split("\n").slice(0, 3).join("\n");
-  const truncated = lines.length > 80 ? lines.slice(0, 80) + "…" : lines;
-  const summary = truncated.split("\n")[0].slice(0, 60);
-  draft.value = `<quote summary="${summary}">\n${truncated}\n</quote>\n\n`;
-  nextTick(() => (document.querySelector(".dock .composer-input") as HTMLTextAreaElement)?.focus());
-}
-
 // ── Regenerate ──
 async function regenerate(agentMsgId: string) {
   const agentIdx = chat.messages.findIndex(m => m.id === agentMsgId);
@@ -785,7 +778,7 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
             :class="{ active: landingProfileId === p.id }"
             @click="startWithProfile(p)"
           >
-            <div class="featured-card-icon" :style="{ background: p.color || '#b8852a' }">
+            <div class="featured-card-icon" :style="{ background: p.color || branding.accent }">
               <Icon :name="p.icon || 'sparkle'" :size="16" />
             </div>
             <div class="featured-card-body">
@@ -797,7 +790,7 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
 
         <Composer
           v-model="draft"
-          :placeholder="`给 ${landingProfile?.name || 'Hermes'} 发消息…  ⌘K 搜索 · Enter 发送`"
+          :placeholder="`给 ${landingProfile?.name || branding.shortName} 发消息…  ⌘K 搜索 · Enter 发送`"
           :agent="{ label: landingProfile?.name, color: landingProfile?.color, model: landingProfile?.default_model || 'ACP' }"
           :profile-id="landingProfileId"
           :profile-locked="true"
@@ -830,7 +823,7 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                 </template>
                 <h2 v-else class="thread-title" @click="startEditTitle" title="点击编辑标题">{{ activeConvo?.title || "对话" }}</h2>
                 <div class="thread-meta" style="margin-top:5px;">
-                  <span class="agent-tag"><Icon :name="primaryProfile?.icon || 'brand'" :size="10" /> {{ primaryProfile?.name || "Hermes" }}</span>
+                  <span class="agent-tag"><Icon :name="primaryProfile?.icon || 'brand'" :size="10" /> {{ primaryProfile?.name || branding.shortName }}</span>
                   <span v-if="chat.activeProfiles.length > 1" class="agent-tag" style="background:rgba(184,133,42,0.14);color:var(--accent-deep);">
                     <Icon name="sparkle" :size="10" /> 圆桌 · {{ chat.activeProfiles.length }} 位并行
                   </span>
@@ -971,7 +964,7 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                 </div>
               </div>
               <div v-if="chat.messages[row.index]?.content?.merged && (chat.messages[row.index]?.content?.merged?.text || chat.messages[row.index]?.content?.merged?.status !== 'pending')" class="rt-merge">
-                <div class="rt-merge-head"><Icon name="sparkle" :size="12" /> Hermes 综合各方观点</div>
+                <div class="rt-merge-head"><Icon name="sparkle" :size="12" /> {{ branding.shortName }} 综合各方观点</div>
                 <span v-if="chat.messages[row.index].content.merged?.status === 'streaming' && !chat.messages[row.index].content.merged?.text" class="typing"><span></span><span></span><span></span></span>
                 <div v-else class="md-body" v-html="md(chat.messages[row.index].content.merged?.text || '')" />
               </div>
