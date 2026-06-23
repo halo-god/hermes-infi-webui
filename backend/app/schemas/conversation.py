@@ -48,6 +48,7 @@ class ConversationUpdate(BaseModel):
     title: str | None = None
     pinned: bool | None = None
     channel_mode: str | None = None
+    folder_id: uuid.UUID | None = None
 
 
 class ReplyRef(BaseModel):
@@ -90,6 +91,7 @@ class ConversationOut(BaseModel):
     profile_id: str | None
     team_id: uuid.UUID | None = None
     project_id: uuid.UUID | None = None
+    folder_id: uuid.UUID | None = None
     acp_session_id: str | None
     session_mode: str | None = None
     pinned: bool
@@ -99,6 +101,25 @@ class ConversationOut(BaseModel):
     updated_at: datetime
     unread: int = 0  # 仅群聊列表填充
     has_mention: bool = False  # 仅群聊列表填充
+
+
+class ConversationFolderOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    sort_order: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationFolderCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+class ConversationFolderUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    sort_order: int | None = None
 
 
 class ConversationDetail(ConversationOut):

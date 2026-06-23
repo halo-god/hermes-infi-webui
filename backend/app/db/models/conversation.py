@@ -4,12 +4,26 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 from app.db.models.mixins import Timestamps, UUIDPrimaryKey
+
+
+class ConversationFolder(UUIDPrimaryKey, Timestamps, Base):
+    """User-defined folder for grouping personal conversations in the sidebar."""
+    __tablename__ = "conversation_folders"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "name", name="uq_convo_folder_owner_name"),
+    )
+
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class Conversation(UUIDPrimaryKey, Timestamps, Base):
@@ -28,6 +42,12 @@ class Conversation(UUIDPrimaryKey, Timestamps, Base):
     )
     project_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("projects.id", ondelete="SET NULL"), index=True
+    )
+    folder_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("conversation_folders.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
     type: Mapped[str] = mapped_column(String(16), default="personal", nullable=False)
     # "personal" = 个人1:1对话, "group" = 群聊（多人+多Agent）

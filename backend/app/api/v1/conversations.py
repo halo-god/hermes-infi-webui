@@ -18,6 +18,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import StreamingResponse
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -32,6 +33,9 @@ from app.deps import get_current_user, user_from_media_ticket, user_from_ticket_
 from app.schemas.conversation import (
     ConversationCreate,
     ConversationDetail,
+    ConversationFolderCreate,
+    ConversationFolderOut,
+    ConversationFolderUpdate,
     ConversationOut,
     ConversationUpdate,
     ConfirmRequest,
@@ -51,6 +55,7 @@ from app.schemas.conversation import (
     WorkspaceFileOut,
     WorkspaceFileVersionOut,
 )
+from app.db.models.conversation import ConversationFolder
 from app.services import conversation_service as svc
 
 router = APIRouter()
@@ -128,6 +133,104 @@ async def list_conversations(
     return await svc.list_conversations(
         db, user.id, q=q, pinned_only=pinned, limit=limit, offset=offset
     )
+
+
+# ── conversation folders (grouping) ──────────────────────────────────
+@router.get("/folders", response_model=list[ConversationFolderOut])
+async def list_folders(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    rows = (
+        await db.execute(
+            select(ConversationFolder)
+            .where(ConversationFolder.owner_id == user.id)
+            .order_by(ConversationFolder.sort_order, ConversationFolder.created_at)
+        )
+    ).scalars().all()
+    return rows
+
+
+@router.post("/folders", response_model=ConversationFolderOut, status_code=201)
+async def create_folder(
+    payload: ConversationFolderCreate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    # Next sort_order = current max + 1
+    max_order = (
+        await db.execute(
+            select(func.max(ConversationFolder.sort_order)).where(
+                ConversationFolder.owner_id == user.id
+            )
+        )
+    ).scalar_one_or_none() or 0
+
+    folder = ConversationFolder(
+        owner_id=user.id,
+        name=payload.name.strip(),
+        sort_order=max_order + 1,
+    )
+    db.add(folder)
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="同名文件夹已存在")
+    await db.refresh(folder)
+    return folder
+
+
+@router.patch("/folders/{folder_id}", response_model=ConversationFolderOut)
+async def update_folder(
+    folder_id: uuid.UUID,
+    payload: ConversationFolderUpdate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    folder = (
+        await db.execute(
+            select(ConversationFolder).where(
+                ConversationFolder.id == folder_id,
+                ConversationFolder.owner_id == user.id,
+            )
+        )
+    ).scalars().first()
+    if not folder:
+        raise HTTPException(status_code=404, detail="文件夹不存在")
+
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        if field == "name" and value is not None:
+            value = value.strip()
+        setattr(folder, field, value)
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="同名文件夹已存在")
+    await db.refresh(folder)
+    return folder
+
+
+@router.delete("/folders/{folder_id}", status_code=204)
+async def delete_folder(
+    folder_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    folder = (
+        await db.execute(
+            select(ConversationFolder).where(
+                ConversationFolder.id == folder_id,
+                ConversationFolder.owner_id == user.id,
+            )
+        )
+    ).scalars().first()
+    if not folder:
+        raise HTTPException(status_code=404, detail="文件夹不存在")
+    # ON DELETE SET NULL on conversations.folder_id clears the reference.
+    await db.delete(folder)
+    await db.commit()
 
 
 @router.post("/bulk-delete")

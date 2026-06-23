@@ -175,8 +175,15 @@ http.interceptors.response.use(
       const newToken = await refreshing;
       refreshing = null;
       if (newToken) {
-        original.headers = original.headers ?? {};
-        (original.headers as Record<string, string>).Authorization = `Bearer ${newToken}`;
+        // Use AxiosHeaders.set() — direct property assignment doesn't work
+        // because config.headers is an AxiosHeaders instance, not a plain object.
+        const headers = original.headers ?? ({} as Record<string, string>);
+        if (typeof (headers as { set?: unknown }).set === "function") {
+          (headers as { set: (k: string, v: string) => void }).set("Authorization", `Bearer ${newToken}`);
+        } else {
+          (headers as Record<string, string>).Authorization = `Bearer ${newToken}`;
+          original.headers = headers;
+        }
         return http(original);
       }
       // Refresh failed → bounce to login.

@@ -3,6 +3,7 @@ import { mediaTicket } from "./client";
 import type {
   Conversation,
   ConversationDetail,
+  ConversationFolder,
   GroupMember,
   Message,
   WorkspaceFile,
@@ -36,7 +37,7 @@ export const conversationsApi = {
   async get(id: string): Promise<ConversationDetail> {
     return (await http.get<ConversationDetail>(`/conversations/${id}`)).data;
   },
-  async update(id: string, payload: { title?: string; pinned?: boolean; channel_mode?: string }): Promise<Conversation> {
+  async update(id: string, payload: { title?: string; pinned?: boolean; channel_mode?: string; folder_id?: string | null }): Promise<Conversation> {
     return (await http.patch<Conversation>(`/conversations/${id}`, payload)).data;
   },
   async setAgents(id: string, agentIds: string[]): Promise<Conversation> {
@@ -109,6 +110,20 @@ export const conversationsApi = {
   },
   async setSessionModel(id: string, modelId: string): Promise<void> {
     await http.put(`/conversations/${id}/session/model`, { model_id: modelId });
+  },
+
+  // ── Conversation folders (grouping) ──
+  async listFolders(): Promise<ConversationFolder[]> {
+    return (await http.get<ConversationFolder[]>("/conversations/folders")).data;
+  },
+  async createFolder(name: string): Promise<ConversationFolder> {
+    return (await http.post<ConversationFolder>("/conversations/folders", { name })).data;
+  },
+  async updateFolder(id: string, payload: { name?: string; sort_order?: number }): Promise<ConversationFolder> {
+    return (await http.patch<ConversationFolder>(`/conversations/folders/${id}`, payload)).data;
+  },
+  async deleteFolder(id: string): Promise<void> {
+    await http.delete(`/conversations/folders/${id}`);
   },
 
   // ── Group chat ──

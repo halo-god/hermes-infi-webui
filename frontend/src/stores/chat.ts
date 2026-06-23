@@ -6,7 +6,7 @@ import { teamsApi } from "@/api/teams";
 import { mediaTicket, tokenStore } from "@/api/client";
 import { useStream } from "@/composables/useStream";
 import { registerStreamHandlers } from "@/stores/chatStream";
-import type { ClarifyEntry, Conversation, Message, Team, WorkspaceFile, ConfirmationRequest, PlanEntry } from "@/types";
+import type { ClarifyEntry, Conversation, ConversationFolder, Message, Team, WorkspaceFile, ConfirmationRequest, PlanEntry } from "@/types";
 import type { Profile } from "@/api/agents";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api/v1";
@@ -32,6 +32,7 @@ export const useChatStore = defineStore("chat", () => {
   const CONVO_PAGE = 100;
   const hasMoreConversations = ref(true);
   const loadingMoreConvos = ref(false);
+  const folders = ref<ConversationFolder[]>([]);
   // Group chat: persistent WS id + live typing indicators for the open group.
   const groupStreamId = ref<string | null>(null);
   const typingUsers = ref<{ user_id: string; name: string }[]>([]);
@@ -103,6 +104,45 @@ export const useChatStore = defineStore("chat", () => {
     } finally {
       loadingMoreConvos.value = false;
     }
+  }
+
+  async function loadFolders() {
+    try {
+      folders.value = await conversationsApi.listFolders();
+    } catch (e) {
+      console.error("[chat] loadFolders failed:", e);
+      folders.value = [];
+    }
+  }
+
+  async function createFolder(name: string) {
+    const f = await conversationsApi.createFolder(name);
+    folders.value.push(f);
+    return f;
+  }
+
+  async function renameFolder(id: string, name: string) {
+    const f = await conversationsApi.updateFolder(id, { name });
+    const i = folders.value.findIndex((x) => x.id === id);
+    if (i >= 0) folders.value[i] = f;
+    return f;
+  }
+
+  async function deleteFolder(id: string) {
+    await conversationsApi.deleteFolder(id);
+    folders.value = folders.value.filter((f) => f.id !== id);
+    // Clear folder_id on local conversations (backend already SET NULL).
+    for (const c of conversations.value) {
+      if (c.folder_id === id) c.folder_id = null;
+    }
+  }
+
+  /** Move a conversation into a folder (pass null to remove from any folder). */
+  async function moveConversationToFolder(conversationId: string, folderId: string | null) {
+    const updated = await conversationsApi.update(conversationId, { folder_id: folderId });
+    const i = conversations.value.findIndex((c) => c.id === conversationId);
+    if (i >= 0) conversations.value[i] = { ...conversations.value[i], ...updated };
+    return updated;
   }
 
   function closeStream() {
@@ -528,6 +568,12 @@ export const useChatStore = defineStore("chat", () => {
     loadMoreConversations,
     hasMoreConversations,
     loadingMoreConvos,
+    folders,
+    loadFolders,
+    createFolder,
+    renameFolder,
+    deleteFolder,
+    moveConversationToFolder,
     openConversation,
     loadMoreMessages,
     newConversation,

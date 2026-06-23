@@ -37,6 +37,7 @@ onMounted(() => {
     if (prev) convoObserver?.unobserve(prev);
     if (el) convoObserver?.observe(el);
   }, { immediate: true });
+  void chat.loadFolders();
 });
 onBeforeUnmount(() => convoObserver?.disconnect());
 
@@ -69,9 +70,10 @@ interface ConvoGroup { key: string; label: string; items: Conversation[] }
 const groupedConversations = computed((): ConvoGroup[] => {
   const pinned = personalConversations.value.filter((c) => c.pinned);
   const unpinned = personalConversations.value.filter((c) => !c.pinned);
+  const unfiled = unpinned.filter((c) => !c.folder_id);
 
   const buckets: Record<string, Conversation[]> = { today: [], yesterday: [], week: [], earlier: [] };
-  for (const c of unpinned) buckets[dateGroup(c.updated_at || c.created_at)].push(c);
+  for (const c of unfiled) buckets[dateGroup(c.updated_at || c.created_at)].push(c);
 
   const groups: ConvoGroup[] = [];
   if (pinned.length) groups.push({ key: "pinned", label: DATE_LABELS.pinned, items: pinned });
@@ -80,6 +82,25 @@ const groupedConversations = computed((): ConvoGroup[] => {
   });
   return groups;
 });
+
+/** Conversations grouped by folder (only non-pinned, assigned to a folder). */
+const folderGroups = computed(() => {
+  return chat.folders.map((f) => ({
+    folder: f,
+    items: personalConversations.value.filter((c) => !c.pinned && c.folder_id === f.id),
+  })).filter((g) => g.items.length > 0);
+});
+
+// Collapsed state for folders (persisted to localStorage).
+const collapsedFolders = ref<Set<string>>(new Set(
+  (() => { try { return JSON.parse(localStorage.getItem("hermes.collapsedFolders") || "[]"); } catch { return []; } })()
+));
+function toggleFolderCollapse(folderId: string) {
+  const s = new Set(collapsedFolders.value);
+  if (s.has(folderId)) s.delete(folderId); else s.add(folderId);
+  collapsedFolders.value = s;
+  localStorage.setItem("hermes.collapsedFolders", JSON.stringify([...s]));
+}
 
 // Profile color dot — looks up the profile associated with a conversation
 function profileColor(c: Conversation): string | null {
@@ -170,6 +191,80 @@ async function shareConvo(id: string) {
   } catch (e: unknown) {
     ns.toast("分享失败：" + ((e as Error).message || "未知错误"), "error");
   }
+}
+
+// ── folder management ──
+const showMoveMenu = ref<string | null>(null); // conversation id whose move-submenu is open
+const newFolderName = ref("");
+const showNewFolderInput = ref(false);
+
+async function createFolder() {
+  const name = newFolderName.value.trim();
+  if (!name) return;
+  try {
+    await chat.createFolder(name);
+    newFolderName.value = "";
+    showNewFolderInput.value = false;
+    ns.toast("文件夹已创建");
+  } catch {
+    ns.toast("创建失败（可能同名）", "error");
+  }
+}
+
+async function moveToFolder(conversationId: string, folderId: string | null) {
+  showMoveMenu.value = null;
+  closeCtx();
+  try {
+    await chat.moveConversationToFolder(conversationId, folderId);
+    ns.toast(folderId ? "已移入文件夹" : "已移出文件夹");
+  } catch {
+    ns.toast("移动失败", "error");
+  }
+}
+
+async function renameFolderPrompt(folderId: string, currentName: string) {
+  const name = window.prompt("文件夹名称", currentName);
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (!trimmed || trimmed === currentName) return;
+  try {
+    await chat.renameFolder(folderId, trimmed);
+  } catch {
+    ns.toast("重命名失败（可能同名）", "error");
+  }
+}
+
+async function deleteFolderPrompt(folderId: string, name: string) {
+  if (!window.confirm(`删除文件夹「${name}」？其中的会话将移至未分组，不会被删除。`)) return;
+  try {
+    await chat.deleteFolder(folderId);
+    ns.toast("文件夹已删除");
+  } catch {
+    ns.toast("删除失败", "error");
+  }
+}
+
+const folderCtx = ref<{ id: string; name: string; x: number; y: number } | null>(null);
+
+function onFolderCtxMenu(e: MouseEvent, folderId: string, name: string) {
+  e.preventDefault();
+  e.stopPropagation();
+  folderCtx.value = { id: folderId, name, x: e.clientX, y: e.clientY };
+}
+function closeFolderCtx() {
+  folderCtx.value = null;
+}
+function doRenameFolder() {
+  if (!folderCtx.value) return;
+  const { id, name } = folderCtx.value;
+  closeFolderCtx();
+  void renameFolderPrompt(id, name);
+}
+function doDeleteFolder() {
+  if (!folderCtx.value) return;
+  const { id, name } = folderCtx.value;
+  closeFolderCtx();
+  void deleteFolderPrompt(id, name);
 }
 </script>
 
@@ -267,7 +362,20 @@ async function shareConvo(id: string) {
         <div v-if="!groupConversations.length" style="padding: 4px 12px; font-size: 11px; color: var(--ink-mute)">暂无群聊</div>
       </div>
 
-      <div class="side-label">{{ t('nav.conversations') }}</div>
+      <div class="side-label">
+        {{ t('nav.conversations') }}
+        <button class="side-label-btn" title="新建文件夹" @click.stop="showNewFolderInput = !showNewFolderInput">+ 文件夹</button>
+      </div>
+      <div v-if="showNewFolderInput" class="new-folder-row">
+        <input
+          v-model="newFolderName"
+          class="convo-rename-input"
+          placeholder="文件夹名称"
+          @keydown.enter="createFolder"
+          @keydown.escape="showNewFolderInput = false"
+        />
+        <button class="btn mini" @click="createFolder">确定</button>
+      </div>
       <div class="convo-list">
         <template v-for="group in groupedConversations" :key="group.key">
           <div class="convo-date-sep">
@@ -307,6 +415,46 @@ async function shareConvo(id: string) {
             <span v-if="c.id === chat.streamingConvoId" class="convo-live-label">生成中</span>
           </div>
         </template>
+
+        <!-- Folders -->
+        <template v-for="fg in folderGroups" :key="fg.folder.id">
+          <div
+            class="convo-date-sep folder-sep"
+            @contextmenu="onFolderCtxMenu($event, fg.folder.id, fg.folder.name)"
+          >
+            <Icon
+              :name="collapsedFolders.has(fg.folder.id) ? 'chevron_right' : 'chevron_down'"
+              :size="9"
+              style="cursor:pointer"
+              @click.stop="toggleFolderCollapse(fg.folder.id)"
+            />
+            <span class="folder-name" @click.stop="toggleFolderCollapse(fg.folder.id)">{{ fg.folder.name }}</span>
+            <span class="folder-count">{{ fg.items.length }}</span>
+          </div>
+          <template v-if="!collapsedFolders.has(fg.folder.id)">
+            <div
+              v-for="c in fg.items"
+              :key="c.id"
+              class="convo"
+              :class="{ active: onChat && c.id === chat.activeId }"
+              @click="openConvo(c.id)"
+              @contextmenu="onCtxMenu($event, c.id)"
+            >
+              <div class="convo-ico" style="position:relative">
+                <span v-if="c.id === chat.streamingConvoId" class="convo-live-ring"></span>
+                <Icon v-else :name="c.icon || 'chat'" />
+                <span
+                  v-if="profileColor(c)"
+                  class="convo-profile-dot"
+                  :style="{ background: profileColor(c) as string }"
+                ></span>
+              </div>
+              <div class="convo-title">{{ c.title }}</div>
+              <span v-if="c.id === chat.streamingConvoId" class="convo-live-label">生成中</span>
+            </div>
+          </template>
+        </template>
+
         <div v-if="!personalConversations.length" class="convo-empty">
           <Icon name="chat" :size="22" style="color:var(--ink-faint);margin-bottom:6px" />
           <div>还没有会话</div>
@@ -357,9 +505,46 @@ async function shareConvo(id: string) {
         <button class="menu-item" @click="shareConvo(ctxMenu!.id)">
           <Icon name="share" /> <span class="m-name">分享</span>
         </button>
+        <div class="menu-item has-sub" @mouseenter="showMoveMenu = ctxMenu!.id" @mouseleave="showMoveMenu = null">
+          <Icon name="folder" /> <span class="m-name">移入文件夹</span>
+          <Icon name="chevron_right" :size="9" style="margin-left:auto;opacity:.5" />
+          <div v-if="showMoveMenu === ctxMenu!.id" class="sub-menu">
+            <button
+              class="menu-item"
+              @click="moveToFolder(ctxMenu!.id, null)"
+            >
+              <span class="m-name">未分组</span>
+            </button>
+            <button
+              v-for="f in chat.folders"
+              :key="f.id"
+              class="menu-item"
+              @click="moveToFolder(ctxMenu!.id, f.id)"
+            >
+              <Icon name="folder" :size="11" />
+              <span class="m-name">{{ f.name }}</span>
+            </button>
+            <div v-if="!chat.folders.length" class="sub-menu-empty">暂无文件夹</div>
+          </div>
+        </div>
         <div class="menu-sep"></div>
         <button class="menu-item danger" @click="askDelete(ctxMenu!.id, chat.conversations.find(c => c.id === ctxMenu!.id)?.title || '')">
           <Icon name="close" /> <span class="m-name">删除</span>
+        </button>
+      </div>
+    </div>
+  </Teleport>
+
+  <!-- Folder context menu -->
+  <Teleport to="body">
+    <div v-if="folderCtx" class="ctx-menu-scrim" @click="closeFolderCtx">
+      <div class="ctx-menu" :style="{ left: folderCtx.x + 'px', top: folderCtx.y + 'px' }" @click.stop>
+        <button class="menu-item" @click="doRenameFolder">
+          <Icon name="edit" /> <span class="m-name">重命名文件夹</span>
+        </button>
+        <div class="menu-sep"></div>
+        <button class="menu-item danger" @click="doDeleteFolder">
+          <Icon name="close" /> <span class="m-name">删除文件夹</span>
         </button>
       </div>
     </div>
@@ -466,6 +651,79 @@ async function shareConvo(id: string) {
 }
 .convo-date-sep:first-child {
   padding-top: 2px;
+}
+.side-label-btn {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--ink-mute);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 1px 6px;
+  border-radius: 5px;
+}
+.side-label-btn:hover {
+  background: var(--bg-hover);
+  color: var(--ink);
+}
+.new-folder-row {
+  display: flex;
+  gap: 6px;
+  padding: 4px 10px 6px;
+}
+.new-folder-row .convo-rename-input {
+  flex: 1;
+  min-width: 0;
+}
+.btn.mini {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 6px;
+}
+.folder-sep {
+  cursor: default;
+}
+.folder-name {
+  cursor: pointer;
+  flex: 1;
+}
+.folder-name:hover {
+  color: var(--ink-mute);
+}
+.folder-count {
+  font-size: 9px;
+  color: var(--ink-faint);
+  background: var(--bg-hover);
+  padding: 0 5px;
+  border-radius: 999px;
+  line-height: 14px;
+}
+.menu-item.has-sub {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sub-menu {
+  position: absolute;
+  left: 100%;
+  top: -4px;
+  min-width: 150px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-md);
+  padding: 4px;
+  margin-left: 2px;
+}
+.sub-menu-empty {
+  padding: 8px 12px;
+  font-size: 11px;
+  color: var(--ink-faint);
+  font-style: italic;
 }
 .convo-profile-dot {
   position: absolute;

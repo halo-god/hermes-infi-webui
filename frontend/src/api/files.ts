@@ -37,6 +37,9 @@ export const filesApi = {
   async remove(fileId: string): Promise<void> {
     await http.delete(`/files/${fileId}`);
   },
+  async removeFolder(folderId: string): Promise<void> {
+    await http.delete(`/files/folder/${folderId}`);
+  },
   async moveToFolder(fileId: string, targetFolder: string): Promise<{ status: string; id: string; name: string; old_folder: string; new_folder: string }> {
     return (await http.put(`/files/${fileId}/move`, { target_folder: targetFolder })).data;
   },

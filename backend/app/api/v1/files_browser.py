@@ -10,7 +10,7 @@ import urllib.parse
 from fastapi import APIRouter, Depends, File as FastApiFile, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.conversation import Conversation, Message
@@ -207,19 +207,26 @@ async def list_standalone_files(
             )
         ).scalars().all()
 
-        # Also collect virtual subfolders: unique first path segment of files in deeper folders
+        # Also collect virtual subfolders: unique first path segment of files in deeper folders.
+        # Only real FILES participate — folder rows store their parent in folder_path (a different
+        # semantic) and would otherwise fabricate phantom subfolders that duplicate real ones.
         all_files = (
             await db.execute(
                 select(WorkspaceFile.folder_path).where(
                     WorkspaceFile.conversation_id == storage_convo.id,
+                    WorkspaceFile.is_folder == False,  # noqa: E712
                     WorkspaceFile.folder_path.startswith(folder) if folder != "/" else WorkspaceFile.folder_path != "/",
                     WorkspaceFile.folder_path != folder,
                 )
             )
         ).all()
 
+        def _norm_prefix(p: str) -> str:
+            """Normalized no-trailing-slash prefix; root → empty string."""
+            return p.rstrip("/")
+
         subfolders: set[str] = set()
-        prefix = folder.rstrip("/")
+        prefix = _norm_prefix(folder)
         for (fp,) in all_files:
             if not fp or fp == folder:
                 continue
@@ -239,12 +246,12 @@ async def list_standalone_files(
                 folder_path=f.folder_path or "/",
                 is_folder=True,
             ))
-        # Virtual subfolders (from file paths)
+        # Virtual subfolders (from file paths only)
         # Build full path of each real folder for dedup: parent + name
         known_paths: set[str] = set()
         for f in db_folders:
-            fp = f.folder_path or "/"
-            full = fp.rstrip("/") + "/" + f.name if fp != "/" else "/" + f.name
+            fp = _norm_prefix(f.folder_path or "/")
+            full = f"/{f.name}" if not fp else f"{fp}/{f.name}"
             known_paths.add(full)
         for sf in sorted(subfolders):
             if sf in known_paths:
@@ -581,3 +588,57 @@ async def delete_standalone_file(
     await db.delete(wf)
     await db.commit()
     return {"status": "ok"}
+
+
+@router.delete("/files/folder/{folder_id}")
+async def delete_folder(
+    folder_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a folder and everything inside it (recursive).
+
+    Removes the folder row, all descendant files (matching the folder's full
+    path or any deeper path beneath it), and their MinIO objects. Descendant
+    subfolders are removed too. Conversations are not affected.
+    """
+    folder = await _require_file_owner(db, folder_id, user)
+    if not folder.is_folder:
+        raise HTTPException(400, "目标不是文件夹")
+
+    # Full path of this folder (folder_path stores the PARENT, so join name).
+    fp_parent = (folder.folder_path or "/").rstrip("/")
+    full_path = f"/{folder.name}" if not fp_parent else f"{fp_parent}/{folder.name}"
+
+    # Everything beneath this folder: files/folders whose folder_path equals
+    # the full path OR starts with "full_path/" (deeper nesting).
+    prefix = full_path + "/"
+    descendants = (
+        await db.execute(
+            select(WorkspaceFile).where(
+                WorkspaceFile.conversation_id == folder.conversation_id,
+                or_(
+                    WorkspaceFile.folder_path == full_path,
+                    WorkspaceFile.folder_path.startswith(prefix),
+                ),
+            )
+        )
+    ).scalars().all()
+
+    # Clean MinIO objects for any stored binaries (best-effort).
+    for d in descendants:
+        if d.storage_key:
+            try:
+                await asyncio.to_thread(object_storage.delete, d.storage_key)
+            except Exception:
+                pass
+
+    if descendants:
+        await db.execute(
+            delete(WorkspaceFile).where(
+                WorkspaceFile.id.in_([d.id for d in descendants])
+            )
+        )
+    await db.delete(folder)
+    await db.commit()
+    return {"status": "ok", "deleted": len(descendants) + 1}

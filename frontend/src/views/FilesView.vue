@@ -114,7 +114,17 @@ async function downloadFile(row: FileItem) {
 }
 
 async function deleteFile(row: FileItem) {
-  if (row.is_folder) return;
+  if (row.is_folder) {
+    if (!confirm(`确定删除文件夹 "${row.name}" 及其所有内容吗？此操作不可恢复。`)) return;
+    try {
+      await filesApi.removeFolder(row.id);
+      await loadFiles(currentFolder.value);
+      ns.toast("文件夹已删除", "ok");
+    } catch {
+      ns.toast("删除失败", "error");
+    }
+    return;
+  }
   if (!confirm(`确定删除文件 "${row.name}" 吗？`)) return;
   try {
     await filesApi.remove(row.id);
@@ -255,16 +265,22 @@ const columns = [
   },
   {
     title: "", key: "actions", width: 110,
-    render: (row: FileItem) => row.is_folder ? null : h("div", { style: { display: "flex", gap: "4px" } }, [
-      h(NButton, { text: true, size: "small", title: "移动到文件夹", onClick: () => openMoveModal(row) },
-        () => h(Icon, { name: "folder", size: 14 })),
-      h(NButton, { text: true, size: "small", title: "下载", onClick: () => downloadFile(row) },
-        () => h(Icon, { name: "arrow_up", size: 14, style: { transform: "rotate(180deg)" } })),
-      row.conversation_title === "__file_storage__"
-        ? h(NButton, { text: true, size: "small", title: "删除", onClick: () => deleteFile(row) },
-            () => h(Icon, { name: "x", size: 14, style: { color: "var(--error)" } }))
-        : null,
-    ]),
+    render: (row: FileItem) => {
+      if (row.is_folder) {
+        return h("div", { style: { display: "flex", gap: "4px", justifyContent: "flex-end" } }, [
+          h(NButton, { text: true, size: "small", title: "删除文件夹", onClick: () => deleteFile(row) },
+            () => h(Icon, { name: "close", size: 14, style: { color: "var(--error)" } })),
+        ]);
+      }
+      return h("div", { style: { display: "flex", gap: "4px" } }, [
+        h(NButton, { text: true, size: "small", title: "移动到文件夹", onClick: () => openMoveModal(row) },
+          () => h(Icon, { name: "folder", size: 14 })),
+        h(NButton, { text: true, size: "small", title: "下载", onClick: () => downloadFile(row) },
+          () => h(Icon, { name: "arrow_up", size: 14, style: { transform: "rotate(180deg)" } })),
+        h(NButton, { text: true, size: "small", title: "删除", onClick: () => deleteFile(row) },
+          () => h(Icon, { name: "close", size: 14, style: { color: "var(--error)" } })),
+      ]);
+    },
   },
 ];
 

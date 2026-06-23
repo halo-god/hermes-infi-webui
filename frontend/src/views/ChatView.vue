@@ -808,7 +808,7 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
       <!-- Fixed header: title + action buttons (outside scroll container) -->
       <div class="thread-head-wrap">
         <div class="thread-inner">
-          <div class="thread-head" style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px;">
+          <div class="thread-head" style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap;row-gap:8px;">
             <div style="flex:1;min-width:0;display:flex;align-items:flex-start;gap:10px;">
               <ConvoSeal v-if="chat.activeId" :seed="chat.activeId" :size="40" style="margin-top:2px;" />
               <div style="min-width:0;">

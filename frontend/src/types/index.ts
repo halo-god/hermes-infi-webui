@@ -221,10 +221,19 @@ export interface Conversation {
   team_id: string | null;
   project_id: string | null;
   project_name: string | null;
+  folder_id: string | null;
   created_at: string;
   updated_at: string;
   unread?: number;
   has_mention?: boolean;
+}
+
+export interface ConversationFolder {
+  id: string;
+  name: string;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ConversationDetail extends Conversation {
