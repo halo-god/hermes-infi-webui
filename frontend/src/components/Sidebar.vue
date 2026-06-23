@@ -83,13 +83,20 @@ const groupedConversations = computed((): ConvoGroup[] => {
   return groups;
 });
 
-/** Conversations grouped by folder (only non-pinned, assigned to a folder). */
+/** Conversations grouped by folder (non-pinned conversations, assigned to a folder).
+ *  Empty folders are shown too — otherwise a freshly-created folder vanishes
+ *  until a conversation is moved into it, which is confusing. */
 const folderGroups = computed(() => {
   return chat.folders.map((f) => ({
     folder: f,
     items: personalConversations.value.filter((c) => !c.pinned && c.folder_id === f.id),
-  })).filter((g) => g.items.length > 0);
+  }));
 });
+
+/** Pinned folders shown above the unfiled date buckets. */
+const pinnedFolderGroups = computed(() => folderGroups.value.filter((g) => g.folder.pinned));
+/** Unpinned folders shown below the date buckets. */
+const unpinnedFolderGroups = computed(() => folderGroups.value.filter((g) => !g.folder.pinned));
 
 // Collapsed state for folders (persisted to localStorage).
 const collapsedFolders = ref<Set<string>>(new Set(
@@ -244,12 +251,134 @@ async function deleteFolderPrompt(folderId: string, name: string) {
   }
 }
 
+async function toggleFolderPin(folderId: string, currentlyPinned: boolean) {
+  try {
+    await chat.toggleFolderPinned(folderId, !currentlyPinned);
+    ns.toast(currentlyPinned ? "已取消置顶" : "已置顶");
+  } catch {
+    ns.toast("操作失败", "error");
+  }
+}
+
+// ── folder drag-to-reorder ──
+const draggingFolderId = ref<string | null>(null);
+const dropTargetFolderId = ref<string | null>(null);
+
+function onFolderSortDragStart(e: DragEvent, folderId: string) {
+  // Only start folder sort-drag if NOT dragging a conversation.
+  if (draggingConvoId.value) return;
+  draggingFolderId.value = folderId;
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/folder", folderId);
+  }
+}
+
+function onFolderSortDragEnd() {
+  draggingFolderId.value = null;
+  dropTargetFolderId.value = null;
+}
+
+/** Unified dragover for folder headers: handles both conversation-drop (move
+ *  convo into folder) and folder-sort (reorder folders). */
+function onFolderHeaderDragOver(e: DragEvent, folderId: string) {
+  e.preventDefault();
+  if (draggingConvoId.value) {
+    // A conversation is being dragged — highlight as a drop target.
+    dragOverFolderId.value = folderId;
+  } else if (draggingFolderId.value && draggingFolderId.value !== folderId) {
+    // A folder is being dragged — highlight as a sort target.
+    dropTargetFolderId.value = folderId;
+  }
+}
+
+function onFolderHeaderDragLeave(folderId: string) {
+  if (dragOverFolderId.value === folderId) dragOverFolderId.value = null;
+  if (dropTargetFolderId.value === folderId) dropTargetFolderId.value = null;
+}
+
+/** Unified drop for folder headers: dispatch to conversation-move or folder-sort. */
+async function onFolderHeaderDrop(e: DragEvent, folderId: string) {
+  e.preventDefault();
+  e.stopPropagation();
+  if (draggingConvoId.value) {
+    // Conversation drop — move into folder.
+    const convoId = draggingConvoId.value;
+    dragOverFolderId.value = null;
+    draggingConvoId.value = null;
+    try {
+      await chat.moveConversationToFolder(convoId, folderId);
+      ns.toast("已移入文件夹");
+    } catch {
+      ns.toast("移动失败", "error");
+    }
+  } else if (draggingFolderId.value && draggingFolderId.value !== folderId) {
+    // Folder sort drop — reorder.
+    const sourceId = draggingFolderId.value;
+    dropTargetFolderId.value = null;
+    draggingFolderId.value = null;
+
+    const targetFolder = chat.folders.find((x) => x.id === folderId);
+    if (!targetFolder) return;
+    // Reorder within the same pinned/unpinned group.
+    const list = chat.folders.filter((f) => f.pinned === targetFolder.pinned);
+    const sourceIdx = list.findIndex((f) => f.id === sourceId);
+    const targetIdx = list.findIndex((f) => f.id === folderId);
+    if (sourceIdx < 0 || targetIdx < 0) return;
+
+    const reordered = [...list];
+    const [moved] = reordered.splice(sourceIdx, 1);
+    reordered.splice(targetIdx, 0, moved);
+
+    try {
+      await chat.reorderFolders(reordered.map((f, i) => ({ id: f.id, sort_order: i + 1 })));
+    } catch {
+      ns.toast("排序失败", "error");
+    }
+  }
+}
+
 const folderCtx = ref<{ id: string; name: string; x: number; y: number } | null>(null);
 
 function onFolderCtxMenu(e: MouseEvent, folderId: string, name: string) {
   e.preventDefault();
   e.stopPropagation();
   folderCtx.value = { id: folderId, name, x: e.clientX, y: e.clientY };
+}
+
+// ── drag & drop: move conversations between folders ──
+const draggingConvoId = ref<string | null>(null);
+const dragOverFolderId = ref<string | null>(null);
+const dragOverUnfiled = ref(false);
+const dragOverId = ref<string | null>(null);
+
+function onDragStart(e: DragEvent, convoId: string) {
+  draggingConvoId.value = convoId;
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", convoId);
+  }
+}
+
+function onDragEnd() {
+  draggingConvoId.value = null;
+  dragOverFolderId.value = null;
+  dragOverUnfiled.value = false;
+  dragOverId.value = null;
+}
+
+async function onUnfiledDrop(e: DragEvent) {
+  e.preventDefault();
+  const convoId = draggingConvoId.value || e.dataTransfer?.getData("text/plain");
+  dragOverUnfiled.value = false;
+  draggingConvoId.value = null;
+  if (!convoId) return;
+  try {
+    await chat.moveConversationToFolder(convoId, null);
+    ns.toast("已移出文件夹");
+  } catch {
+    ns.toast("移动失败", "error");
+  }
 }
 function closeFolderCtx() {
   folderCtx.value = null;
@@ -377,8 +506,55 @@ function doDeleteFolder() {
         <button class="btn mini" @click="createFolder">确定</button>
       </div>
       <div class="convo-list">
+        <!-- Pinned folders (above date buckets) -->
+        <template v-for="fg in pinnedFolderGroups" :key="fg.folder.id">
+          <div
+            class="convo-date-sep folder-sep"
+            :class="{ 'folder-drop-target': dragOverFolderId === fg.folder.id, 'folder-sort-target': dropTargetFolderId === fg.folder.id, dragging: draggingFolderId === fg.folder.id }"
+            draggable="true"
+            @contextmenu="onFolderCtxMenu($event, fg.folder.id, fg.folder.name)"
+            @dragover="onFolderHeaderDragOver($event, fg.folder.id)"
+            @dragleave="onFolderHeaderDragLeave(fg.folder.id)"
+            @drop="onFolderHeaderDrop($event, fg.folder.id)"
+            @dragstart="onFolderSortDragStart($event, fg.folder.id)"
+            @dragend="onFolderSortDragEnd"
+          >
+            <Icon v-if="fg.folder.pinned" name="pin" :size="9" style="color:var(--accent-deep)" />
+            <Icon
+              :name="collapsedFolders.has(fg.folder.id) ? 'chevron_right' : 'chevron_down'"
+              :size="9"
+              style="cursor:pointer"
+              @click.stop="toggleFolderCollapse(fg.folder.id)"
+            />
+            <span class="folder-name" @click.stop="toggleFolderCollapse(fg.folder.id)">{{ fg.folder.name }}</span>
+            <span class="folder-count">{{ fg.items.length }}</span>
+          </div>
+          <template v-if="!collapsedFolders.has(fg.folder.id)">
+            <div
+              v-for="c in fg.items"
+              :key="c.id"
+              class="convo"
+              :class="{ active: onChat && c.id === chat.activeId, 'drag-over': dragOverId === c.id, dragging: draggingConvoId === c.id }"
+              draggable="true"
+              @click="openConvo(c.id)"
+              @contextmenu="onCtxMenu($event, c.id)"
+              @dragstart="onDragStart($event, c.id)"
+              @dragend="onDragEnd"
+            >
+              <div class="convo-ico" style="position:relative">
+                <span v-if="c.id === chat.streamingConvoId" class="convo-live-ring"></span>
+                <Icon v-else :name="c.icon || 'chat'" />
+                <span v-if="profileColor(c)" class="convo-profile-dot" :style="{ background: profileColor(c) as string }"></span>
+              </div>
+              <div class="convo-title">{{ c.title }}</div>
+              <span v-if="c.id === chat.streamingConvoId" class="convo-live-label">生成中</span>
+            </div>
+          </template>
+        </template>
+
+        <!-- Date buckets (unfiled conversations) -->
         <template v-for="group in groupedConversations" :key="group.key">
-          <div class="convo-date-sep">
+          <div class="convo-date-sep" :class="{ 'folder-drop-target': dragOverUnfiled }" @dragover.prevent="dragOverUnfiled = true" @dragleave="dragOverUnfiled = false" @drop="onUnfiledDrop">
             <Icon v-if="group.key === 'pinned'" name="pin" :size="9" style="color:var(--accent-deep)" />
             {{ group.label }}
           </div>
@@ -386,28 +562,20 @@ function doDeleteFolder() {
             v-for="c in group.items"
             :key="c.id"
             class="convo"
-            :class="{ active: onChat && c.id === chat.activeId }"
+            :class="{ active: onChat && c.id === chat.activeId, 'drag-over': dragOverId === c.id, dragging: draggingConvoId === c.id }"
+            draggable="true"
             @click="openConvo(c.id)"
             @contextmenu="onCtxMenu($event, c.id)"
+            @dragstart="onDragStart($event, c.id)"
+            @dragend="onDragEnd"
           >
             <div class="convo-ico" style="position:relative">
               <span v-if="c.id === chat.streamingConvoId" class="convo-live-ring"></span>
               <Icon v-else :name="c.icon || 'chat'" />
-              <span
-                v-if="profileColor(c)"
-                class="convo-profile-dot"
-                :style="{ background: profileColor(c) as string }"
-              ></span>
+              <span v-if="profileColor(c)" class="convo-profile-dot" :style="{ background: profileColor(c) as string }"></span>
             </div>
             <template v-if="renamingId === c.id">
-              <input
-                v-model="renameVal"
-                class="convo-rename-input"
-                @keydown.enter="confirmRename"
-                @keydown.escape="renamingId = null"
-                @blur="confirmRename"
-                autofocus
-              />
+              <input v-model="renameVal" class="convo-rename-input" @keydown.enter="confirmRename" @keydown.escape="renamingId = null" @blur="confirmRename" autofocus />
             </template>
             <template v-else>
               <div class="convo-title">{{ c.title }}</div>
@@ -416,11 +584,18 @@ function doDeleteFolder() {
           </div>
         </template>
 
-        <!-- Folders -->
-        <template v-for="fg in folderGroups" :key="fg.folder.id">
+        <!-- Unpinned folders (below date buckets) -->
+        <template v-for="fg in unpinnedFolderGroups" :key="fg.folder.id">
           <div
             class="convo-date-sep folder-sep"
+            :class="{ 'folder-drop-target': dragOverFolderId === fg.folder.id, 'folder-sort-target': dropTargetFolderId === fg.folder.id, dragging: draggingFolderId === fg.folder.id }"
+            draggable="true"
             @contextmenu="onFolderCtxMenu($event, fg.folder.id, fg.folder.name)"
+            @dragover="onFolderHeaderDragOver($event, fg.folder.id)"
+            @dragleave="onFolderHeaderDragLeave(fg.folder.id)"
+            @drop="onFolderHeaderDrop($event, fg.folder.id)"
+            @dragstart="onFolderSortDragStart($event, fg.folder.id)"
+            @dragend="onFolderSortDragEnd"
           >
             <Icon
               :name="collapsedFolders.has(fg.folder.id) ? 'chevron_right' : 'chevron_down'"
@@ -436,18 +611,17 @@ function doDeleteFolder() {
               v-for="c in fg.items"
               :key="c.id"
               class="convo"
-              :class="{ active: onChat && c.id === chat.activeId }"
+              :class="{ active: onChat && c.id === chat.activeId, 'drag-over': dragOverId === c.id, dragging: draggingConvoId === c.id }"
+              draggable="true"
               @click="openConvo(c.id)"
               @contextmenu="onCtxMenu($event, c.id)"
+              @dragstart="onDragStart($event, c.id)"
+              @dragend="onDragEnd"
             >
               <div class="convo-ico" style="position:relative">
                 <span v-if="c.id === chat.streamingConvoId" class="convo-live-ring"></span>
                 <Icon v-else :name="c.icon || 'chat'" />
-                <span
-                  v-if="profileColor(c)"
-                  class="convo-profile-dot"
-                  :style="{ background: profileColor(c) as string }"
-                ></span>
+                <span v-if="profileColor(c)" class="convo-profile-dot" :style="{ background: profileColor(c) as string }"></span>
               </div>
               <div class="convo-title">{{ c.title }}</div>
               <span v-if="c.id === chat.streamingConvoId" class="convo-live-label">生成中</span>
@@ -541,6 +715,12 @@ function doDeleteFolder() {
       <div class="ctx-menu" :style="{ left: folderCtx.x + 'px', top: folderCtx.y + 'px' }" @click.stop>
         <button class="menu-item" @click="doRenameFolder">
           <Icon name="edit" /> <span class="m-name">重命名文件夹</span>
+        </button>
+        <button
+          class="menu-item"
+          @click="() => { const f = chat.folders.find(x => x.id === folderCtx!.id); if (f) toggleFolderPin(f.id, f.pinned); closeFolderCtx(); }"
+        >
+          <Icon name="pin" /> <span class="m-name">{{ chat.folders.find(x => x.id === folderCtx?.id)?.pinned ? '取消置顶' : '置顶文件夹' }}</span>
         </button>
         <div class="menu-sep"></div>
         <button class="menu-item danger" @click="doDeleteFolder">
@@ -724,6 +904,30 @@ function doDeleteFolder() {
   font-size: 11px;
   color: var(--ink-faint);
   font-style: italic;
+}
+.convo.dragging {
+  opacity: 0.4;
+}
+.convo.drag-over {
+  outline: 1.5px dashed var(--accent);
+  outline-offset: -2px;
+}
+.folder-sep.dragging {
+  opacity: 0.4;
+}
+.folder-sep.folder-sort-target {
+  border-top: 2px solid var(--accent);
+  padding-top: 2px;
+}
+.folder-sep.folder-drop-target {
+  background: var(--accent-tint);
+  color: var(--accent-deep);
+  border-radius: 6px;
+}
+.convo-date-sep.folder-drop-target {
+  background: var(--accent-tint);
+  color: var(--accent-deep);
+  border-radius: 6px;
 }
 .convo-profile-dot {
   position: absolute;

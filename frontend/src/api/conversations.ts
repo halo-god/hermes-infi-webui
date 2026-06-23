@@ -119,11 +119,14 @@ export const conversationsApi = {
   async createFolder(name: string): Promise<ConversationFolder> {
     return (await http.post<ConversationFolder>("/conversations/folders", { name })).data;
   },
-  async updateFolder(id: string, payload: { name?: string; sort_order?: number }): Promise<ConversationFolder> {
+  async updateFolder(id: string, payload: { name?: string; sort_order?: number; pinned?: boolean }): Promise<ConversationFolder> {
     return (await http.patch<ConversationFolder>(`/conversations/folders/${id}`, payload)).data;
   },
   async deleteFolder(id: string): Promise<void> {
     await http.delete(`/conversations/folders/${id}`);
+  },
+  async reorderFolders(items: { id: string; sort_order: number }[]): Promise<void> {
+    await http.put("/conversations/folders/reorder", { items });
   },
 
   // ── Group chat ──

@@ -109,6 +109,7 @@ class ConversationFolderOut(BaseModel):
     id: uuid.UUID
     name: str
     sort_order: int
+    pinned: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -120,6 +121,12 @@ class ConversationFolderCreate(BaseModel):
 class ConversationFolderUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=80)
     sort_order: int | None = None
+    pinned: bool | None = None
+
+
+class ConversationFolderReorder(BaseModel):
+    """Batch-update sort_order for multiple folders (drag-to-reorder)."""
+    items: list[dict] = Field(default_factory=list)  # [{id, sort_order}]
 
 
 class ConversationDetail(ConversationOut):

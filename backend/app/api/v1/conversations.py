@@ -35,6 +35,7 @@ from app.schemas.conversation import (
     ConversationDetail,
     ConversationFolderCreate,
     ConversationFolderOut,
+    ConversationFolderReorder,
     ConversationFolderUpdate,
     ConversationOut,
     ConversationUpdate,
@@ -145,7 +146,11 @@ async def list_folders(
         await db.execute(
             select(ConversationFolder)
             .where(ConversationFolder.owner_id == user.id)
-            .order_by(ConversationFolder.sort_order, ConversationFolder.created_at)
+            .order_by(
+                ConversationFolder.pinned.desc(),
+                ConversationFolder.sort_order,
+                ConversationFolder.created_at,
+            )
         )
     ).scalars().all()
     return rows
@@ -210,6 +215,32 @@ async def update_folder(
         raise HTTPException(status_code=409, detail="同名文件夹已存在")
     await db.refresh(folder)
     return folder
+
+
+@router.put("/folders/reorder")
+async def reorder_folders(
+    payload: ConversationFolderReorder,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Batch-update sort_order for multiple folders (drag-to-reorder)."""
+    for item in payload.items:
+        fid = item.get("id")
+        order = item.get("sort_order")
+        if fid is None or order is None:
+            continue
+        f = (
+            await db.execute(
+                select(ConversationFolder).where(
+                    ConversationFolder.id == fid,
+                    ConversationFolder.owner_id == user.id,
+                )
+            )
+        ).scalars().first()
+        if f:
+            f.sort_order = order
+    await db.commit()
+    return {"status": "ok"}
 
 
 @router.delete("/folders/{folder_id}", status_code=204)

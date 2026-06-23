@@ -128,6 +128,34 @@ export const useChatStore = defineStore("chat", () => {
     return f;
   }
 
+  async function toggleFolderPinned(id: string, pinned: boolean) {
+    // Optimistic update.
+    const i = folders.value.findIndex((x) => x.id === id);
+    if (i >= 0) folders.value[i] = { ...folders.value[i], pinned };
+    try {
+      await conversationsApi.updateFolder(id, { pinned });
+    } catch (err) {
+      // Revert on failure.
+      if (i >= 0) folders.value[i] = { ...folders.value[i], pinned: !pinned };
+      throw err;
+    }
+  }
+
+  async function reorderFolders(items: { id: string; sort_order: number }[]) {
+    // Optimistic update.
+    const map = new Map(items.map((it) => [it.id, it.sort_order]));
+    folders.value = folders.value.map((f) =>
+      map.has(f.id) ? { ...f, sort_order: map.get(f.id)! } : f
+    );
+    try {
+      await conversationsApi.reorderFolders(items);
+    } catch (err) {
+      // Reload from server on failure.
+      await loadFolders();
+      throw err;
+    }
+  }
+
   async function deleteFolder(id: string) {
     await conversationsApi.deleteFolder(id);
     folders.value = folders.value.filter((f) => f.id !== id);
@@ -572,6 +600,8 @@ export const useChatStore = defineStore("chat", () => {
     loadFolders,
     createFolder,
     renameFolder,
+    toggleFolderPinned,
+    reorderFolders,
     deleteFolder,
     moveConversationToFolder,
     openConversation,

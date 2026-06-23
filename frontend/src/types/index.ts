@@ -232,6 +232,7 @@ export interface ConversationFolder {
   id: string;
   name: string;
   sort_order: number;
+  pinned: boolean;
   created_at: string;
   updated_at: string;
 }

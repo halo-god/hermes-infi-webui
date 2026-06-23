@@ -24,6 +24,7 @@ class ConversationFolder(UUIDPrimaryKey, Timestamps, Base):
     )
     name: Mapped[str] = mapped_column(String(80), nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    pinned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
 class Conversation(UUIDPrimaryKey, Timestamps, Base):
