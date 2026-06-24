@@ -13,6 +13,7 @@ from app.db.base import get_db
 from app.db.models.agent import Agent, Profile
 from app.db.models.user import User
 from app.deps import get_current_user
+from app.core.guards import require_permission
 from app.schemas.agent import (
     AgentOut,
     ProfileCreate,
@@ -45,11 +46,10 @@ class ScanAgentsResponse(BaseModel):
 
 @router.post("/agents/scan", response_model=ScanAgentsResponse)
 async def scan_agents(
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("agent.manage")),
     db: AsyncSession = Depends(get_db),
 ):
     """Discover ACP agents from PATH and upsert into DB."""
-    _require_admin(user)
 
     from agent_runner.discovery import find_hermes_binary, probe_hermes_version, scan
 
@@ -137,11 +137,6 @@ async def list_profiles(db: AsyncSession = Depends(get_db)) -> list[ProfileOut]:
     return [ProfileOut.model_validate(p) for p in profiles]
 
 
-def _require_admin(user: User) -> None:
-    if user.role not in ("super_admin", "admin"):
-        raise HTTPException(status_code=403, detail="需要管理员权限")
-
-
 def _serialize_skills(data: dict) -> dict:
     """Convert skills list → JSON string for DB storage."""
     if "skills" in data and isinstance(data["skills"], list):
@@ -152,10 +147,9 @@ def _serialize_skills(data: dict) -> dict:
 @router.post("/profiles", response_model=ProfileOut, status_code=201)
 async def create_profile(
     payload: ProfileCreate,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("agent.manage")),
     db: AsyncSession = Depends(get_db),
 ):
-    _require_admin(user)
     data = _serialize_skills(payload.model_dump())
     p = Profile(**data)
     db.add(p)
@@ -168,10 +162,9 @@ async def create_profile(
 async def update_profile(
     profile_id: uuid.UUID,
     payload: ProfileUpdate,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("agent.manage")),
     db: AsyncSession = Depends(get_db),
 ):
-    _require_admin(user)
     p = await db.get(Profile, profile_id)
     if p is None:
         raise HTTPException(status_code=404, detail="助手不存在")
@@ -185,10 +178,9 @@ async def update_profile(
 @router.delete("/profiles/{profile_id}", status_code=204)
 async def delete_profile(
     profile_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("agent.manage")),
     db: AsyncSession = Depends(get_db),
 ):
-    _require_admin(user)
     p = await db.get(Profile, profile_id)
     if p is None:
         raise HTTPException(status_code=404, detail="助手不存在")
@@ -199,11 +191,10 @@ async def delete_profile(
 @router.post("/profiles/{profile_id}/clone", response_model=ProfileOut, status_code=201)
 async def clone_profile(
     profile_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("agent.manage")),
     db: AsyncSession = Depends(get_db),
 ):
     """Clone an existing profile — copies all fields, generates a new handle."""
-    _require_admin(user)
     p = await db.get(Profile, profile_id)
     if p is None:
         raise HTTPException(status_code=404, detail="助手不存在")
@@ -267,11 +258,10 @@ class ProfileImportRequest(BaseModel):
 @router.post("/profiles/import", response_model=list[ProfileOut], status_code=201)
 async def import_profiles(
     payload: ProfileImportRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("agent.import")),
     db: AsyncSession = Depends(get_db),
 ):
     """Import profiles from exported JSON. Skips duplicates by handle."""
-    _require_admin(user)
     existing = await db.execute(select(Profile.handle))
     existing_handles = set(existing.scalars().all())
     created: list[Profile] = []
@@ -303,7 +293,7 @@ async def import_profiles(
 
 @router.post("/profiles/scan", response_model=ScanProfilesResponse, status_code=200)
 async def scan_profiles(
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("agent.manage")),
     db: AsyncSession = Depends(get_db),
 ):
     """Auto-generate profiles for agents and Hermes filesystem profiles.
@@ -311,7 +301,6 @@ async def scan_profiles(
     Never raises — all partial failures are collected in `errors` field so the
     frontend can show actionable diagnostics instead of a generic "failed" toast.
     """
-    _require_admin(user)
 
     from agent_runner.discovery import (
         find_hermes_binary,

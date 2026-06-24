@@ -35,12 +35,13 @@ ROLE_META: list[dict] = [
 
 # ── Platform permission matrix (mirrors the prototype hermes-data.js PERMISSIONS) ──
 # Which platform roles hold each capability. Drives the admin「权限管理」matrix.
+# `has_permission()` is consulted by `guards.require_permission()` at runtime.
 PERMISSION_CATALOG: list[dict] = [
     {"group": "会话", "items": [
         {"id": "chat.create", "name": "创建会话", "roles": ["super_admin", "admin", "team_admin", "member"]},
         {"id": "chat.delete_own", "name": "删除自己的会话", "roles": ["super_admin", "admin", "team_admin", "member"]},
-        {"id": "chat.delete_any", "name": "删除任意会话", "roles": ["super_admin", "admin"]},
         {"id": "chat.share", "name": "分享会话", "roles": ["super_admin", "admin", "team_admin", "member"]},
+        {"id": "scheduled.manage", "name": "管理定时任务", "roles": ["super_admin", "admin", "team_admin", "member"]},
     ]},
     {"group": "团队 & 项目", "items": [
         {"id": "team.create", "name": "创建团队", "roles": ["super_admin", "admin"]},
@@ -49,7 +50,8 @@ PERMISSION_CATALOG: list[dict] = [
         {"id": "project.archive", "name": "归档项目", "roles": ["super_admin", "admin", "team_admin"]},
     ]},
     {"group": "助手 & 知识", "items": [
-        {"id": "agent.publish", "name": "发布团队助手", "roles": ["super_admin", "admin", "team_admin"]},
+        {"id": "agent.manage", "name": "助手配置管理", "roles": ["super_admin", "admin", "team_admin"]},
+        {"id": "agent.import", "name": "导入助手配置", "roles": ["super_admin", "admin"]},
         {"id": "agent.system_prompt", "name": "修改系统提示", "roles": ["super_admin", "admin"]},
         {"id": "kb.upload", "name": "上传知识库", "roles": ["super_admin", "admin", "team_admin", "member"]},
         {"id": "kb.delete", "name": "删除知识条目", "roles": ["super_admin", "admin", "team_admin"]},
@@ -58,8 +60,11 @@ PERMISSION_CATALOG: list[dict] = [
         {"id": "admin.users", "name": "用户管理", "roles": ["super_admin", "admin"]},
         {"id": "admin.roles", "name": "权限管理", "roles": ["super_admin"]},
         {"id": "admin.identity", "name": "身份与连接器", "roles": ["super_admin"]},
-        {"id": "admin.billing", "name": "查看计费", "roles": ["super_admin"]},
+        {"id": "admin.settings", "name": "系统设置", "roles": ["super_admin", "admin"]},
+        {"id": "admin.branding", "name": "品牌资产", "roles": ["super_admin", "admin"]},
+        {"id": "admin.mcp", "name": "MCP 服务器", "roles": ["super_admin", "admin"]},
         {"id": "admin.audit", "name": "审计日志", "roles": ["super_admin", "admin"]},
+        {"id": "terminal.access", "name": "终端访问", "roles": ["super_admin", "admin"]},
     ]},
 ]
 

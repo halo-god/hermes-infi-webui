@@ -43,7 +43,15 @@ async def lifespan(app: FastAPI):
         if settings.is_production:
             raise RuntimeError(f"Redis unreachable at startup: {exc}") from exc
         logger.warning("Redis not reachable at startup: %s", exc)
+
+    # Start the scheduled-task polling loop (checks for due cron tasks every 60s).
+    import asyncio
+    from app.services.scheduled_service import scheduler_loop
+    scheduler_task = asyncio.create_task(scheduler_loop())
+
     yield
+
+    scheduler_task.cancel()
     shutdown_tracing()
     await close_redis()
     logger.info("Shutdown complete")

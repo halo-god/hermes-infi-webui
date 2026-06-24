@@ -26,6 +26,27 @@ async def terminal_ws(
         await websocket.close(code=4001, reason="Invalid ticket")
         return
 
+    # Permission check: terminal.access (platform permission matrix).
+    from app.db.base import async_session_maker
+    from app.db.models.user import User
+    from app.core.rbac import has_at_least
+    from app.core.guards import _default_roles
+    from app.services import settings_service
+
+    import uuid as _uuid
+    async with async_session_maker() as db:
+        user = await db.get(User, _uuid.UUID(user_id))
+        if not user:
+            await websocket.close(code=4001, reason="User not found")
+            return
+        if not has_at_least(user.role, "super_admin"):
+            s = await settings_service.get(db)
+            overrides: dict = (s.data or {}).get("permission_overrides", {})
+            roles = overrides.get("terminal.access") or _default_roles("terminal.access")
+            if user.role not in roles:
+                await websocket.close(code=4003, reason="无终端访问权限")
+                return
+
     await websocket.accept()
 
     # Determine shell

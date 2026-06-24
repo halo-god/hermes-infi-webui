@@ -469,3 +469,18 @@ export interface Task {
   order_idx: number;
   created_at: string;
 }
+
+export interface ScheduledTask {
+  id: string;
+  owner_id: string;
+  name: string;
+  agent_id: string;
+  prompt: string;
+  cron: string;
+  enabled: boolean;
+  last_run_at: string | null;
+  next_run_at: string | null;
+  last_status: string | null;
+  created_at: string;
+  updated_at: string;
+}

@@ -425,6 +425,10 @@ class Runner:
             from agent_runner.runner_memory import handle_memory_consolidate
             await handle_memory_consolidate(task, self.agents)
             return
+        if task.get("type") == "scheduled":
+            from agent_runner.runner_scheduled import handle_scheduled
+            await handle_scheduled(task, self.agents)
+            return
         await self.handle_single(task)
 
     # ── one prompt (single agent) ──
