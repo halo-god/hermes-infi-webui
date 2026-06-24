@@ -2,13 +2,15 @@
 	auto_https off
 }
 
+# HTTP to HTTPS redirect
 hermes.infiled.com:80 {
 	redir https://hermes.infiled.com{uri} permanent
 }
 
 hermes.infiled.com:443 {
-	tls /home/hermes/hermes-infi-webui/CA/hermes.infiled.com.pem /home/hermes/hermes-infi-webui/CA/hermes.infiled.com.key
+	tls /home/test/hermes-python/CA/hermes.infiled.com.pem /home/test/hermes-python/CA/hermes.infiled.com.key
 
+	# Security headers
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
@@ -17,17 +19,18 @@ hermes.infiled.com:443 {
 		Referrer-Policy "strict-origin-when-cross-origin"
 	}
 
+	# API backend
 	handle /api/* {
 		reverse_proxy 127.0.0.1:8001
 	}
 
+	# WebSocket support
 	@websocket {
 		header Connection *Upgrade*
 		header Upgrade websocket
 	}
-	reverse_proxy @websocket 127.0.0.1:8001
+	reverse_proxy @websocket 127.0.0.1:5173
 
-	handle {
-		reverse_proxy 127.0.0.1:5173
-	}
+	# Web frontend (Vite preview)
+	reverse_proxy 127.0.0.1:5173
 }
