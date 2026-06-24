@@ -124,6 +124,15 @@ function agentById(id: string | null): Agent {
     ({ id: id || "", label: id || "助手", color: "#b8852a", icon: "sparkle" } as Agent)
   );
 }
+function profileById(profileId: string): { label: string; color: string; icon: string; description: string } {
+  const p = chat.profiles.find((x) => x.id === profileId);
+  return {
+    label: p?.name || "助手",
+    color: p?.color || "#b8852a",
+    icon: p?.icon || "sparkle",
+    description: p?.desc || "",
+  };
+}
 function memberById(id: string | null): Member | undefined {
   return members.value.find((m) => m.user_id === id);
 }
@@ -218,7 +227,7 @@ async function removeProject() {
           <div class="proj-meta-row">
             <span class="proj-status" :class="project.status"><span class="dot"></span>{{ project.status === "active" ? "进行中" : "已暂停" }}</span>
             <span><Icon name="clock" /> 截止 {{ project.deadline || "—" }}</span>
-            <span><Icon name="sparkle" /> {{ project.pinned_agents.length }} 个助手</span>
+            <span><Icon name="sparkle" /> {{ project.pinned_profile_ids.length }} 个助手</span>
             <span><Icon name="check" /> 任务 {{ taskStats.done }}/{{ taskStats.total }}</span>
           </div>
         </div>
@@ -381,14 +390,14 @@ async function removeProject() {
           <div class="section-card">
             <div class="section-head"><div class="section-title"><Icon name="sparkle" /> 项目助手</div></div>
             <div class="agent-mini-grid">
-              <button v-for="id in project.pinned_agents" :key="id" class="agent-mini" @click="() => { const p = chat.profiles.find((x) => x.default_agent_id === id); router.push({ path: '/', query: { project: projectId, ...(p ? { profile: p.id } : {}) } }); }">
-                <div class="agent-icon" :style="{ background: agentById(id).color || '#b8852a' }"><Icon :name="agentById(id).icon || 'sparkle'" /></div>
+              <button v-for="pid in project.pinned_profile_ids" :key="pid" class="agent-mini" @click="() => { const p = chat.profiles.find((x) => x.id === pid); router.push({ path: '/', query: { project: projectId, ...(p ? { profile: p.id } : {}) } }); }">
+                <div class="agent-icon" :style="{ background: profileById(pid).color || '#b8852a' }"><Icon :name="profileById(pid).icon || 'sparkle'" /></div>
                 <div style="min-width: 0; flex: 1">
-                  <div class="nm">{{ agentById(id).label }}</div>
-                  <div class="ds">{{ agentById(id).description }}</div>
+                  <div class="nm">{{ profileById(pid).label }}</div>
+                  <div class="ds">{{ profileById(pid).description }}</div>
                 </div>
               </button>
-              <div v-if="!project.pinned_agents.length" style="padding: 18px; color: var(--ink-mute); font-size: 12px">未指定项目助手。</div>
+              <div v-if="!project.pinned_profile_ids.length" style="padding: 18px; color: var(--ink-mute); font-size: 12px">未指定项目助手。</div>
             </div>
           </div>
           <div class="section-card">

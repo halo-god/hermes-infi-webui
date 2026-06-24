@@ -2,7 +2,7 @@
 import { onMounted, ref } from "vue";
 import Icon from "@/components/Icon.vue";
 import ModalShell from "@/components/ModalShell.vue";
-import { agentsApi, type Profile } from "@/api/agents";
+import { profilesApi, type Profile } from "@/api/agents";
 
 const emit = defineEmits<{ close: []; created: [profileId: string] }>();
 
@@ -12,7 +12,7 @@ const loading = ref(true);
 
 onMounted(async () => {
   try {
-    profiles.value = await agentsApi.profiles();
+    profiles.value = await profilesApi.list();
     selected.value = profiles.value[0] || null;
   } catch {
     /* ignore */

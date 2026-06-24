@@ -103,16 +103,11 @@ class ConversationBrief(BaseModel):
 class TeamDetail(TeamOut):
     my_role: str
     members: list[MemberOut] = Field(default_factory=list)
-    shared_agents: list[str] = Field(default_factory=list)
     shared_profile_ids: list[str] = Field(default_factory=list)
     stats: TeamStats = Field(default_factory=TeamStats)
     knowledge: list[KnowledgeOut] = Field(default_factory=list)
     activity: list[ActivityItem] = Field(default_factory=list)
     pinned: list[ConversationBrief] = Field(default_factory=list)
-
-
-class SharedAgentsUpdate(BaseModel):
-    agent_ids: list[str]
 
 
 class SharedProfilesUpdate(BaseModel):
@@ -148,7 +143,7 @@ class ProjectCreate(BaseModel):
     icon: str | None = "sparkle"
     summary: str | None = None
     sections: list[str] = Field(default_factory=list)
-    pinned_agents: list[str] = Field(default_factory=list)
+    pinned_profile_ids: list[str] = Field(default_factory=list)
     deadline: date | None = None
 
 
@@ -160,7 +155,7 @@ class ProjectUpdate(BaseModel):
     progress: int | None = None
     status: str | None = None
     sections: list[str] | None = None
-    pinned_agents: list[str] | None = None
+    pinned_profile_ids: list[str] | None = None
     deadline: date | None = None
 
 
@@ -177,7 +172,7 @@ class ProjectOut(BaseModel):
     progress: int
     status: str
     sections: list
-    pinned_agents: list
+    pinned_profile_ids: list
     member_ids: list
     visibility: str
     deadline: date | None

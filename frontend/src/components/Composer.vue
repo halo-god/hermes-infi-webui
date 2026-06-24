@@ -4,7 +4,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import Icon from "@/components/Icon.vue";
 import ProfileListItem from "@/components/ProfileListItem.vue";
-import { agentsApi, type Profile } from "@/api/agents";
+import { profilesApi, type Profile } from "@/api/agents";
 import { filesApi, type FileItem } from "@/api/files";
 import { useNotificationStore } from "@/stores/notifications";
 import { useBrandingStore } from "@/stores/branding";
@@ -163,7 +163,7 @@ const filteredAgents = computed(() => {
 onMounted(async () => {
   document.addEventListener("mousedown", onDocClick);
   try {
-    profiles.value = await agentsApi.profiles();
+    profiles.value = await profilesApi.list();
     // Use profileId prop if provided, otherwise default to first
     if (props.profileId) {
       selected.value = profiles.value.find((p) => p.id === props.profileId) || profiles.value[0] || null;

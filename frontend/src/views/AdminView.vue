@@ -10,7 +10,7 @@ import { adminApi } from "@/api/admin";
 import { brandingApi } from "@/api/branding";
 import { http } from "@/api/client";
 import { fmtDate } from "@/utils/format";
-import { agentsApi, type Profile, type ProfileCreate } from "@/api/agents";
+import { agentsApi, profilesApi, type Profile, type ProfileCreate } from "@/api/agents";
 import { useAuthStore } from "@/stores/auth";
 import { useBrandingStore } from "@/stores/branding";
 import { usePresence } from "@/composables/usePresence";
@@ -426,7 +426,7 @@ const profileError = ref("");
 const SCOPE_LABEL: Record<string, string> = { personal: "个人", team: "团队", global: "全局" };
 
 async function loadProfiles() {
-  profiles.value = await agentsApi.profiles();
+  profiles.value = await profilesApi.list();
 }
 const scanErrors = ref<string[]>([]);
 const scanHermesPath = ref<string | null>(null);
@@ -442,7 +442,7 @@ async function scanAgents() {
   try {
     const result = await agentsApi.scanAgents();
     hermesVersion.value = result.version && result.version !== "unknown" ? result.version : "";
-    scanMsg.value = `发现 ${result.found} 个Agent，新增 ${result.created}，更新 ${result.updated}`;
+    scanMsg.value = `发现 ${result.found} 个 ACP Agent，新增 ${result.created}，更新 ${result.updated}`;
     scanErrors.value = result.errors || [];
     scanHermesPath.value = result.hermes_path;
   } catch (e: unknown) {
@@ -459,7 +459,7 @@ async function scanProfilesFn() {
   scanProfilesMsg.value = "";
   scanProfilesErrors.value = [];
   try {
-    const result = await agentsApi.scanProfiles();
+    const result = await profilesApi.scan();
     scanProfilesMsg.value = result.message || `新增 ${result.created} 个助手，发现 ${result.profiles_found} 个 Profile`;
     scanProfilesErrors.value = result.errors || [];
     await loadProfiles();
@@ -508,14 +508,14 @@ async function saveProfile() {
   profileError.value = "";
   try {
     if (editingProfileId.value) {
-      await agentsApi.updateProfile(editingProfileId.value, {
+      await profilesApi.update(editingProfileId.value, {
         name: profileForm.name, scope: profileForm.scope, color: profileForm.color,
         icon: profileForm.icon, desc: profileForm.desc, default_model: profileForm.default_model,
         team_id: profileForm.team_id, system_prompt: profileForm.system_prompt,
         skills: profileForm.skills, featured: profileForm.featured,
       });
     } else {
-      await agentsApi.createProfile({ ...profileForm });
+      await profilesApi.create({ ...profileForm });
     }
     showProfileForm.value = false;
     await loadProfiles();
@@ -527,20 +527,20 @@ async function saveProfile() {
 }
 async function deleteProfileItem(p: Profile) {
   if (!confirm(`删除助手「${p.name}」？此操作不可恢复。`)) return;
-  await agentsApi.deleteProfile(p.id);
+  await profilesApi.remove(p.id);
   await loadProfiles();
 }
 
 async function cloneProfile(p: Profile) {
   try {
-    await agentsApi.cloneProfile(p.id);
+    await profilesApi.clone(p.id);
     await loadProfiles();
   } catch { /* noop */ }
 }
 
 async function exportProfile(p: Profile) {
   try {
-    const data = await agentsApi.exportProfile(p.id);
+    const data = await profilesApi.export(p.id);
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -553,7 +553,7 @@ async function exportProfile(p: Profile) {
 
 async function exportAllProfiles() {
   try {
-    const all = await Promise.all(profiles.value.map((p) => agentsApi.exportProfile(p.id)));
+    const all = await Promise.all(profiles.value.map((p) => profilesApi.export(p.id)));
     const blob = new Blob([JSON.stringify(all, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -573,7 +573,7 @@ async function handleImportFile(e: Event) {
     const text = await file.text();
     const parsed = JSON.parse(text);
     const items = Array.isArray(parsed) ? parsed : [parsed];
-    await agentsApi.importProfiles(items);
+    await profilesApi.import(items);
     await loadProfiles();
   } catch {
     alert("导入失败：文件格式不正确");
@@ -1139,7 +1139,7 @@ async function handleImportFile(e: Event) {
           <div style="display: flex; gap: 8px; align-items: center">
             <span v-if="hermesVersion" style="font-size: 11.5px; color: var(--ink-mute); font-family: var(--font-mono); padding: 3px 8px; background: var(--bg-plate); border-radius: 5px">{{ hermesVersion }}</span>
             <button class="btn" :disabled="scanLoading" @click="scanAgents">
-              <Icon name="refresh" :size="13" /> {{ scanLoading ? "扫描中…" : "扫描 Agent" }}
+              <Icon name="refresh" :size="13" /> {{ scanLoading ? "扫描中…" : "扫描 ACP Agent" }}
             </button>
             <button class="btn" :disabled="scanProfilesLoading" @click="scanProfilesFn">
               <Icon name="sparkle" :size="13" /> {{ scanProfilesLoading ? "扫描中…" : "扫描 Profiles" }}
@@ -1238,7 +1238,7 @@ async function handleImportFile(e: Event) {
           <!-- system_prompt -->
           <label class="text-mute-sm" style="display:block;margin-top:12px">
             系统提示词 (system prompt)
-            <textarea v-model="profileForm.system_prompt" rows="4" placeholder="留空则使用 agent 默认行为" class="form-input" style="resize:vertical"></textarea>
+            <textarea v-model="profileForm.system_prompt" rows="4" placeholder="留空则使用助手默认行为" class="form-input" style="resize:vertical"></textarea>
           </label>
           <!-- skills chips -->
           <label class="text-mute-sm" style="display:block;margin-top:12px">
@@ -1266,7 +1266,7 @@ async function handleImportFile(e: Event) {
         <!-- Profile list -->
         <div class="section-card">
           <div v-if="!profiles.length" class="empty-state-lg">
-            还没有助手。点击「扫描 Agent」自动生成，或手动「新建助手」。
+            还没有助手。点击「扫描 ACP Agent」自动生成，或手动「新建助手」。
           </div>
           <div v-for="p in profiles" :key="p.id" style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--rule-soft)">
             <div style="width:36px;height:36px;border-radius:8px;display:grid;place-items:center;color:#fff;flex-shrink:0" :style="{ background: p.color || '#b8852a' }">

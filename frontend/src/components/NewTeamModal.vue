@@ -15,7 +15,7 @@ const ICONS = ["cube", "sparkle", "target", "chart2", "doc", "globe", "compass",
 
 const form = reactive({
   name: "", handle: "", color: COLORS[0], icon: ICONS[0], tagline: "",
-  plan: "team", sharedAgents: [] as string[], visibility: "invite", emails: "",
+  plan: "team", sharedProfileIds: [] as string[], visibility: "invite", emails: "",
 });
 let handleEdited = false as boolean;
 watch(() => form.name, (v) => {
@@ -24,16 +24,16 @@ watch(() => form.name, (v) => {
 const valid = computed(() => form.name.trim().length >= 2);
 const parsedEmails = computed(() => (form.emails || "").split(/[,\s;\n]+/).map((s) => s.trim()).filter((s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s)));
 const busy = ref(false);
-function toggleAgent(id: string) {
-  const i = form.sharedAgents.indexOf(id);
-  i >= 0 ? form.sharedAgents.splice(i, 1) : form.sharedAgents.push(id);
+function toggleProfile(id: string) {
+  const i = form.sharedProfileIds.indexOf(id);
+  i >= 0 ? form.sharedProfileIds.splice(i, 1) : form.sharedProfileIds.push(id);
 }
 async function submit() {
   if (!valid.value || busy.value) return;
   busy.value = true;
   try {
     const team = await teamsApi.create({ name: form.name.trim(), handle: form.handle || undefined, tagline: form.tagline.trim() || "一个新的协作空间", color: form.color });
-    if (form.sharedAgents.length) await teamsApi.setSharedAgents(team.id, [...form.sharedAgents]).catch(() => {});
+    if (form.sharedProfileIds.length) await teamsApi.setSharedProfiles(team.id, [...form.sharedProfileIds]).catch(() => {});
     for (const em of parsedEmails.value) await teamsApi.addMember(team.id, em, "member").catch(() => {});
     await chat.loadTeams();
     emit("created", team);
@@ -94,12 +94,12 @@ async function submit() {
     </div>
 
     <div class="np-field">
-      <label class="np-label">共享助手 <span class="np-hint">团队成员都可使用 · 已选 {{ form.sharedAgents.length }}</span></label>
+      <label class="np-label">共享助手 <span class="np-hint">团队成员都可使用 · 已选 {{ form.sharedProfileIds.length }}</span></label>
       <div class="np-agents">
-        <button v-for="p in chat.profiles.filter((pp) => pp.is_active)" :key="p.id" class="np-agent" :class="{ on: form.sharedAgents.includes(p.id) }" @click="toggleAgent(p.id)">
+        <button v-for="p in chat.profiles.filter((pp) => pp.is_active)" :key="p.id" class="np-agent" :class="{ on: form.sharedProfileIds.includes(p.id) }" @click="toggleProfile(p.id)">
           <span class="np-agent-ico" :style="{ background: p.color || '#b8852a' }"><Icon :name="p.icon || 'sparkle'" /></span>
           <span class="np-agent-nm">{{ p.name }}</span>
-          <span v-if="form.sharedAgents.includes(p.id)" class="np-agent-check"><Icon name="check" :size="9" /></span>
+          <span v-if="form.sharedProfileIds.includes(p.id)" class="np-agent-check"><Icon name="check" :size="9" /></span>
         </button>
       </div>
     </div>

@@ -74,31 +74,34 @@ export const agentsApi = {
   async list(): Promise<Agent[]> {
     return (await http.get<Agent[]>("/agents")).data;
   },
-  async profiles(): Promise<Profile[]> {
-    return (await http.get<Profile[]>("/profiles")).data;
-  },
-  async createProfile(data: ProfileCreate): Promise<Profile> {
-    return (await http.post<Profile>("/profiles", data)).data;
-  },
-  async updateProfile(id: string, data: ProfileUpdate): Promise<Profile> {
-    return (await http.patch<Profile>(`/profiles/${id}`, data)).data;
-  },
-  async deleteProfile(id: string): Promise<void> {
-    await http.delete(`/profiles/${id}`);
-  },
   async scanAgents(): Promise<ScanResult> {
     return (await http.post("/agents/scan")).data;
   },
-  async scanProfiles(): Promise<ScanProfilesResult> {
+};
+
+export const profilesApi = {
+  async list(): Promise<Profile[]> {
+    return (await http.get<Profile[]>("/profiles")).data;
+  },
+  async create(data: ProfileCreate): Promise<Profile> {
+    return (await http.post<Profile>("/profiles", data)).data;
+  },
+  async update(id: string, data: ProfileUpdate): Promise<Profile> {
+    return (await http.patch<Profile>(`/profiles/${id}`, data)).data;
+  },
+  async remove(id: string): Promise<void> {
+    await http.delete(`/profiles/${id}`);
+  },
+  async scan(): Promise<ScanProfilesResult> {
     return (await http.post("/profiles/scan")).data;
   },
-  async cloneProfile(id: string): Promise<Profile> {
+  async clone(id: string): Promise<Profile> {
     return (await http.post<Profile>(`/profiles/${id}/clone`)).data;
   },
-  async exportProfile(id: string): Promise<Record<string, string>> {
+  async export(id: string): Promise<Record<string, string>> {
     return (await http.get(`/profiles/${id}/export`)).data;
   },
-  async importProfiles(profiles: Record<string, string>[]): Promise<Profile[]> {
+  async import(profiles: Record<string, string>[]): Promise<Profile[]> {
     return (await http.post<Profile[]>("/profiles/import", { profiles })).data;
   },
 };

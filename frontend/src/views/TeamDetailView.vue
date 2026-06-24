@@ -13,7 +13,7 @@ import ConfirmModal from "@/components/ConfirmModal.vue";
 import ProjectMembersModal from "@/components/ProjectMembersModal.vue";
 import WorkspacePanel from "@/components/WorkspacePanel.vue";
 import { teamsApi } from "@/api/teams";
-import { agentsApi, type Profile } from "@/api/agents";
+import { profilesApi, type Profile } from "@/api/agents";
 import { projectsApi } from "@/api/projects";
 import { useChatStore } from "@/stores/chat";
 import { usePresence } from "@/composables/usePresence";
@@ -84,7 +84,7 @@ async function load() {
     teamsApi.get(tid),
     projectsApi.listByTeam(tid).catch(() => []),
     teamsApi.policy(tid).catch(() => null),
-    agentsApi.profiles().catch(() => []),
+    profilesApi.list().catch(() => []),
   ]);
   detail.value = d;
   projects.value = ps;
@@ -209,7 +209,7 @@ const team = computed(() => {
       last: "—",
       user_id: m.user_id,
     })),
-    sharedAgents: (d?.shared_agents || ["hermes"]) as string[],
+    sharedAgents: [] as string[],  // deprecated — use sharedProfileIds
     sharedProfileIds: (d?.shared_profile_ids || []) as string[],
     pinned: (d?.pinned || []) as { id: string; title: string; primary_agent_id: string; updated_at: string }[],
     activity: (d?.activity || []) as { who: string; action: string; target: string; icon: string; ago: string }[],
@@ -387,7 +387,7 @@ async function deleteTeam() {
           <div class="team-meta-row">
             <span class="role-pill">{{ roleLabel }}</span>
             <span><Icon name="user" /> {{ team.stats.members }} 位成员</span>
-            <span><Icon name="sparkle" /> {{ team.sharedProfileIds.length || team.stats.agents }} 个共享助手</span>
+            <span><Icon name="sparkle" /> {{ team.sharedProfileIds.length }} 个共享助手</span>
             <span><Icon name="clock" /> {{ team.created }}</span>
             <span><Icon name="star" /> {{ team.plan }}</span>
           </div>
@@ -417,7 +417,7 @@ async function deleteTeam() {
       <template v-if="tab === 'overview'">
         <div class="stat-grid">
           <div class="stat"><div class="stat-label"><Icon name="user" /> 成员</div><div class="stat-value">{{ team.stats.members }}</div><div class="stat-foot">活跃成员</div></div>
-          <div class="stat"><div class="stat-label"><Icon name="sparkle" /> 共享助手</div><div class="stat-value">{{ team.stats.agents }}</div><div class="stat-foot">已共享</div></div>
+          <div class="stat"><div class="stat-label"><Icon name="sparkle" /> 共享助手</div><div class="stat-value">{{ team.sharedProfileIds.length }}</div><div class="stat-foot">已共享</div></div>
           <div class="stat"><div class="stat-label"><Icon name="chat" /> 本周对话</div><div class="stat-value">{{ team.stats.threads }}</div><div class="stat-foot">本周累计</div></div>
           <div class="stat"><div class="stat-label"><Icon name="doc" /> 知识条目</div><div class="stat-value">{{ team.stats.knowledge }}</div><div class="stat-foot">最近更新 <em>{{ lastKnowledgeUpdate }}</em></div></div>
         </div>
@@ -504,7 +504,7 @@ async function deleteTeam() {
               <div class="proj-progress"><div :style="{ width: p.progress + '%' }"></div></div>
               <div class="proj-foot">
                 <span>{{ p.progress }}% · 截至 {{ p.deadline || "—" }}</span>
-                <span><Icon name="sparkle" :size="11" /> {{ (p.pinned_agents || []).length }}</span>
+                <span><Icon name="sparkle" :size="11" /> {{ (p.pinned_profile_ids || []).length }}</span>
               </div>
             </button>
             <div v-if="can('project.edit') || can('project.delete')" style="position: absolute; top: 12px; right: 12px">

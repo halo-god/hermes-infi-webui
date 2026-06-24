@@ -39,7 +39,6 @@ from app.schemas.team import (
     ProjectMembersUpdate,
     ProjectOut,
     ProjectUpdate,
-    SharedAgentsUpdate,
     SharedProfilesUpdate,
     TaskCreate,
     TaskOut,
@@ -332,17 +331,7 @@ async def put_policy(
     )
 
 
-# ── shared agents ──
-@router.put("/teams/{team_id}/shared-agents", response_model=TeamDetail)
-async def set_shared_agents(
-    team_id: uuid.UUID, payload: SharedAgentsUpdate,
-    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
-):
-    team, _m = await svc.require_permission(db, team_id, user.id, "agent.manage")
-    await svc.set_shared_agents(db, team, payload.agent_ids)
-    return await _team_detail(db, team_id, user)
-
-
+# ── shared profiles ──
 @router.put("/teams/{team_id}/shared-profiles", response_model=TeamDetail)
 async def set_shared_profiles(
     team_id: uuid.UUID, payload: SharedProfilesUpdate,
@@ -725,7 +714,7 @@ async def _team_detail(db: AsyncSession, team_id: uuid.UUID, user: User) -> Team
     team = await db.get(Team, team_id)
     rows = await svc.list_members(db, team_id)
     my = next((m for m, _ in rows if m.user_id == user.id), None)
-    shared = list(team.shared_agents or ["hermes"])
+    shared_profiles = list(team.shared_profile_ids or [])
     knowledge = await svc.list_knowledge(db, team_id)
     pinned = await svc.team_pinned(db, team_id)
     activity = await svc.team_activity(db, team)
@@ -733,11 +722,10 @@ async def _team_detail(db: AsyncSession, team_id: uuid.UUID, user: User) -> Team
         **TeamOut.model_validate(team).model_dump(),
         my_role=my.role if my else "viewer",
         members=[_member_out(m, u) for m, u in rows],
-        shared_agents=shared,
-        shared_profile_ids=list(team.shared_profile_ids or []),
+        shared_profile_ids=shared_profiles,
         stats=TeamStats(
             members=len(rows),
-            agents=len(shared),
+            agents=len(shared_profiles),
             threads=await svc.team_threads_count(db, team_id),
             knowledge=len(knowledge),
         ),

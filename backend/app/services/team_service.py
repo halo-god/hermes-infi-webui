@@ -165,7 +165,7 @@ async def create_project(db: AsyncSession, team_id: uuid.UUID, data, owner: User
         icon=data.icon or "sparkle",
         summary=data.summary,
         sections=data.sections or [],
-        pinned_agents=data.pinned_agents or ["hermes"],
+        pinned_profile_ids=data.pinned_profile_ids or [],
         member_ids=[str(owner.id)] if owner else [],
         deadline=data.deadline,
     )
@@ -200,14 +200,7 @@ async def create_task(db: AsyncSession, project_id: uuid.UUID, data) -> ProjectT
     return task
 
 
-# ── team shared agents ──
-async def set_shared_agents(db: AsyncSession, team: Team, agent_ids: list[str]) -> Team:
-    team.shared_agents = agent_ids
-    await db.commit()
-    await db.refresh(team)
-    return team
-
-
+# ── team shared profiles ──
 async def set_shared_profiles(db: AsyncSession, team: Team, profile_ids: list[str]) -> Team:
     team.shared_profile_ids = profile_ids
     await db.commit()

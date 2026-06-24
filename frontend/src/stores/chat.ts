@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { conversationsApi } from "@/api/conversations";
-import { agentsApi } from "@/api/agents";
+import { profilesApi } from "@/api/agents";
 import { teamsApi } from "@/api/teams";
 import { mediaTicket, tokenStore } from "@/api/client";
 import { useStream } from "@/composables/useStream";
@@ -58,7 +58,7 @@ export const useChatStore = defineStore("chat", () => {
 
   async function loadProfiles() {
     try {
-      profiles.value = await agentsApi.profiles();
+      profiles.value = await profilesApi.list();
     } catch (e) {
       console.error("[chat] loadProfiles failed:", e);
       profiles.value = [];

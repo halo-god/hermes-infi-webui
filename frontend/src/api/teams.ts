@@ -37,9 +37,6 @@ export const teamsApi = {
   async updatePolicy(id: string, policy: Record<string, Record<string, boolean>>): Promise<TeamPolicy> {
     return (await http.put<TeamPolicy>(`/teams/${id}/policy`, { policy })).data;
   },
-  async setSharedAgents(id: string, agentIds: string[]): Promise<TeamDetail> {
-    return (await http.put<TeamDetail>(`/teams/${id}/shared-agents`, { agent_ids: agentIds })).data;
-  },
   async setSharedProfiles(id: string, profileIds: string[]): Promise<TeamDetail> {
     return (await http.put<TeamDetail>(`/teams/${id}/shared-profiles`, { profile_ids: profileIds })).data;
   },

@@ -17,7 +17,7 @@ from app.db.base import get_db
 from app.db.models.audit import AuditLog  # noqa: F401
 from app.db.models.conversation import Conversation, Message
 from app.db.models.team import Team
-from app.db.models.agent import Agent
+from app.db.models.agent import Profile
 from app.db.models.user import User
 from app.schemas.admin import (
     AdminStats,
@@ -65,7 +65,7 @@ async def stats(db: AsyncSession = Depends(get_db)):
         teams=await count(Team),
         conversations=await count(Conversation),
         messages=await count(Message),
-        agents=await count(Agent),
+        agents=await count(Profile),
         active_users=status_dist.get("active", 0),
         pending_users=status_dist.get("pending", 0),
         role_distribution={r or "member": int(n) for r, n in role_rows},

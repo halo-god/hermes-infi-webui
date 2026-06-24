@@ -22,7 +22,6 @@ class Team(UUIDPrimaryKey, Timestamps, Base):
     plan: Mapped[str] = mapped_column(String(24), default="team")
     join_mode: Mapped[str] = mapped_column(String(24), default="invite")
     policy: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
-    shared_agents: Mapped[list] = mapped_column(JSONB, default=lambda: ["hermes"])
     shared_profile_ids: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     channel_mode: Mapped[str] = mapped_column(String(16), default="mention", nullable=False)
     invite_token: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
@@ -72,7 +71,7 @@ class Project(UUIDPrimaryKey, Timestamps, Base):
     progress: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(16), default="active")  # active|paused|archived
     sections: Mapped[list] = mapped_column(JSONB, default=list)
-    pinned_agents: Mapped[list] = mapped_column(JSONB, default=list)
+    pinned_profile_ids: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     member_ids: Mapped[list] = mapped_column(JSONB, default=list)
     visibility: Mapped[str] = mapped_column(String(16), default="team")
     deadline: Mapped[date | None] = mapped_column(Date)

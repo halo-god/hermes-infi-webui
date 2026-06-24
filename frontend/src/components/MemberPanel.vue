@@ -3,7 +3,7 @@
 import { ref, computed, onMounted, watch } from 'vue';
 import Icon from '@/components/Icon.vue';
 import { conversationsApi } from '@/api/conversations';
-import { agentsApi, type Profile } from '@/api/agents';
+import { profilesApi, type Profile } from '@/api/agents';
 import type { GroupMember } from '@/types';
 
 const props = defineProps<{
@@ -54,7 +54,7 @@ async function load() {
   try {
     const [mem, prof] = await Promise.all([
       conversationsApi.getMembers(props.conversationId),
-      agentsApi.profiles().catch(() => []),
+      profilesApi.list().catch(() => []),
     ]);
     members.value = mem;
     profiles.value = prof;

@@ -37,7 +37,7 @@ const form = reactive({
   summary: props.project?.summary || "",
   deadline: props.project?.deadline || defaultDeadline(),
   sections: props.project?.sections || ["concept", "spec", "rollout"],
-  pinnedAgents: props.project?.pinned_agents || [] as string[],
+  pinnedProfileIds: props.project?.pinned_profile_ids || [] as string[],
   members: props.project ? (props.project?.member_ids || []) : props.members.slice(0, 2).map((m) => m.user_id),
   visibility: props.project?.visibility || "team",
 });
@@ -70,7 +70,7 @@ async function submit() {
   try {
     const data = {
       name: form.name.trim(), handle: form.handle || undefined, color: form.color, icon: form.icon,
-      summary: form.summary || undefined, sections: form.sections, pinned_agents: form.pinnedAgents,
+      summary: form.summary || undefined, sections: form.sections, pinned_profile_ids: form.pinnedProfileIds,
       deadline: form.deadline || undefined,
     };
     if (isEdit.value && props.project) {
@@ -142,12 +142,12 @@ async function submit() {
     </div>
 
     <div class="np-field">
-      <label class="np-label">钉选助手 <span class="np-hint">项目首页直接可用 · 已选 {{ form.pinnedAgents.length }}</span></label>
+      <label class="np-label">钉选助手 <span class="np-hint">项目首页直接可用 · 已选 {{ form.pinnedProfileIds.length }}</span></label>
       <div class="np-agents">
-        <button v-for="a in agentItems" :key="a.id" class="np-agent" :class="{ on: form.pinnedAgents.includes(a.id) }" @click="toggle(form.pinnedAgents, a.id)">
+        <button v-for="a in agentItems" :key="a.id" class="np-agent" :class="{ on: form.pinnedProfileIds.includes(a.id) }" @click="toggle(form.pinnedProfileIds, a.id)">
           <span class="np-agent-ico" :style="{ background: a.color || '#b8852a' }"><Icon :name="a.icon || 'sparkle'" /></span>
           <span class="np-agent-nm">{{ a.label }}</span>
-          <span v-if="form.pinnedAgents.includes(a.id)" class="np-agent-check"><Icon name="check" :size="9" /></span>
+          <span v-if="form.pinnedProfileIds.includes(a.id)" class="np-agent-check"><Icon name="check" :size="9" /></span>
         </button>
       </div>
     </div>

@@ -403,7 +403,6 @@ export interface TeamStats {
 export interface TeamDetail extends Team {
   my_role: string;
   members: Member[];
-  shared_agents: string[];
   shared_profile_ids: string[];
   stats: TeamStats;
   knowledge: Knowledge[];
@@ -438,7 +437,7 @@ export interface Project {
   progress: number;
   status: string;
   sections: string[];
-  pinned_agents: string[];
+  pinned_profile_ids: string[];
   member_ids: string[];
   visibility: string;
   deadline: string | null;

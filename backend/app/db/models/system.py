@@ -15,7 +15,7 @@ DEFAULT_SETTINGS = {
         "display": "Hermes — 信使",
         "short_name": "Hermes",
         "login_tagline": "凡所欲遣，皆可托信使。",
-        "login_subtitle": "连接你的 Hermes Agent，开始协作。",
+        "login_subtitle": "连接你的 Hermes 助手，开始协作。",
         "accent": "#b8852a",
     },
     "model_gateway": {

@@ -744,20 +744,9 @@ async def create_group(
                     select(TM.user_id).where(TM.team_id == team_id)
                 )
                 member_user_ids = [row[0] for row in res.all()]
-            # Auto-add team shared agents (when not explicitly provided)
+            # Auto-add team shared agents (resolve from shared_profile_ids).
             if not member_agent_ids:
-                agent_ids = list(team.shared_agents or ["hermes"])
-                # Also resolve shared_profile_ids → agent_ids
-                if team.shared_profile_ids:
-                    from app.db.models.agent import Profile as ProfileModel
-                    for pid in team.shared_profile_ids:
-                        try:
-                            p = await db.get(ProfileModel, uuid.UUID(pid))
-                            if p and p.default_agent_id and p.default_agent_id not in agent_ids:
-                                agent_ids.append(p.default_agent_id)
-                        except Exception:
-                            pass
-                member_agent_ids = agent_ids
+                member_agent_ids = await _resolve_team_agents(db, team)
 
     agent_ids = member_agent_ids or ["hermes"]
     convo = Conversation(
@@ -1343,8 +1332,12 @@ async def _team_member_ids(db: AsyncSession, team_id: uuid.UUID) -> list[uuid.UU
 
 
 async def _resolve_team_agents(db: AsyncSession, team) -> list[str]:
-    """团队共享 Agent + 共享 Profile 解析出的 Agent。"""
-    agent_ids = list(team.shared_agents or ["hermes"]) or ["hermes"]
+    """Resolve shared Profile ids → agent ids for team dispatch.
+
+    Only shared_profile_ids is consulted (shared_agents column was dropped).
+    Falls back to ["hermes"] when no profiles are shared or none resolve.
+    """
+    agent_ids: list[str] = []
     for pid in (team.shared_profile_ids or []):
         try:
             p = await db.get(Profile, uuid.UUID(pid))
@@ -1352,7 +1345,7 @@ async def _resolve_team_agents(db: AsyncSession, team) -> list[str]:
             continue
         if p and p.default_agent_id and p.default_agent_id not in agent_ids:
             agent_ids.append(p.default_agent_id)
-    return agent_ids
+    return agent_ids or ["hermes"]
 
 
 async def sync_group_membership(
@@ -1459,7 +1452,16 @@ async def get_or_create_project_group(
             continue
     if owner_id not in human_ids:
         human_ids.append(owner_id)
-    agents = list(project.pinned_agents or ["hermes"]) or ["hermes"]
+    # Resolve pinned Profile ids → agent ids for project dispatch.
+    agents: list[str] = []
+    for pid in (project.pinned_profile_ids or []):
+        try:
+            p = await db.get(Profile, uuid.UUID(pid))
+        except (ValueError, TypeError):
+            continue
+        if p and p.default_agent_id and p.default_agent_id not in agents:
+            agents.append(p.default_agent_id)
+    agents = agents or ["hermes"]
 
     if convo is None:
         convo = Conversation(
