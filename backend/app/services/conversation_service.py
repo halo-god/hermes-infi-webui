@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json as _json
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -72,16 +72,13 @@ async def list_conversations(
 async def bulk_delete(
     db: AsyncSession, owner_id: uuid.UUID, ids: list[uuid.UUID]
 ) -> int:
-    res = await db.execute(
-        select(Conversation).where(
+    result = await db.execute(
+        delete(Conversation).where(
             Conversation.owner_id == owner_id, Conversation.id.in_(ids)
         )
     )
-    convos = list(res.scalars().all())
-    for c in convos:
-        await db.delete(c)
     await db.commit()
-    return len(convos)
+    return result.rowcount or 0
 
 
 async def get_conversation(
@@ -620,7 +617,7 @@ async def fork_conversation(
     source = await get_conversation(db, source_id, owner_id)
     if not source:
         raise ValueError("conversation not found")
-    all_msgs = await get_messages(db, source_id)
+    all_msgs = await get_messages(db, source_id, limit=500)  # limit to prevent OOM on long conversations
     cut = next((i for i, m in enumerate(all_msgs) if m.id == before_message_id), len(all_msgs) - 1)
     fork = Conversation(
         owner_id=owner_id,
@@ -1332,18 +1329,24 @@ async def _team_member_ids(db: AsyncSession, team_id: uuid.UUID) -> list[uuid.UU
 
 
 async def _resolve_team_agents(db: AsyncSession, team) -> list[str]:
-    """Resolve shared Profile ids → agent ids for team dispatch.
+    """Resolve shared Profile ids → agent ids for team dispatch (batch query).
 
     Only shared_profile_ids is consulted (shared_agents column was dropped).
     Falls back to ["hermes"] when no profiles are shared or none resolve.
     """
-    agent_ids: list[str] = []
-    for pid in (team.shared_profile_ids or []):
+    pids_raw = [pid for pid in (team.shared_profile_ids or []) if pid]
+    valid_uuids = []
+    for pid in pids_raw:
         try:
-            p = await db.get(Profile, uuid.UUID(pid))
+            valid_uuids.append(uuid.UUID(pid))
         except (ValueError, TypeError):
             continue
-        if p and p.default_agent_id and p.default_agent_id not in agent_ids:
+    if not valid_uuids:
+        return ["hermes"]
+    result = await db.execute(select(Profile).where(Profile.id.in_(valid_uuids)))
+    agent_ids: list[str] = []
+    for p in result.scalars().all():
+        if p.default_agent_id and p.default_agent_id not in agent_ids:
             agent_ids.append(p.default_agent_id)
     return agent_ids or ["hermes"]
 

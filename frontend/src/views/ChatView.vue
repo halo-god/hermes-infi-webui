@@ -35,6 +35,11 @@ const ns = useNotificationStore();
 const route = useRoute();
 const router = useRouter();
 
+/** HTML-escape a string for safe interpolation into v-html content. */
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
 const draft = ref("");
 const scroller = ref<HTMLElement | null>(null);
 const loadMoreSentinel = ref<HTMLElement | null>(null);
@@ -220,7 +225,7 @@ function highlightMentions(html: string): string {
     const profile = chat.profiles.find(p => p.default_agent_id === agentId);
     const name = profile?.name || agentId;
     const color = profile?.color || branding.accent;
-    return `<span class="mention-tag" style="background:${color}22;color:${color};border:1px solid ${color}44">@${name}</span>`;
+    return `<span class="mention-tag" style="background:${color}22;color:${color};border:1px solid ${color}44">@${escapeHtml(name)}</span>`;
   });
 }
 
@@ -341,7 +346,7 @@ async function scrollDown() {
   await nextTick();
   if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight;
 }
-watch(() => chat.messages.map((m) => m.content.text).join("|"), scrollDown);
+watch(() => chat.messages.length, () => nextTick(scrollDown));
 watch(() => chat.activeId, scrollDown);
 
 // ── Route query watcher: handle ?c= changes while already in ChatView ──
@@ -383,7 +388,7 @@ function onMeasure(el: HTMLElement, _index: number) {
 // Without this, the virtualizer keeps the initially-measured height
 // while the DOM grows, causing content to appear clipped / "not refreshing".
 watch(
-  () => chat.messages.map((m) => m.content.text).join("|"),
+  () => chat.messages.length,
   () => {
     nextTick(() => virtualizer.value.measure());
   },
@@ -543,10 +548,14 @@ async function forkSession() {
 
 async function changeSessionMode(mode: string) {
   if (!chat.activeId) return;
+  const prev = sessionMode.value;
   sessionMode.value = mode;
   try {
     await conversationsApi.setSessionMode(chat.activeId, mode);
-  } catch { /* revert on error */ }
+  } catch {
+    sessionMode.value = prev;
+    ns.toast("切换失败", "error");
+  }
 }
 
 
@@ -614,9 +623,10 @@ async function forkFrom(msgId: string) {
 // ── File diff colorizer ──
 function colorDiff(text: string): string {
   return text.split("\n").map((line) => {
-    if (line.startsWith("+") && !line.startsWith("+++")) return `<span class="diff-add">${line}</span>`;
-    if (line.startsWith("-") && !line.startsWith("---")) return `<span class="diff-del">${line}</span>`;
-    return `<span>${line}</span>`;
+    const esc = escapeHtml(line);
+    if (line.startsWith("+") && !line.startsWith("+++")) return `<span class="diff-add">${esc}</span>`;
+    if (line.startsWith("-") && !line.startsWith("---")) return `<span class="diff-del">${esc}</span>`;
+    return `<span>${esc}</span>`;
   }).join("\n");
 }
 
@@ -735,7 +745,7 @@ function mdSearch(text: string): string {
   const html = md(text);
   if (!searchQuery.value.trim()) return html;
   const q = searchQuery.value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return html.replace(new RegExp(`(${q})`, "gi"), "<mark>$1</mark>");
+  return html.replace(new RegExp(`(${q})`, "gi"), (m) => `<mark>${escapeHtml(m)}</mark>`);
 }
 
 function searchNext() {

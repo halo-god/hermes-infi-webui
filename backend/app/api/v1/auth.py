@@ -39,14 +39,15 @@ async def login(
     ip = request.client.host if request.client else None
     who = str(req.username or "")
 
-    # Per-IP brute-force guard — fixed window, fail-open if Redis is down.
+    # Per-IP brute-force guard — fixed window, fail-closed if Redis is down
+    # (safer to deny logins than to allow unbounded brute-force when Redis is unavailable).
     if ip:
         try:
             allowed, _ = await ratelimit.hit(
                 f"rl:login:{ip}", settings.login_rate_limit_per_min, 60
             )
         except Exception:  # noqa: BLE001
-            allowed = True
+            allowed = False
         if not allowed:
             metrics.LOGINS.labels("fail").inc()
             raise HTTPException(status_code=429, detail="登录尝试过于频繁，请稍后再试")
@@ -151,6 +152,28 @@ async def providers(db: AsyncSession = Depends(get_db)) -> list[ProviderInfo]:
         ProviderInfo(id=p.id, label=p.label, enabled=p.enabled, kind=p.id) for p in rows
     ]
     return out
+
+
+@router.post("/wecom/exchange")
+async def wecom_exchange(payload: dict):
+    """Exchange a one-time code (from WeCom callback fallback) for tokens.
+
+    Prevents long-lived refresh tokens from appearing in the URL hash.
+    """
+    code = payload.get("code")
+    if not code:
+        raise HTTPException(status_code=400, detail="缺少 code 参数")
+    from app.core import redis as _redis_core
+    import json as _json
+    r = _redis_core.get_redis()
+    key = f"wecom:exchange:{code}"
+    raw = await r.get(key)
+    if not raw:
+        raise HTTPException(status_code=400, detail="兑换码无效或已过期")
+    # One-time use: delete immediately.
+    await r.delete(key)
+    data = _json.loads(raw)
+    return {"access_token": data["access_token"], "refresh_token": data["refresh_token"]}
 
 
 # ── WeCom OAuth ──────────────────────────────────────────────────────
@@ -266,6 +289,18 @@ def _wecom_callback_html(
         # when no public origin is configured.
         import json as _json
         target_origin = _json.dumps(settings.primary_origin or "/")
+
+        # When there's no opener (WeCom workbench / standalone browser), use a
+        # one-time exchange code instead of putting long-lived refresh tokens in
+        # the URL hash (which leaks via browser history, referer, and logs).
+        import secrets as _secrets
+        from app.core import redis as _redis_core
+        exchange_code = _secrets.token_urlsafe(32)
+        r = _redis_core.get_redis()
+        await r.setex(f"wecom:exchange:{exchange_code}", 60, _json.dumps({
+            "access_token": access_token, "refresh_token": refresh_token
+        }))
+
         content = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>企业微信登录</title></head>
 <body>
@@ -281,8 +316,9 @@ def _wecom_callback_html(
     }}, {target_origin});
     setTimeout(function() {{ window.close(); }}, 500);
   }} else {{
-    // Workbench / no-opener fallback: pass tokens via URL hash
-    window.location.href = '/login#access_token={access_token}&refresh_token={refresh_token}';
+    // Workbench / no-opener fallback: use a one-time exchange code
+    // (refresh token never appears in the URL).
+    window.location.href = '/login?wecom_code={exchange_code}';
   }}
 </script>
 </body></html>"""

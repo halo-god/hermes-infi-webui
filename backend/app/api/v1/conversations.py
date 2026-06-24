@@ -224,21 +224,25 @@ async def reorder_folders(
     db: AsyncSession = Depends(get_db),
 ):
     """Batch-update sort_order for multiple folders (drag-to-reorder)."""
-    for item in payload.items:
-        fid = item.get("id")
-        order = item.get("sort_order")
-        if fid is None or order is None:
-            continue
-        f = (
+    ids = [item["id"] for item in payload.items if item.get("id")]
+    if not ids:
+        return {"status": "ok"}
+    # Batch-load all folders in one query.
+    rows = {
+        f.id: f
+        for f in (
             await db.execute(
                 select(ConversationFolder).where(
-                    ConversationFolder.id == fid,
+                    ConversationFolder.id.in_(ids),
                     ConversationFolder.owner_id == user.id,
                 )
             )
-        ).scalars().first()
+        ).scalars().all()
+    }
+    for item in payload.items:
+        f = rows.get(uuid.UUID(item["id"]))
         if f:
-            f.sort_order = order
+            f.sort_order = item["sort_order"]
     await db.commit()
     return {"status": "ok"}
 
@@ -422,7 +426,9 @@ async def get_shared_conversation(
     convo = res.scalar_one_or_none()
     if not convo:
         raise HTTPException(status_code=404, detail="分享链接不存在或已失效")
-    msgs = await svc.get_messages(db, convo.id)
+    # Limit messages to prevent dumping entire conversation history to
+    # unauthenticated viewers (shared links are UUID-based, not secret tokens).
+    msgs = await svc.get_messages(db, convo.id, limit=100)
     return ConversationDetail(
         **ConversationOut.model_validate(convo).model_dump(),
         messages=[MessageOut.model_validate(m) for m in msgs],

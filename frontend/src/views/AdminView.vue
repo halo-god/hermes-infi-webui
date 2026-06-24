@@ -4,7 +4,7 @@
    activity), users table, RBAC role cards + permission matrix, identity providers
    with rich detail panel, audit log with filters, system settings + danger zone.
    Wired to the real /admin API. */
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import Icon from "@/components/Icon.vue";
 import { adminApi } from "@/api/admin";
 import { brandingApi } from "@/api/branding";
@@ -138,6 +138,9 @@ async function deleteMcpServer(name: string) {
 watch(tab, (t) => { if (t === "mcp") loadMcpServers(); });
 
 onMounted(load);
+onUnmounted(() => {
+  if (_auditTimer) { clearInterval(_auditTimer); _auditTimer = null; }
+});
 async function load() {
   try { stats.value = await adminApi.stats(); } catch { /* will show nulls */ }
   await Promise.allSettled([loadUsers(), loadAudit(), loadSettings(), loadIdentity(), loadRoles(), loadProfiles()]);

@@ -173,7 +173,6 @@ http.interceptors.response.use(
       original._retried = true;
       refreshing = refreshing ?? doRefresh();
       const newToken = await refreshing;
-      refreshing = null;
       if (newToken) {
         // Use AxiosHeaders.set() — direct property assignment doesn't work
         // because config.headers is an AxiosHeaders instance, not a plain object.
@@ -184,14 +183,27 @@ http.interceptors.response.use(
           (headers as Record<string, string>).Authorization = `Bearer ${newToken}`;
           original.headers = headers;
         }
-        return http(original);
+        // Reset refreshing AFTER the retried request completes to prevent
+        // a concurrent 401 from starting a second refresh while the first
+        // retry is still in flight.
+        try {
+          const result = await http(original);
+          refreshing = null;
+          return result;
+        } catch (retryErr) {
+          refreshing = null;
+          return Promise.reject(retryErr);
+        }
       }
+      refreshing = null;
       // Refresh failed → bounce to login.
       window.dispatchEvent(new CustomEvent("hermes:logout"));
+      return Promise.reject(error);
     }
 
     // Show user-friendly error toast for non-retryable errors
-    if (!isAuthCall && !isStreamCall && status && status >= 400) {
+    // (skip 401s that are already being handled by the refresh/logout flow)
+    if (status !== 401 && !isAuthCall && !isStreamCall && status && status >= 400) {
       const showError = getShowError();
       const detail = (error.response?.data as Record<string, unknown>)?.detail;
       const msg = typeof detail === "string" ? detail : `请求失败 (${status})`;

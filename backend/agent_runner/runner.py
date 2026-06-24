@@ -34,6 +34,7 @@ from app.core import redis as R
 from app.db.base import async_session_maker
 from app.db.models.agent import Agent
 from app.db.models.conversation import Conversation, Message
+from sqlalchemy import select
 from agent_runner import discovery, storage
 from agent_runner.acp_client import ACPTimeout
 from agent_runner.session_pool import SessionPool
@@ -128,9 +129,22 @@ class Runner:
     async def register_agents(self) -> None:
         found = await discovery.scan()
         self.agents = {a.id: a for a in found}
+        if not found:
+            return
         async with async_session_maker() as db:
+            # Batch-load existing agents in one query.
+            existing = {
+                a.id: a
+                for a in (
+                    await db.execute(
+                        select(Agent).where(
+                            Agent.id.in_([a.id for a in found])
+                        )
+                    )
+                ).scalars().all()
+            }
             for a in found:
-                row = await db.get(Agent, a.id)
+                row = existing.get(a.id)
                 if row is None:
                     row = Agent(id=a.id)
                     db.add(row)
@@ -179,11 +193,13 @@ class Runner:
                 claimed = result[1]
                 for msg_id, fields in claimed:
                     logger.warning("Reclaimed stale message %s", msg_id)
-                    await redis.xack(settings.acp_stream, settings.acp_group, msg_id)
                     data = fields.get(b"data", fields.get("data"))
                     if data:
+                        # Re-enqueue FIRST (so message is not lost if we crash
+                        # between re-enqueue and ACK), then ACK the original.
                         await redis.xadd(settings.acp_stream, {"data": data})
                         logger.info("Re-enqueued stale message %s", msg_id)
+                    await redis.xack(settings.acp_stream, settings.acp_group, msg_id)
         except Exception:
             logger.debug("Reclaim check failed (non-fatal)", exc_info=True)
 
@@ -764,20 +780,29 @@ class Runner:
             r"(?:(~/)?([^\s\n]+\.\w+))",
             re.IGNORECASE,
         )
+        # Confine file reads to the workspace directory to prevent the agent
+        # from instructing the runner to read arbitrary host files
+        # (e.g. /etc/shadow, ~/.ssh/id_rsa, the app's .env).
+        ws_root = os.path.realpath(os.path.join(settings.workspace_root, conversation_id))
         for m in path_re.finditer(text):
             raw_path = m.group(0).split(":", 1)[-1].split("：", 1)[-1].strip()
             if raw_path.startswith("~/"):
                 raw_path = os.path.expanduser(raw_path)
+            # Resolve to absolute real path and confine to workspace.
+            candidate = os.path.realpath(raw_path)
+            if candidate != ws_root and not candidate.startswith(ws_root + os.sep):
+                logger.warning("Refusing to read file outside workspace: %s", raw_path)
+                continue
             filename = os.path.basename(raw_path)
             if filename in saved_names:
                 continue
-            if os.path.isfile(raw_path):
+            if os.path.isfile(candidate):
                 try:
-                    with open(raw_path, encoding="utf-8") as fh:
+                    with open(candidate, encoding="utf-8") as fh:
                         content = fh.read()
                     extracted.append((filename, content))
                 except Exception:  # noqa: BLE01
-                    logger.debug("Could not read %s", raw_path)
+                    logger.debug("Could not read %s", candidate)
 
         seen: set[str] = set()
         unique: list[tuple[str, str]] = []

@@ -285,7 +285,9 @@ export const useChatStore = defineStore("chat", () => {
     if (!activeId.value || loadingOlder.value || !hasMoreMessages.value) return;
     loadingOlder.value = true;
     try {
-      const oldest = messages.value[0];
+      // Skip optimistic (tmp-) messages — they don't have a real UUID yet and
+      // the backend rejects non-UUID cursors with 422.
+      const oldest = messages.value.find((m) => !m.id.startsWith("tmp-"));
       if (!oldest) { hasMoreMessages.value = false; return; }
       const older = await conversationsApi.getMessages(activeId.value, {
         limit: 50,

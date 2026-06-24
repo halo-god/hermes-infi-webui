@@ -111,6 +111,10 @@ class Message(UUIDPrimaryKey, Timestamps, Base):
 class GroupMember(UUIDPrimaryKey, Timestamps, Base):
     """群聊成员：人类或Agent。"""
     __tablename__ = "group_members"
+    __table_args__ = (
+        UniqueConstraint("conversation_id", "user_id", name="group_members_unique_user"),
+        UniqueConstraint("conversation_id", "agent_id", name="group_members_unique_agent"),
+    )
 
     conversation_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
