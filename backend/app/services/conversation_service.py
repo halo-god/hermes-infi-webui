@@ -40,8 +40,9 @@ async def list_conversations(
         .scalar_subquery()
     )
     stmt = select(Conversation).where(
-        (Conversation.owner_id == owner_id)
-        | ((Conversation.type == "group") & Conversation.id.in_(group_subq))
+        ((Conversation.owner_id == owner_id)
+        | ((Conversation.type == "group") & Conversation.id.in_(group_subq)))
+        & (Conversation.title != "__file_storage__")
     )
     if pinned_only:
         stmt = stmt.where(Conversation.pinned.is_(True))

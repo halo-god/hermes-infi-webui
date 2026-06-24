@@ -306,7 +306,7 @@ async def create_folder(
         storage_convo = Conversation(
             owner_id=user.id,
             title="__file_storage__",
-            system_prompt="",
+            primary_agent_id="hermes",
         )
         db.add(storage_convo)
         await db.flush()
