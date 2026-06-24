@@ -45,6 +45,7 @@ export default defineConfig(({ mode }) => {
     server: {
       host: true,
       port: 5173,
+      allowedHosts: ["hermes.infiled.com"],
       proxy: {
         // In dev, proxy API calls (incl. WebSocket) to the FastAPI backend.
         // Target is configurable via VITE_API_PROXY_TARGET env var.
