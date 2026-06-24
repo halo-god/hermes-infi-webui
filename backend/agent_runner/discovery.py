@@ -227,33 +227,45 @@ def list_hermes_fs_profiles() -> list[dict]:
       <hermes_home>/{name}/config.yaml            → named profile (user format)
       <hermes_home>/profiles/{name}/config.yaml   → named profile (hermes-web-ui format)
 
+    Also scans ~/.hermes/profiles/ for named profiles regardless of HERMES_HOME,
+    so that container / service-scoped HERMES_HOME does not hide other profiles.
+
     Returns a list of dicts with keys: name, handle, model, path.
     """
     hermes_home = get_hermes_home()
     results: list[dict] = []
+    existing_handles: set[str] = set()
 
-    if not hermes_home.exists():
-        logger.debug("Hermes home not found: %s", hermes_home)
-        return results
+    # Default profile — from HERMES_HOME itself (or ~/.hermes when no override)
+    if hermes_home.exists():
+        default_cfg = hermes_home / "config.yaml"
+        if default_cfg.exists():
+            cfg = _read_yaml(default_cfg)
+            results.append(
+                {
+                    "name": cfg.get("alias", "默认助手"),
+                    "handle": "hermes-default",
+                    "model": _extract_model_name(cfg.get("model", "hermes-4")),
+                    "path": str(default_cfg),
+                }
+            )
+            existing_handles.add("hermes-default")
 
-    # Default profile
-    default_cfg = hermes_home / "config.yaml"
-    if default_cfg.exists():
-        cfg = _read_yaml(default_cfg)
-        results.append(
-            {
-                "name": cfg.get("alias", "默认助手"),
-                "handle": "hermes-default",
-                "model": _extract_model_name(cfg.get("model", "hermes-4")),
-                "path": str(default_cfg),
-            }
-        )
+    # Named profiles — scan both ~/.hermes/profiles/ AND hermes_home/profiles/
+    # The ~/.hermes/profiles/ scan ensures ALL profiles are visible even when
+    # HERMES_HOME points at a single profile directory.
+    scan_dirs: list[Path] = []
 
-    # Named profiles — scan both layout variants, de-duplicate by handle
-    existing_handles = {r["handle"] for r in results}
-    for search_dir in [hermes_home, hermes_home / "profiles"]:
-        if not search_dir.is_dir():
-            continue
+    home_profiles = Path.home() / ".hermes" / "profiles"
+    if home_profiles.is_dir():
+        scan_dirs.append(home_profiles)
+
+    if hermes_home != Path.home() / ".hermes":
+        hermes_profiles = hermes_home / "profiles"
+        if hermes_profiles.is_dir() and hermes_profiles not in scan_dirs:
+            scan_dirs.append(hermes_profiles)
+
+    for search_dir in scan_dirs:
         for child in sorted(search_dir.iterdir()):
             if not child.is_dir():
                 continue
