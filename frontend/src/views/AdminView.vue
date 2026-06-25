@@ -30,7 +30,7 @@ const branding = useBrandingStore();
 const isSuperAdmin = computed(() => authStore.user?.role === "super_admin");
 const { queryPresence, getStatus } = usePresence();
 
-const tab = ref<"overview" | "users" | "roles" | "identity" | "audit" | "assistants" | "system" | "mcp">("overview");
+const tab = ref<"overview" | "users" | "roles" | "identity" | "audit" | "assistants" | "system" | "mcp" | "performance">("overview");
 const stats = ref<AdminStats | null>(null);
 const users = ref<User[]>([]);
 const userQ = ref("");
@@ -94,6 +94,7 @@ const showCreate = ref(false);
 // ── MCP Servers ──
 interface McpServer { name: string; transport: string; command: string | null; url: string | null; env: Record<string, string> | null }
 const mcpServers = ref<McpServer[]>([]);
+const mcpStatuses = ref<Record<string, { reachable: boolean; status: string }>>({});
 const mcpLoading = ref(false);
 const mcpForm = reactive({ name: "", transport: "stdio", command: "", url: "", envStr: "" });
 const mcpSaving = ref(false);
@@ -103,6 +104,20 @@ const showMcpForm = ref(false);
 async function loadMcpServers() {
   mcpLoading.value = true;
   try { mcpServers.value = (await http.get("/admin/mcp-servers")).data; } catch { mcpServers.value = []; } finally { mcpLoading.value = false; }
+}
+
+// ── Performance ──
+const perfData = ref<Record<string, unknown> | null>(null);
+const perfLoading = ref(false);
+async function loadPerformance() {
+  perfLoading.value = true;
+  try { perfData.value = (await http.get("/admin/performance")).data; } catch { perfData.value = null; } finally { perfLoading.value = false; }
+}
+async function checkMcpStatus(name: string) {
+  try {
+    const r = await http.get(`/admin/mcp-servers/${name}/status`);
+    return r.data;
+  } catch { return { name, status: "error", reachable: false }; }
 }
 async function addMcpServer() {
   mcpSaving.value = true; mcpError.value = "";
@@ -135,7 +150,10 @@ async function deleteMcpServer(name: string) {
   await http.delete(`/admin/mcp-servers/${encodeURIComponent(name)}`);
   await loadMcpServers();
 }
-watch(tab, (t) => { if (t === "mcp") loadMcpServers(); });
+watch(tab, (t) => {
+  if (t === "mcp") loadMcpServers();
+  if (t === "performance") loadPerformance();
+});
 
 onMounted(load);
 onUnmounted(() => {
@@ -408,7 +426,7 @@ const providersOn = computed(() => providers.value.filter((p) => p.enabled).leng
 
 const TABS = [
   ["overview", "概览"], ["users", "用户管理"], ["roles", "权限管理"],
-  ["identity", "身份与连接"], ["audit", "审计日志"], ["assistants", "助手管理"], ["mcp", "MCP 服务器"], ["system", "系统设置"],
+  ["identity", "身份与连接"], ["audit", "审计日志"], ["assistants", "助手管理"], ["mcp", "MCP 服务器"], ["system", "系统设置"], ["performance", "性能监控"],
 ] as const;
 
 // ── Assistants (Profiles) ──
@@ -568,6 +586,7 @@ async function exportAllProfiles() {
 }
 
 const importFileRef = ref<HTMLInputElement | null>(null);
+const importPreview = ref<{ items: Record<string, string>[]; visible: boolean }>({ items: [], visible: false });
 
 async function handleImportFile(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0];
@@ -576,13 +595,23 @@ async function handleImportFile(e: Event) {
     const text = await file.text();
     const parsed = JSON.parse(text);
     const items = Array.isArray(parsed) ? parsed : [parsed];
-    await profilesApi.import(items);
-    await loadProfiles();
+    // Show preview instead of importing directly
+    importPreview.value = { items, visible: true };
   } catch {
     alert("导入失败：文件格式不正确");
   }
   // Reset input
   if (importFileRef.value) importFileRef.value.value = "";
+}
+
+async function confirmImport() {
+  try {
+    await profilesApi.import(importPreview.value.items);
+    await loadProfiles();
+  } catch {
+    alert("导入失败");
+  }
+  importPreview.value = { items: [], visible: false };
 }
 </script>
 
@@ -1347,13 +1376,18 @@ async function handleImportFile(e: Event) {
           <div class="section-body flush">
             <div v-for="s in mcpServers" :key="s.name" class="row-item" style="padding: 12px 16px; gap: 12px">
               <div style="flex: 1; min-width: 0">
-                <div style="font-size: 13.5px; font-weight: 600; color: var(--ink)">{{ s.name }}</div>
+                <div style="font-size: 13.5px; font-weight: 600; color: var(--ink); display:flex; align-items:center; gap:6px">
+                  {{ s.name }}
+                  <span v-if="s.transport === 'http'" class="mcp-status-dot" :class="mcpStatuses[s.name]?.reachable ? 'ok' : 'unknown'"
+                    :title="mcpStatuses[s.name] ? (mcpStatuses[s.name].reachable ? '已连接' : '未连接') : ''"></span>
+                </div>
                 <div style="font-size: 11.5px; color: var(--ink-mute); margin-top: 3px; display: flex; gap: 10px; flex-wrap: wrap">
                   <span class="role-pill" style="font-size: 10px; padding: 1px 6px">{{ s.transport }}</span>
                   <span v-if="s.command" style="font-family: monospace">{{ s.command }}</span>
                   <span v-else-if="s.url">{{ s.url }}</span>
                 </div>
               </div>
+              <button v-if="s.transport === 'http'" class="btn" style="font-size: 11px; flex-shrink: 0" @click="async () => { mcpStatuses[s.name] = await checkMcpStatus(s.name); }">检测</button>
               <button class="btn text-danger" style="font-size: 12px; flex-shrink: 0" @click="deleteMcpServer(s.name)">删除</button>
             </div>
           </div>
@@ -1432,6 +1466,80 @@ async function handleImportFile(e: Event) {
           </div>
         </div>
       </template>
+
+      <!-- Performance tab -->
+      <template v-else-if="tab === 'performance'">
+        <div style="padding: 20px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+            <h1 class="admin-title" style="margin:0"><em>性能</em>监控</h1>
+            <button class="btn" @click="loadPerformance" :disabled="perfLoading">
+              <Icon name="refresh" :size="13" /> {{ perfLoading ? "加载中…" : "刷新" }}
+            </button>
+          </div>
+
+          <div v-if="perfLoading && !perfData" style="text-align:center;padding:40px;color:var(--ink-mute)">加载中…</div>
+          <div v-else-if="!perfData" style="text-align:center;padding:40px;color:var(--ink-mute)">暂无数据</div>
+
+          <div v-else style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px">
+            <!-- Process -->
+            <div class="section-card" style="padding:16px">
+              <div class="section-head"><div class="section-title">进程</div></div>
+              <div style="font-size:13px;line-height:1.8;color:var(--ink)">
+                <div>CPU: <strong>{{ (perfData as any).process?.cpu_percent }}%</strong></div>
+                <div>内存: <strong>{{ (perfData as any).process?.memory_mb }}MB</strong> ({{ (perfData as any).process?.memory_percent }}%)</div>
+                <div>线程: <strong>{{ (perfData as any).process?.threads }}</strong></div>
+                <div>运行: <strong>{{ Math.floor(((perfData as any).process?.uptime_seconds || 0) / 3600) }}h {{ Math.floor((((perfData as any).process?.uptime_seconds || 0) % 3600) / 60) }}m</strong></div>
+              </div>
+            </div>
+            <!-- System -->
+            <div class="section-card" style="padding:16px">
+              <div class="section-head"><div class="section-title">系统</div></div>
+              <div style="font-size:13px;line-height:1.8;color:var(--ink)">
+                <div>CPU: <strong>{{ (perfData as any).system?.cpu_percent }}%</strong></div>
+                <div>内存: <strong>{{ (perfData as any).system?.memory_used_mb }}MB / {{ (perfData as any).system?.memory_total_mb }}MB</strong> ({{ (perfData as any).system?.memory_percent }}%)</div>
+                <div v-if="(perfData as any).system?.disk_percent != null">磁盘: <strong>{{ (perfData as any).system?.disk_percent }}%</strong></div>
+              </div>
+            </div>
+            <!-- Database -->
+            <div class="section-card" style="padding:16px">
+              <div class="section-head"><div class="section-title">数据库</div></div>
+              <div style="font-size:13px;line-height:1.8;color:var(--ink)">
+                <div>会话: <strong>{{ (perfData as any).database?.conversations }}</strong></div>
+                <div>消息: <strong>{{ (perfData as any).database?.messages }}</strong></div>
+                <div>用户: <strong>{{ (perfData as any).database?.users }}</strong></div>
+              </div>
+            </div>
+            <!-- Redis -->
+            <div class="section-card" style="padding:16px">
+              <div class="section-head"><div class="section-title">Redis</div></div>
+              <div style="font-size:13px;line-height:1.8;color:var(--ink)">
+                <div>状态: <strong :style="{ color: (perfData as any).redis?.connected ? 'var(--ok)' : 'var(--danger)' }">{{ (perfData as any).redis?.connected ? '已连接' : '未连接' }}</strong></div>
+                <div>内存: <strong>{{ (perfData as any).redis?.used_memory_mb }}MB</strong></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>
     </div>
+
+    <!-- Import preview modal -->
+    <Teleport to="body">
+      <div v-if="importPreview.visible" class="ctx-menu-scrim" style="z-index: 9999" @click="importPreview.visible = false">
+        <div class="import-preview" @click.stop>
+          <div class="import-preview-title">导入预览 — 将创建 {{ importPreview.items.length }} 个助手</div>
+          <div class="import-preview-list">
+            <div v-for="(item, i) in importPreview.items" :key="i" class="import-preview-item">
+              <Icon name="sparkle" :size="12" />
+              <span>{{ item.name || '未命名' }}</span>
+              <span class="import-preview-handle">@{{ item.handle || 'N/A' }}</span>
+            </div>
+          </div>
+          <div class="import-preview-actions">
+            <button class="btn" @click="importPreview.visible = false">取消</button>
+            <button class="btn primary" @click="confirmImport">确认导入</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>

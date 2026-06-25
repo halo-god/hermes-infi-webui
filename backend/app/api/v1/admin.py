@@ -85,6 +85,65 @@ def _build_permissions(overrides: dict) -> list[dict]:
     return catalog
 
 
+@router.get("/performance")
+async def performance(db: AsyncSession = Depends(get_db)):
+    """System performance metrics for the admin dashboard."""
+    import psutil
+    import time
+    from app.core import redis as redis_core
+    from app.db.models.conversation import Conversation, Message
+
+    # CPU & memory
+    process = psutil.Process()
+    mem_info = process.memory_info()
+    cpu_percent = process.cpu_percent(interval=0.1)
+    sys_mem = psutil.virtual_memory()
+
+    # DB counts
+    conv_count = int((await db.execute(select(func.count()).select_from(Conversation))).scalar() or 0)
+    msg_count = int((await db.execute(select(func.count()).select_from(Message))).scalar() or 0)
+    user_count = int((await db.execute(select(func.count()).select_from(User))).scalar() or 0)
+
+    # Redis status
+    redis_ok = False
+    redis_info: dict = {}
+    try:
+        r = redis_core.get_redis()
+        redis_ok = await r.ping()
+        redis_info = await r.info("memory")
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Uptime
+    uptime_seconds = int(time.time() - process.create_time())
+
+    return {
+        "process": {
+            "cpu_percent": round(cpu_percent, 1),
+            "memory_mb": round(mem_info.rss / 1024 / 1024, 1),
+            "memory_percent": round(mem_info.rss / sys_mem.total * 100, 1),
+            "threads": process.num_threads(),
+            "uptime_seconds": uptime_seconds,
+        },
+        "system": {
+            "cpu_percent": round(psutil.cpu_percent(interval=0.1), 1),
+            "memory_total_mb": round(sys_mem.total / 1024 / 1024, 1),
+            "memory_used_mb": round(sys_mem.used / 1024 / 1024, 1),
+            "memory_percent": round(sys_mem.percent, 1),
+            "disk_percent": round(psutil.disk_usage("/").percent, 1) if hasattr(psutil, "disk_usage") else None,
+        },
+        "database": {
+            "conversations": conv_count,
+            "messages": msg_count,
+            "users": user_count,
+        },
+        "redis": {
+            "connected": redis_ok,
+            "used_memory_mb": round(redis_info.get("used_memory", 0) / 1024 / 1024, 1) if redis_info else 0,
+        },
+    }
+
+
 @router.get("/roles", response_model=RolesMatrixOut)
 async def roles(db: AsyncSession = Depends(get_db)):
     """Platform RBAC: role catalog (with live user counts) + permission matrix."""
@@ -360,3 +419,31 @@ async def delete_mcp_server(
     servers: list[dict] = [s for s in data.get("mcp_servers", []) if s["name"] != name]
     data["mcp_servers"] = servers
     await settings_service.update(db, data)
+
+
+@router.get("/mcp-servers/{name}/status")
+async def mcp_server_status(name: str, db: AsyncSession = Depends(get_db)):
+    """Check if an MCP server is reachable (basic HTTP health check)."""
+    settings = await settings_service.get(db)
+    servers: list[dict] = (settings.data or {}).get("mcp_servers", [])
+    server = next((s for s in servers if s["name"] == name), None)
+    if not server:
+        raise HTTPException(status_code=404, detail="MCP server not found")
+
+    import aiohttp
+    url = server.get("url") or server.get("base_url", "")
+    if not url:
+        return {"name": name, "status": "no_url", "reachable": False}
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(f"{url.rstrip('/')}/health") as resp:
+                return {
+                    "name": name,
+                    "status": "ok" if resp.status < 500 else "error",
+                    "reachable": resp.status < 500,
+                    "http_status": resp.status,
+                }
+    except Exception as e:  # noqa: BLE001
+        return {"name": name, "status": "unreachable", "reachable": False, "error": str(e)}

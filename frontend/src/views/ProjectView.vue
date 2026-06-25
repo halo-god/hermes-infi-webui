@@ -174,6 +174,33 @@ async function deleteTask(t: Task) {
   await projectsApi.deleteTask(t.id);
   tasks.value = tasks.value.filter((x) => x.id !== t.id);
 }
+
+// ── Kanban drag-and-drop ──
+const dragTaskId = ref<string | null>(null);
+const dragOverCol = ref<string | null>(null);
+function onKanbanDragStart(e: DragEvent, taskId: string) {
+  dragTaskId.value = taskId;
+  if (e.dataTransfer) { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", taskId); }
+}
+function onKanbanDragEnd() {
+  dragTaskId.value = null;
+  dragOverCol.value = null;
+}
+async function onKanbanDrop(e: DragEvent, col: string) {
+  e.preventDefault();
+  const taskId = dragTaskId.value || e.dataTransfer?.getData("text/plain");
+  dragOverCol.value = null;
+  dragTaskId.value = null;
+  if (!taskId) return;
+  const t = tasks.value.find((x) => x.id === taskId);
+  if (!t || t.status === col) return;
+  t.status = col;
+  try {
+    await projectsApi.updateTask(t.id, { status: col });
+  } catch {
+    await load(); // Reload on failure
+  }
+}
 function taskToAI(task?: Task, agentId?: string) {
   const seed = task ? `请帮我完成以下任务：${task.title}` : undefined;
   const profile = agentId ? chat.profiles.find((p) => p.default_agent_id === agentId) : null;
@@ -312,14 +339,30 @@ async function removeProject() {
 
         <!-- Kanban view -->
         <div v-else class="kanban-board">
-          <div v-for="col in kanbanCols" :key="col.key" class="kanban-col">
+          <div
+            v-for="col in kanbanCols"
+            :key="col.key"
+            class="kanban-col"
+            :class="{ 'drag-over': dragOverCol === col.key }"
+            @dragover.prevent="dragOverCol = col.key"
+            @dragleave="dragOverCol = dragOverCol === col.key ? null : dragOverCol"
+            @drop="onKanbanDrop($event, col.key)"
+          >
             <div class="kanban-col-head">
               <span class="kanban-col-dot" :style="{ background: col.color }"></span>
               <span class="kanban-col-label">{{ col.label }}</span>
               <span class="kanban-col-count">{{ col.items.length }}</span>
             </div>
             <div class="kanban-cards">
-              <div v-for="t in col.items" :key="t.id" class="kanban-card">
+              <div
+                v-for="t in col.items"
+                :key="t.id"
+                class="kanban-card"
+                :class="{ dragging: dragTaskId === t.id }"
+                draggable="true"
+                @dragstart="onKanbanDragStart($event, t.id)"
+                @dragend="onKanbanDragEnd"
+              >
                 <div class="kanban-card-title" :class="{ done: t.status === 'done' }">{{ t.title }}</div>
                 <div class="kanban-card-meta">
                   <span v-if="memberById(t.owner_id)" class="task-owner" style="font-size:10.5px">

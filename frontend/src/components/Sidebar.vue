@@ -652,6 +652,9 @@ function doDeleteFolder() {
           <Icon name="settings" class="ico" /> {{ t('nav.admin') }}
           <span class="badge" style="background: var(--accent-tint); color: var(--accent-deep); font-weight: 600">ADMIN</span>
         </div>
+        <div v-if="isAdmin" class="side-row" :class="{ active: route.name === 'logs' }" @click="router.push('/logs')">
+          <Icon name="doc" class="ico" /> 日志查看
+        </div>
         <div class="side-row" :class="{ active: route.name === 'settings' }" @click="router.push('/settings')">
           <Icon name="user" class="ico" /> {{ t('nav.settings') }}
         </div>

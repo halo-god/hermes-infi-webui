@@ -47,6 +47,9 @@ export const projectsApi = {
   async deleteTask(taskId: string): Promise<void> {
     await http.delete(`/tasks/${taskId}`);
   },
+  async reorderTasks(projectId: string, items: { id: string; order_idx: number; status?: string }[]): Promise<void> {
+    await http.put(`/projects/${projectId}/tasks/reorder`, { items });
+  },
   async docs(projectId: string): Promise<ProjectDoc[]> {
     return (await http.get<ProjectDoc[]>(`/projects/${projectId}/docs`)).data;
   },

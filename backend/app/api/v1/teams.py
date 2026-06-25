@@ -694,6 +694,43 @@ async def delete_task(
     await db.commit()
 
 
+@router.put("/projects/{project_id}/tasks/reorder")
+async def reorder_tasks(
+    project_id: uuid.UUID,
+    payload: dict,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Batch-update task order_idx and status (drag-to-reorder on Kanban)."""
+    from app.db.models.team import ProjectTask
+    from sqlalchemy import select
+
+    await _project_with_perm(db, project_id, user, "project.edit")
+    items = payload.get("items", [])
+    if not items:
+        return {"status": "ok"}
+    ids = [item["id"] for item in items if item.get("id")]
+    rows = {
+        t.id: t
+        for t in (
+            await db.execute(
+                select(ProjectTask).where(
+                    ProjectTask.id.in_(ids),
+                    ProjectTask.project_id == project_id,
+                )
+            )
+        ).scalars().all()
+    }
+    for item in items:
+        t = rows.get(uuid.UUID(item["id"]))
+        if t:
+            t.order_idx = item.get("order_idx", 0)
+            if "status" in item:
+                t.status = item["status"]
+    await db.commit()
+    return {"status": "ok"}
+
+
 # ── helpers ──
 def _member_out(member, u: User | None) -> MemberOut:
     return MemberOut(
