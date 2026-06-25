@@ -249,7 +249,7 @@ async def wecom_callback(code: str = "", state: str = "", db: AsyncSession = Dep
         info = await wecom_authenticate(provider.config, code)
     except ProviderError as e:
         # Return HTML with error message
-        return _wecom_callback_html(error=str(e))
+        return await _wecom_callback_html(error=str(e))
 
     # Provision user (create/update + team mapping)
     mappings = await identity_service.list_mappings(db, "wecom")
@@ -258,13 +258,13 @@ async def wecom_callback(code: str = "", state: str = "", db: AsyncSession = Dep
     # Issue JWT tokens
     tokens = auth_service.issue_tokens(user)
 
-    return _wecom_callback_html(
+    return await _wecom_callback_html(
         access_token=tokens.access_token,
         refresh_token=tokens.refresh_token,
     )
 
 
-def _wecom_callback_html(
+async def _wecom_callback_html(
     access_token: str = "",
     refresh_token: str = "",
     error: str = "",
