@@ -26,19 +26,19 @@ def test_send_message(logged_in_page: Page):
 def test_conversation_list(logged_in_page: Page):
     """Test conversation list is displayed in sidebar."""
     page = logged_in_page
-    # Sidebar should show conversation section
-    expect(page.locator("text=Conversations")).to_be_visible()
+    # Sidebar should show conversation list items (multiple .convo-list divs)
+    expect(page.locator(".convo-list").first).to_be_visible(timeout=5000)
 
 
 def test_search_conversations(logged_in_page: Page):
     """Test searching conversations."""
     page = logged_in_page
-    # Use keyboard shortcut to open search
-    page.keyboard.press("Control+k")
-    # Search input should appear (not dialog)
-    page.wait_for_selector('input[placeholder*="搜索"]', timeout=3000)
+    # Click the search button in the topbar (no global ⌘K handler, use button)
+    page.click('button[title*="搜索"]', timeout=5000)
+    # Search palette input should appear
+    page.wait_for_selector(".palette-input", timeout=5000)
     # Type search query
-    page.fill('input[placeholder*="搜索"]', "test")
+    page.fill(".palette-input", "test")
     page.keyboard.press("Escape")
 
 

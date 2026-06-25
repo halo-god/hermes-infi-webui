@@ -51,12 +51,17 @@ async def get_public_branding(db: AsyncSession) -> dict:
     defaults = DEFAULT_SETTINGS["branding"]
     branding = {**defaults, **stored}
 
+    # Helper: use stored value if non-empty, else fall back to default.
+    def _field(key: str) -> str:
+        val = branding.get(key, defaults[key])
+        return val if val else defaults[key]
+
     out: dict = {
-        "tenant_name": branding.get("tenant_name", defaults["tenant_name"]),
-        "display": branding.get("display", defaults["display"]),
-        "short_name": branding.get("short_name", defaults["short_name"]),
-        "login_tagline": branding.get("login_tagline", defaults["login_tagline"]),
-        "login_subtitle": branding.get("login_subtitle", defaults["login_subtitle"]),
+        "tenant_name": _field("tenant_name"),
+        "display": _field("display"),
+        "short_name": _field("short_name"),
+        "login_tagline": _field("login_tagline"),
+        "login_subtitle": _field("login_subtitle"),
         "accent": branding.get("accent", defaults["accent"]),
         "favicon_url": None,
         "logo_url": None,

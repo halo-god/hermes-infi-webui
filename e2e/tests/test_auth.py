@@ -24,8 +24,8 @@ def test_login_invalid_credentials(page: Page):
 def test_logout(logged_in_page: Page):
     """Test logout redirects to login page."""
     page = logged_in_page
-    # Click the logout button in sidebar (has class side-logout and title Logout)
-    page.click('button.side-logout[title="Logout"]', timeout=5000)
+    # Click the logout button in sidebar (class side-logout, title is i18n "退出登录")
+    page.click('button.side-logout', timeout=5000)
     expect(page).to_have_url("/login")
 
 
