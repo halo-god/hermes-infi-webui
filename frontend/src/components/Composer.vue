@@ -356,7 +356,16 @@ async function loadPickerFiles(folder: string) {
 }
 
 function navigatePickerFolder(item: FileItem) {
-  if (item.is_folder) loadPickerFiles(item.folder_path || "/");
+  if (!item.is_folder) return;
+  // Real DB folders have UUID ids and folder_path == parent dir.
+  // Virtual inferred folders have ids like "folder:/path" and folder_path == full path.
+  const isVirtual = item.id.startsWith("folder:");
+  if (isVirtual) {
+    loadPickerFiles(item.folder_path || "/");
+  } else {
+    const parent = item.folder_path === "/" ? "" : (item.folder_path || "");
+    loadPickerFiles(`${parent}/${item.name}`);
+  }
 }
 
 function toggleFileRef(item: FileItem) {
