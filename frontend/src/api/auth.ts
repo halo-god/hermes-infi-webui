@@ -28,4 +28,8 @@ export const authApi = {
     const { data } = await http.get<{ authorize_url: string }>("/auth/wecom/authorize");
     return data;
   },
+  async wecomExchange(code: string): Promise<{ access_token: string; refresh_token: string }> {
+    const { data } = await http.post<{ access_token: string; refresh_token: string }>("/auth/wecom/exchange", { code });
+    return data;
+  },
 };

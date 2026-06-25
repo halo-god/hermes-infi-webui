@@ -111,7 +111,26 @@ onMounted(async () => {
     providers.value = [{ id: "local", label: "账号密码", enabled: true, kind: "local" }];
   }
 
-  // Handle WeCom workbench callback (tokens passed in URL hash)
+  // Handle WeCom workbench callback (one-time exchange code in query string)
+  const urlParams = new URLSearchParams(window.location.search);
+  const wecomCode = urlParams.get("wecom_code");
+  if (wecomCode) {
+    try {
+      const tokens = await authApi.wecomExchange(wecomCode);
+      tokenStore.set(tokens.access_token, tokens.refresh_token);
+      // Clean code from URL
+      history.replaceState(null, "", window.location.pathname);
+      await auth.bootstrap();
+      if (auth.isAuthenticated) {
+        router.replace(safeRedirect());
+      }
+    } catch {
+      wecomError.value = "登录状态恢复失败，请重试";
+    }
+    return;
+  }
+
+  // Handle legacy WeCom callback (tokens passed in URL hash) — kept for backward compat
   const hash = window.location.hash;
   if (hash && hash.includes("access_token=")) {
     const params = new URLSearchParams(hash.replace("#", ""));

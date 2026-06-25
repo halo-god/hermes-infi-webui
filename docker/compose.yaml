@@ -75,6 +75,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-hermes}:${POSTGRES_PASSWORD:-hermes}@postgres:5432/${POSTGRES_DB:-hermes}
       REDIS_URL: redis://redis:6379/0
       CORS_ORIGINS: '["http://localhost:8080","http://localhost:5173"]'
+      APP_BASE_URL: ""
       FIRST_ADMIN_PASSWORD: ${FIRST_ADMIN_PASSWORD:-Hermes@2026}
       FIRST_ADMIN_NAME: ${FIRST_ADMIN_NAME:-林知微}
       STORAGE_BACKEND: ${STORAGE_BACKEND:-db}

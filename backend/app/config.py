@@ -182,6 +182,10 @@ class Settings(BaseSettings):
             problems.append("MINIO_SECRET_KEY is the default — override it")
         if self.debug:
             problems.append("DEBUG must be false outside development")
+        if self.app_base_url == "":
+            problems.append(
+                "APP_BASE_URL is not set — required for OAuth postMessage scoping and absolute links"
+            )
         return problems
 
 
