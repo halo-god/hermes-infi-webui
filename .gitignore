@@ -14,3 +14,4 @@ build/
 .minio_data/
 __MACOSX/
 workspaces/
+CA/

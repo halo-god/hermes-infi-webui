@@ -8,7 +8,7 @@ hermes.infiled.com:80 {
 }
 
 hermes.infiled.com:443 {
-	tls /home/test/hermes-python/CA/hermes.infiled.com.pem /home/test/hermes-python/CA/hermes.infiled.com.key
+	tls /home/hermes/hermes-infi-webui/CA/hermes.infiled.com.pem /home/hermes/hermes-infi-webui/CA/hermes.infiled.com.key
 
 	# Security headers
 	header {
@@ -29,8 +29,47 @@ hermes.infiled.com:443 {
 		header Connection *Upgrade*
 		header Upgrade websocket
 	}
-	reverse_proxy @websocket 127.0.0.1:5173
+	reverse_proxy @websocket 127.0.0.1:8001
 
 	# Web frontend (Vite preview)
-	reverse_proxy 127.0.0.1:5173
+	handle {
+		reverse_proxy 127.0.0.1:5173
+	}
+}
+
+# LAN IP – plain HTTP only (certificate mismatch fix)
+192.168.30.31:80 {
+	# API backend
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8001
+	}
+
+	# WebSocket support
+	@websocket {
+		header Connection *Upgrade*
+		header Upgrade websocket
+	}
+	reverse_proxy @websocket 127.0.0.1:8001
+
+	# Web frontend (Vite preview)
+	handle {
+		reverse_proxy 127.0.0.1:5173
+	}
+}
+
+# VIP Kingdee Chromium cluster
+vip.kingdee.infiled.com:3000 {
+	tls /data/chromium/certs/vip.kingdee.infiled.com.pem /data/chromium/certs/vip.kingdee.infiled.com.key
+
+	reverse_proxy 127.0.0.1:3001 127.0.0.1:3002 127.0.0.1:3003 127.0.0.1:3004 127.0.0.1:3005 127.0.0.1:3006 127.0.0.1:3007 127.0.0.1:3008 {
+		lb_policy least_conn
+		health_uri /
+		health_interval 10s
+		health_timeout 5s
+	}
+
+	header {
+		Content-Security-Policy "upgrade-insecure-requests"
+		Cache-Control "no-cache, no-store, must-revalidate"
+	}
 }
