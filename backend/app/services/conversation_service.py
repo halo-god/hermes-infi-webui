@@ -304,34 +304,25 @@ _INLINE_LIMIT = 8000  # chars — files smaller than this are inlined in full
 
 
 def _build_attached_prompt(text: str, attached: list[dict]) -> str:
-    """Build prompt text with attached files.
+    """Build prompt text with attached file references.
 
-    Small files (< _INLINE_LIMIT chars) are inlined in full.
-    Large files get a reference only — the agent reads them via read_file tool
-    using the workspace path already provided by resource_link blocks.
-    This prevents prompt token overflow when users attach knowledge-base documents.
+    Only references are injected (no inline content) — the agent reads file
+    content via the read_file tool using the workspace_path from resource_link
+    blocks. This prevents file content from appearing in the conversation.
     """
     if not attached:
         return text
     parts = []
     for f in attached:
+        ws_path = f.get("workspace_path", "")
+        size_bytes = f.get("size_bytes", 0)
+        size_kb = size_kb = (size_bytes or 0) / 1024
         if f.get("is_image"):
             parts.append(f"[图片附件: {f['name']}]")
+        elif ws_path:
+            parts.append(f"[文件附件: {f['name']}]（{size_kb:.0f}KB）\n文件路径: {ws_path}\n请用 read_file 工具按需读取。")
         else:
-            content = f.get("content", "")
-            ws_path = f.get("workspace_path", "")
-            if content and len(content) <= _INLINE_LIMIT:
-                # Small file: inline in full
-                parts.append(f"【附件: {f['name']}】\n```\n{content}\n```")
-            elif content:
-                # Large file: reference only — agent reads via read_file tool
-                size_kb = len(content) / 1024
-                ref = f"【附件: {f['name']}】（{size_kb:.0f}KB，内容过长不内嵌）"
-                if ws_path:
-                    ref += f"\n文件路径: {ws_path}\n请用 read_file 工具分段读取需要的部分。"
-                parts.append(ref)
-            else:
-                parts.append(f"【附件: {f['name']}】（文件内容为空）")
+            parts.append(f"[文件附件: {f['name']}]（{size_kb:.0f}KB，无工作区路径）")
     return f"{text}\n\n" + "\n\n".join(parts)
 
 
