@@ -300,30 +300,21 @@ def _profile_dir(profile: Profile | None) -> str | None:
     return os.path.dirname(os.path.expanduser(profile.path))
 
 
-_INLINE_LIMIT = 8000  # chars — files smaller than this are inlined in full
-
-
 def _build_attached_prompt(text: str, attached: list[dict]) -> str:
-    """Build prompt text with attached file references.
+    """Return the original user text unchanged.
 
-    Only references are injected (no inline content) — the agent reads file
-    content via the read_file tool using the workspace_path from resource_link
-    blocks. This prevents file content from appearing in the conversation.
+    File metadata is **not** injected into the prompt text — this prevents
+    the agent from echoing file paths or attachment labels in its reply,
+    which would leak into the conversation bubble.
+
+    The agent still learns about attachments through:
+    1. resource_link content blocks (workspace path, mime type, size)
+    2. read_file / read_image tools if it chooses to inspect them.
+
+    The frontend renders attachment chips from `message.content.files`
+    independently of the text.
     """
-    if not attached:
-        return text
-    parts = []
-    for f in attached:
-        ws_path = f.get("workspace_path", "")
-        size_bytes = f.get("size_bytes", 0)
-        size_kb = size_kb = (size_bytes or 0) / 1024
-        if f.get("is_image"):
-            parts.append(f"[图片附件: {f['name']}]")
-        elif ws_path:
-            parts.append(f"[文件附件: {f['name']}]（{size_kb:.0f}KB）\n文件路径: {ws_path}\n请用 read_file 工具按需读取。")
-        else:
-            parts.append(f"[文件附件: {f['name']}]（{size_kb:.0f}KB，无工作区路径）")
-    return f"{text}\n\n" + "\n\n".join(parts)
+    return text
 
 
 async def send_message(
