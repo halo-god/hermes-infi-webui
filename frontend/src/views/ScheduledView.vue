@@ -1,7 +1,6 @@
 <script setup lang="ts">
 /* 定时任务页 — 真实 CRUD，后端 cron 调度循环自动触发 ACP agent 执行。 */
 import { onMounted, ref } from "vue";
-import { useRouter } from "vue-router";
 import Icon from "@/components/Icon.vue";
 import { useChatStore } from "@/stores/chat";
 import { useBrandingStore } from "@/stores/branding";
@@ -9,7 +8,6 @@ import { useNotificationStore } from "@/stores/notifications";
 import { scheduledApi } from "@/api/scheduled";
 import type { ScheduledTask } from "@/types";
 
-const router = useRouter();
 const chat = useChatStore();
 const branding = useBrandingStore();
 const ns = useNotificationStore();
@@ -130,111 +128,112 @@ onMounted(() => {
 
 <template>
   <div class="stage">
-    <div class="landing" style="padding-top: 60px">
-      <div class="landing-inner">
-        <h1 class="hello" style="font-size: 34px"><em>定时任务</em></h1>
-        <div class="hello-sub">让{{ branding.shortName }}在指定时刻替你跑腿。</div>
+    <div class="admin-hero">
+      <div class="admin-hero-row">
+        <span class="admin-badge"><Icon name="clock" :size="11" /> SCHEDULED</span>
+        <span style="font-size: 11.5px; color: var(--ink-mute); font-family: var(--font-mono)">{{ branding.tenantName }}</span>
+      </div>
+      <h1 class="admin-title">定时<em>任务</em></h1>
+      <div class="admin-sub">让 {{ branding.shortName }} 在指定时刻替你跑腿。</div>
+    </div>
 
-        <div style="width: 100%; max-width: 680px; margin-top: 24px; display: flex; flex-direction: column; gap: 10px">
-          <!-- Loading -->
-          <div v-if="loading" style="text-align: center; padding: 40px; color: var(--ink-mute)">加载中…</div>
+    <div class="admin-body">
+      <!-- Stat cards -->
+      <div class="stat-grid" style="grid-template-columns: repeat(3, 1fr); margin-bottom: 20px">
+        <div class="stat">
+          <div class="stat-label">全部任务</div>
+          <div class="stat-value">{{ tasks.length }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">运行中</div>
+          <div class="stat-value" style="color: var(--ok)">{{ tasks.filter(t => t.enabled).length }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">已暂停</div>
+          <div class="stat-value" style="color: var(--ink-mute)">{{ tasks.filter(t => !t.enabled).length }}</div>
+        </div>
+      </div>
 
-          <!-- Empty -->
-          <div v-else-if="!tasks.length && !showForm" style="text-align: center; padding: 40px; color: var(--ink-mute)">
-            还没有定时任务。点击下方按钮创建第一个。
-          </div>
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px">
+        <h2 style="margin: 0; font-size: 15px; font-weight: 600; color: var(--ink)"><Icon name="clock" :size="15" /> 任务列表</h2>
+        <button class="btn primary" @click="openCreate"><Icon name="plus" :size="13" /> 新建任务</button>
+      </div>
 
-          <!-- Task list -->
-          <template v-for="t in tasks" :key="t.id">
-            <div
-              class="sched-row"
-              :class="{ disabled: !t.enabled }"
-              @click="openEdit(t)"
-            >
-              <div class="sched-icon" :style="{ background: agentById(t.agent_id).color }">
-                <Icon :name="agentById(t.agent_id).icon || 'sparkle'" :size="14" />
-              </div>
-              <div class="sched-body">
-                <div class="sched-name">{{ t.name }}</div>
-                <div class="sched-meta">
-                  <span>🕐 {{ t.cron }}</span>
-                  <span>由 {{ agentById(t.agent_id).label }} 执行</span>
-                  <span v-if="t.enabled">下次：{{ fmtDate(t.next_run_at) }}</span>
-                  <span v-else>已暂停</span>
-                  <span :style="{ color: statusColor(t.last_status) }">{{ statusLabel(t.last_status) }}</span>
-                </div>
-              </div>
-              <div class="sched-actions" @click.stop>
-                <button
-                  class="icon-btn"
-                  :title="t.enabled ? '暂停' : '启用'"
-                  @click="toggle(t)"
-                >
-                  <Icon :name="t.enabled ? 'moon' : 'sun'" :size="14" />
-                </button>
-                <button class="icon-btn danger" title="删除" @click="removeTask(t.id, t.name)">
-                  <Icon name="close" :size="14" />
-                </button>
+      <!-- Task list -->
+      <div v-if="loading" style="text-align: center; padding: 40px; color: var(--ink-mute)">加载中…</div>
+      <div v-else-if="!tasks.length && !showForm" style="text-align: center; padding: 40px; color: var(--ink-mute)">
+        还没有定时任务。
+      </div>
+
+      <template v-for="t in tasks" :key="t.id">
+        <div
+          class="section-card sched-row"
+          :class="{ disabled: !t.enabled }"
+          style="margin-bottom: 10px; cursor: pointer"
+          @click="openEdit(t)"
+        >
+          <div style="padding: 14px 18px; display: flex; align-items: center; gap: 12px">
+            <div class="sched-icon" :style="{ background: agentById(t.agent_id).color }">
+              <Icon :name="agentById(t.agent_id).icon || 'sparkle'" :size="14" />
+            </div>
+            <div class="sched-body" style="flex: 1; min-width: 0">
+              <div class="sched-name" style="font-size: 13.5px; font-weight: 600; color: var(--ink)">{{ t.name }}</div>
+              <div class="sched-meta" style="font-size: 11.5px; color: var(--ink-mute); margin-top: 3px; display: flex; gap: 12px; flex-wrap: wrap">
+                <span>🕐 {{ t.cron }}</span>
+                <span>由 {{ agentById(t.agent_id).label }} 执行</span>
+                <span v-if="t.enabled">下次：{{ fmtDate(t.next_run_at) }}</span>
+                <span v-else>已暂停</span>
+                <span :style="{ color: statusColor(t.last_status) }">{{ statusLabel(t.last_status) }}</span>
               </div>
             </div>
-          </template>
-
-          <!-- Create/Edit form -->
-          <div v-if="showForm" class="sched-form">
-            <div class="sched-form-title">{{ editingId ? '编辑定时任务' : '新建定时任务' }}</div>
-            <label class="sched-field">
-              <span>任务名称</span>
-              <input v-model="form.name" placeholder="如：每周五生成周报草稿" />
-            </label>
-            <label class="sched-field">
-              <span>执行 Agent</span>
-              <select v-model="form.agent_id">
-                <option v-for="p in chat.profiles" :key="p.default_agent_id" :value="p.default_agent_id">
-                  {{ p.name }} ({{ p.default_agent_id }})
-                </option>
-              </select>
-            </label>
-            <label class="sched-field">
-              <span>指令内容</span>
-              <textarea v-model="form.prompt" rows="4" placeholder="发给 Agent 的 prompt，如：请生成本周的工作周报草稿…" />
-            </label>
-            <label class="sched-field">
-              <span>Cron 表达式</span>
-              <input v-model="form.cron" placeholder="如：0 0 9 * * *（每天 09:00）" />
-              <div class="cron-presets">
-                <button v-for="p in CRON_PRESETS" :key="p.cron" class="cron-preset" @click="form.cron = p.cron">
-                  {{ p.label }}
-                </button>
-              </div>
-            </label>
-            <label class="sched-field-row">
-              <input type="checkbox" v-model="form.enabled" />
-              <span>启用</span>
-            </label>
-            <div class="sched-form-actions">
-              <button class="btn" @click="showForm = false">取消</button>
-              <button class="btn primary" :disabled="saving" @click="save">
-                {{ saving ? '保存中…' : '保存' }}
+            <div class="sched-actions" style="display: flex; gap: 6px" @click.stop>
+              <button class="icon-btn" :title="t.enabled ? '暂停' : '启用'" @click="toggle(t)">
+                <Icon :name="t.enabled ? 'moon' : 'sun'" :size="14" />
+              </button>
+              <button class="icon-btn" style="color: var(--danger)" title="删除" @click="removeTask(t.id, t.name)">
+                <Icon name="close" :size="14" />
               </button>
             </div>
           </div>
+        </div>
+      </template>
 
-          <!-- New button -->
-          <button
-            v-if="!showForm"
-            class="btn primary"
-            style="align-self: flex-start; display: inline-flex; align-items: center; gap: 5px; margin-top: 6px"
-            @click="openCreate"
-          >
-            <Icon name="plus" :size="13" /> 新建定时任务
-          </button>
-
-          <button
-            @click="router.push('/')"
-            style="margin-top: 4px; align-self: flex-start; color: var(--ink-mute); font-size: 12px; display: inline-flex; align-items: center; gap: 4px; background: none; border: none; cursor: pointer; padding: 0"
-          >
-            <Icon name="back" :size="12" /> 返回
-          </button>
+      <!-- Create/Edit form -->
+      <div v-if="showForm" class="section-card" style="margin-top: 16px">
+        <div class="section-head"><div class="section-title"><Icon name="edit" /> {{ editingId ? '编辑定时任务' : '新建定时任务' }}</div></div>
+        <div style="padding: 18px; display: flex; flex-direction: column; gap: 12px">
+          <label style="display: flex; flex-direction: column; gap: 4px">
+            <span style="font-size: 12px; font-weight: 500; color: var(--ink-mute)">任务名称</span>
+            <input v-model="form.name" class="cfg-input" placeholder="如：每周五生成周报草稿" />
+          </label>
+          <label style="display: flex; flex-direction: column; gap: 4px">
+            <span style="font-size: 12px; font-weight: 500; color: var(--ink-mute)">执行 Agent</span>
+            <select v-model="form.agent_id" class="cfg-input">
+              <option v-for="p in chat.profiles" :key="p.default_agent_id" :value="p.default_agent_id">
+                {{ p.name }} ({{ p.default_agent_id }})
+              </option>
+            </select>
+          </label>
+          <label style="display: flex; flex-direction: column; gap: 4px">
+            <span style="font-size: 12px; font-weight: 500; color: var(--ink-mute)">指令内容</span>
+            <textarea v-model="form.prompt" class="cfg-input" rows="4" placeholder="发给 Agent 的 prompt，如：请生成本周的工作周报草稿…" style="resize: vertical; font-family: inherit" />
+          </label>
+          <label style="display: flex; flex-direction: column; gap: 4px">
+            <span style="font-size: 12px; font-weight: 500; color: var(--ink-mute)">Cron 表达式</span>
+            <input v-model="form.cron" class="cfg-input" placeholder="如：0 0 9 * * *（每天 09:00）" />
+            <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px">
+              <button v-for="p in CRON_PRESETS" :key="p.cron" style="font-size: 11px; padding: 3px 8px; border-radius: 5px; border: 1px solid var(--rule); background: var(--bg-canvas); color: var(--ink-mute); cursor: pointer" @click="form.cron = p.cron">
+                {{ p.label }}
+              </button>
+            </div>
+          </label>
+          <label style="display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink)">
+            <input type="checkbox" v-model="form.enabled" /> 启用
+          </label>
+          <div style="display: flex; gap: 8px; justify-content: flex-end">
+            <button class="btn" @click="showForm = false">取消</button>
+            <button class="btn primary" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存' }}</button>
+          </div>
         </div>
       </div>
     </div>

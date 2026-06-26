@@ -442,7 +442,7 @@ function doDeleteFolder() {
         {{ t('nav.teams') }}
         <button :title="t('nav.newTeam')" @click="showNewTeam = true">+</button>
       </div>
-      <div class="side-section" style="padding-top: 0">
+      <div class="side-section team-scroll" style="padding-top: 0">
         <div
           v-for="t in chat.teams"
           :key="t.id"
@@ -460,7 +460,7 @@ function doDeleteFolder() {
         群聊
         <button title="创建群聊" @click="showNewGroup = true">+</button>
       </div>
-      <div class="convo-list" style="margin-bottom: 8px">
+      <div class="convo-list" style="margin-bottom: 8px; flex: 0 0 auto; max-height: 200px; overflow-y: auto">
         <div
           v-for="c in groupConversations"
           :key="c.id"
@@ -654,6 +654,9 @@ function doDeleteFolder() {
         </div>
         <div v-if="isAdmin" class="side-row" :class="{ active: route.name === 'logs' }" @click="router.push('/logs')">
           <Icon name="doc" class="ico" /> 日志查看
+        </div>
+        <div class="side-row" :class="{ active: route.name === 'feedback' }" @click="router.push('/feedback')">
+          <Icon name="chat" class="ico" /> 反馈中心
         </div>
         <div class="side-row" :class="{ active: route.name === 'settings' }" @click="router.push('/settings')">
           <Icon name="user" class="ico" /> {{ t('nav.settings') }}

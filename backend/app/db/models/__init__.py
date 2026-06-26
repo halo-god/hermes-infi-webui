@@ -8,6 +8,7 @@ from app.db.models.conversation import (  # noqa: F401
     GroupMember,
     Message,
 )
+from app.db.models.feedback import Feedback  # noqa: F401
 from app.db.models.identity import DeptTeamMapping, IdentityProvider  # noqa: F401
 from app.db.models.system import SystemSettings  # noqa: F401
 from app.db.models.team import (  # noqa: F401

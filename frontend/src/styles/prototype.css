@@ -15,7 +15,7 @@
     overflow: hidden;
     min-height: 0;
   }
-  .side-inner { display: flex; flex-direction: column; height: 100%; min-width: 268px; }
+  .side-inner { display: flex; flex-direction: column; height: 100%; min-width: 268px; overflow: hidden; }
 
   .brand { display: flex; align-items: center; gap: 10px; padding: 14px 16px 12px; }
   .brand-mark {
@@ -46,6 +46,9 @@
   }
 
   .side-section { padding: 4px 10px; }
+  .team-scroll { max-height: 200px; overflow-y: auto; flex-shrink: 0; }
+  .team-scroll::-webkit-scrollbar { width: 4px; }
+  .team-scroll::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 2px; }
   .side-row {
     display: flex; align-items: center; gap: 10px;
     padding: 8px 10px;

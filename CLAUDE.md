@@ -120,3 +120,21 @@ src/
 **New frontend page**: API method in `src/api/<domain>.ts`, types in `src/types/index.ts`, view in `src/views/XxxView.vue`, route in `src/router/index.ts`.
 
 **TS build is strict** (`noUnusedLocals`): clean up all unused imports/variables before `npm run build`.
+
+### Frontend UI/UX layout conventions
+
+All pages MUST follow these layout conventions for visual consistency:
+
+1. **Page structure**: Every view uses `<div class="stage">` as the root (scroll container, `flex: 1; overflow-y: auto`).
+2. **Hero header**: Admin/tool pages use `<div class="admin-hero">` with `<div class="admin-hero-row">` (badge + meta), `<h1 class="admin-title">` (with `<em>` for emphasis), and `<div class="admin-sub">` (subtitle).
+3. **Centered body**: Content goes in `<div class="admin-body">` — `max-width: 1400px; margin: 0 auto; padding: 24px 40px 60px`.
+4. **Cards**: Use `<div class="section-card">` with `<div class="section-head"><div class="section-title">…</div></div>` + padding body.
+5. **Stat cards**: `<div class="stat-grid">` with `<div class="stat"><div class="stat-label">…</div><div class="stat-value">…</div></div>`.
+6. **Two-column layout**: `<div class="col-grid">` (CSS grid, `gap: 16px`).
+7. **Forms**: Use `class="cfg-input"` for inputs/selects/textareas. Buttons use `class="btn"` or `class="btn primary"`.
+8. **Filter toolbars**: Use `<div class="users-toolbar">` with `<div class="filter-input">` (search) and `<button class="filter-select">` (dropdowns).
+9. **Tables**: CSS grid rows — `<div class="audit-table">` with `<div class="au-row head">` (header) and `<div class="au-row">` (body rows).
+10. **Topbar buttons**: Use `class="icon-btn"` with `<Icon name="…" />`. For dropdown panels, anchor with `position: relative` wrapper + `position: absolute` panel with `z-index: 800`. **If a dropdown risks overflow, prefer a direct route link instead** (`router.push('/path')`).
+11. **Sidebar scroll areas**: Lists that can grow (teams, group chats) MUST have `max-height` + `overflow-y: auto` + `flex-shrink: 0` to prevent pushing other sections off-screen. The conversation list (`.convo-list`) uses `flex: 1; min-height: 0` to fill remaining space.
+12. **Status tags/pills**: `<span class="fb-cat-pill">` / `<span class="fb-st-pill">` — colored border + text, `font-size: 10px; padding: 1px 6px; border-radius: 4px`.
+13. **Transitions**: Dropdown panels use `<Transition name="panel-drop">` (opacity + translateY 8px over 150ms).

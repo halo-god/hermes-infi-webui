@@ -483,3 +483,19 @@ export interface ScheduledTask {
   created_at: string;
   updated_at: string;
 }
+
+export interface Feedback {
+  id: number;
+  user_id: string;
+  user_name: string;
+  title: string;
+  content: string;
+  category: string;
+  status: string;
+  priority: string;
+  reply: string | null;
+  replied_by: string | null;
+  replied_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
