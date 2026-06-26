@@ -51,11 +51,12 @@ async def list_conversations(
         # Use PostgreSQL full-text search for better performance on large datasets
         # Falls back to LIKE for simple prefix matching
         if len(q) >= 2:
-            # Full-text search with tsvector
-            tsquery = func.plainto_tsquery("simple", q)
+            # Full-text search with tsvector. `.match()` wraps its argument in
+            # plainto_tsquery itself, so pass the raw string — wrapping it here too
+            # produces plainto_tsquery(plainto_tsquery(...)), which is invalid SQL.
             stmt = stmt.where(
                 func.to_tsvector("simple", func.coalesce(Conversation.title, "")).match(
-                    tsquery, postgresql_regconfig="simple"
+                    q, postgresql_regconfig="simple"
                 )
             )
         else:
