@@ -198,16 +198,17 @@ async def _resolve_attached_files(
 
             # Resolve content: storage_key wins, then inline content
             file_content = f.content or ""
+            raw_bytes: bytes | None = None
             if f.storage_key and not file_content:
                 try:
                     import asyncio
                     from app.core import object_storage
-                    raw = await asyncio.to_thread(object_storage.get, f.storage_key)
-                    if is_text:
-                        file_content = raw.decode("utf-8", "ignore")
+                    raw_bytes = await asyncio.to_thread(object_storage.get, f.storage_key)
+                    if is_text and ext != "pdf":
+                        file_content = raw_bytes.decode("utf-8", "ignore")
                     else:
                         import base64
-                        file_content = base64.b64encode(raw).decode("ascii")
+                        file_content = base64.b64encode(raw_bytes).decode("ascii")
                 except Exception:
                     file_content = ""
 
@@ -217,8 +218,12 @@ async def _resolve_attached_files(
             if ws_dir and file_content and not is_image:
                 fpath = confine_to_dir(ws_dir, rel_name)
                 os.makedirs(os.path.dirname(fpath), exist_ok=True)
-                with open(fpath, "w", encoding="utf-8") as fh:
-                    fh.write(file_content)
+                if raw_bytes and ext == "pdf":
+                    with open(fpath, "wb") as fh:
+                        fh.write(raw_bytes)
+                else:
+                    with open(fpath, "w", encoding="utf-8") as fh:
+                        fh.write(file_content)
 
             result.append({
                 "id": str(f.id), "name": f.name, "kind": f.kind,
