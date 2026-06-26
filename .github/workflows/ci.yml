@@ -70,6 +70,13 @@ jobs:
           REDIS_URL: redis://localhost:6379
         run: alembic upgrade head
 
+      - name: Seed super-admin
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://hermes:test@localhost:5432/hermes_test
+          REDIS_URL: redis://localhost:6379
+        run: python -m app.seed
+
       - name: Run tests
         working-directory: backend
         env:
