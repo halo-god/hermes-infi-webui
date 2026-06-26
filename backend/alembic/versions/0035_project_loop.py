@@ -1,7 +1,7 @@
 """project loop: activity log, source tracing, doc content, profile knowledge
 
 Revision ID: 0035
-Revises: 0034
+Revises: c9c47065e34f
 Create Date: 2026-06-26
 """
 from alembic import op
@@ -9,7 +9,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 revision = "0035"
-down_revision = "0034"
+down_revision = "c9c47065e34f"
 branch_labels = None
 depends_on = None
 
