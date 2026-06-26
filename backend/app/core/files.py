@@ -8,6 +8,29 @@ from fastapi import HTTPException, UploadFile
 _UPLOAD_CHUNK = 1024 * 1024  # 1 MiB
 
 
+def extract_pdf_text(data: bytes) -> str | None:
+    """Extract plain text from PDF bytes using PyMuPDF (fitz)."""
+    try:
+        import pymupdf
+        doc = pymupdf.open(stream=data, filetype="pdf")
+        parts: list[str] = []
+        for page in doc:
+            txt = page.get_text()
+            if txt:
+                parts.append(txt)
+        return "\n\n".join(parts) if parts else None
+    except Exception:
+        return None
+
+
+def is_text_extractable(kind: str) -> bool:
+    """Return True for file kinds we can extract human-readable text from."""
+    return kind.lower() in {
+        "md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
+        "yaml", "yml", "toml", "sh", "bash", "log", "xml", "css", "diff", "patch", "pdf",
+    }
+
+
 async def read_upload_capped(file: UploadFile, max_bytes: int) -> bytes:
     """Read an UploadFile fully, but abort with HTTP 413 once it exceeds max_bytes.
 

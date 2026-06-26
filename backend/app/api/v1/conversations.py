@@ -24,7 +24,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core import metrics, ratelimit
 from app.core import redis as redis_core
-from app.core.files import read_upload_capped
+from app.core.files import read_upload_capped, extract_pdf_text, is_text_extractable
+from app.core import object_storage
 from app.db.base import async_session_maker, get_db
 from app.db.models.user import User
 from app.db.models.workspace import WorkspaceFile
@@ -806,20 +807,39 @@ async def upload_file(
 ):
     convo = await _require_convo(db, conversation_id, user)
     raw = await read_upload_capped(file, settings.max_upload_bytes)
-    import re as _re
-    name = _re.sub(r"[^\w.\-\u4e00-\u9fff]", "_", file.filename or "upload").strip("_. ") or "upload"
+    name = re.sub(r"[^\w.\-\u4e00-\u9fff]", "_", file.filename or "upload").strip("_. ") or "upload"
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"
-    TEXT_EXTS = {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
-                 "yaml", "yml", "toml", "sh", "bash", "log", "xml", "css", "diff", "patch"}
 
+    # Threshold: files > 256 KB always go to object storage (never inline base64 in DB)
+    OFFLOAD_THRESHOLD = 256 * 1024  # 256 KiB
     content: str | None = None
     storage_key: str | None = None
 
-    if ext in TEXT_EXTS:
-        content = raw.decode("utf-8", "ignore")
+    # 1. If large OR backend is minio → offload binary to object storage
+    if len(raw) > OFFLOAD_THRESHOLD or settings.storage_backend == "minio":
+        storage_key = f"conversations/{convo.id}/{uuid.uuid4().hex}/{name}"
+        await asyncio.to_thread(
+            object_storage.put,
+            storage_key,
+            raw,
+            file.content_type or "application/octet-stream",
+        )
+        # For text-extractable files (inc. PDF), also extract text for agent consumption
+        if is_text_extractable(ext):
+            if ext == "pdf":
+                content = extract_pdf_text(raw)
+            else:
+                content = raw.decode("utf-8", "ignore")
     else:
-        import base64
-        content = base64.b64encode(raw).decode("ascii")
+        # Small files → inline in Postgres as before
+        if ext in {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
+                   "yaml", "yml", "toml", "sh", "bash", "log", "xml", "css", "diff", "patch"}:
+            content = raw.decode("utf-8", "ignore")
+        elif ext == "pdf":
+            content = extract_pdf_text(raw)
+        else:
+            import base64
+            content = base64.b64encode(raw).decode("ascii")
 
     wf = WorkspaceFile(
         conversation_id=convo.id,

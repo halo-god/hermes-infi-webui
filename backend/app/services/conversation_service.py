@@ -175,7 +175,7 @@ async def _resolve_attached_files(
     }
     IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"}
     TEXT_EXTS = {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
-                 "yaml", "yml", "toml", "sh", "bash", "log", "xml", "css", "diff", "patch"}
+                 "yaml", "yml", "toml", "sh", "bash", "log", "xml", "css", "diff", "patch", "pdf"}
 
     # Prepare workspace dir for the agent to access files
     ws_dir = None
@@ -191,11 +191,25 @@ async def _resolve_attached_files(
             continue
         f = await db.get(WorkspaceFile, fid)
         if f is not None:
-            file_content = f.content or ""
             ext = (f.kind or "").lower()
             mime = MIME_MAP.get(ext, "application/octet-stream")
             is_image = ext in IMAGE_EXTS
             is_text = ext in TEXT_EXTS
+
+            # Resolve content: storage_key wins, then inline content
+            file_content = f.content or ""
+            if f.storage_key and not file_content:
+                try:
+                    import asyncio
+                    from app.core import object_storage
+                    raw = await asyncio.to_thread(object_storage.get, f.storage_key)
+                    if is_text:
+                        file_content = raw.decode("utf-8", "ignore")
+                    else:
+                        import base64
+                        file_content = base64.b64encode(raw).decode("ascii")
+                except Exception:
+                    file_content = ""
 
             # Write file content to workspace so agent can read it — confine
             # the (possibly agent-authored) name so it can't escape ws_dir.

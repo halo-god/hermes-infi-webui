@@ -431,14 +431,20 @@ async function onSend(opts?: SendOptions) {
       console.log('[onSend] final text length:', text.length);
     }
   }
-  // Prepend referenced file content inline
+  // Prepend referenced file content inline (with size guard to avoid 422)
   if (opts?.attachedFileIds?.length) {
     const fileBlocks: string[] = [];
+    const MAX_INLINE_CHARS = 50000; // ~50 KB; aligns with SendMessageRequest max_length buffer
     for (const fid of opts.attachedFileIds) {
       try {
         const fileContent = await filesApi.content(fid);
         if (fileContent?.content) {
-          fileBlocks.push(`【文件: ${fileContent.name}】\n${fileContent.content}`);
+          const content = fileContent.content;
+          if (content.length > MAX_INLINE_CHARS) {
+            fileBlocks.push(`【引用文件: ${fileContent.name}】`);
+          } else {
+            fileBlocks.push(`【文件: ${fileContent.name}】\n${content}`);
+          }
         }
       } catch (e) { console.error('[onSend] file fetch failed:', fid, e); }
     }

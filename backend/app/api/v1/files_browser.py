@@ -18,7 +18,7 @@ from app.db.models.user import User
 from app.db.models.workspace import WorkspaceFile
 from app.deps import get_current_user, get_db, user_from_ticket_or_header
 from app.core import object_storage
-from app.core.files import read_upload_capped
+from app.core.files import read_upload_capped, extract_pdf_text, is_text_extractable
 from app.config import settings
 
 router = APIRouter()
@@ -358,20 +358,33 @@ async def upload_standalone_file(
     """Upload a file without requiring a conversation. Files are stored in user's personal space."""
     name = re.sub(r"[^\w.\-\u4e00-\u9fff]", "_", file.filename or "upload").strip("_. ") or "upload"
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"
-    TEXT_EXTS = {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
-                 "yaml", "yml", "toml", "sh", "bash", "log", "xml", "css", "diff", "patch"}
 
     raw = await read_upload_capped(file, settings.max_upload_bytes)
+    OFFLOAD_THRESHOLD = 256 * 1024  # 256 KiB
     content: str | None = None
     storage_key: str | None = None
 
-    # Store to MinIO if available, else inline
-    if settings.storage_backend == "minio":
+    # Large files or minio backend → offload binary; extract text when possible
+    if len(raw) > OFFLOAD_THRESHOLD or settings.storage_backend == "minio":
         storage_key = f"standalone/{user.id}/{uuid.uuid4().hex}/{name}"
-        await asyncio.to_thread(object_storage.put, storage_key, raw, file.content_type or "application/octet-stream")
+        await asyncio.to_thread(
+            object_storage.put,
+            storage_key,
+            raw,
+            file.content_type or "application/octet-stream",
+        )
+        if is_text_extractable(ext):
+            if ext == "pdf":
+                content = extract_pdf_text(raw)
+            else:
+                content = raw.decode("utf-8", "ignore")
     else:
-        if ext in TEXT_EXTS:
+        # Small files → inline
+        if ext in {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
+                   "yaml", "yml", "toml", "sh", "bash", "log", "xml", "css", "diff", "patch"}:
             content = raw.decode("utf-8", "ignore")
+        elif ext == "pdf":
+            content = extract_pdf_text(raw)
         else:
             import base64
             content = base64.b64encode(raw).decode("ascii")
