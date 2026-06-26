@@ -458,6 +458,7 @@ async def send_message(
             skip_agent=payload.skip_agent,
             profile_id_override=payload.profile_id,
             reply_to_id=payload.reply_to_id,
+            task_id=payload.task_id,
         )
     else:
         user_msg, agent_msg = await svc.dispatch(
@@ -466,6 +467,7 @@ async def send_message(
             owner_id=user.id,
             skip_agent=payload.skip_agent,
             profile_id_override=payload.profile_id,
+            task_id=payload.task_id,
         )
 
     return SendMessageResponse(
@@ -635,6 +637,13 @@ async def conversation_ws(
                             reply_to_id = uuid.UUID(str(reply_raw))
                         except (ValueError, TypeError):
                             reply_to_id = None
+                    task_raw = payload.get("task_id")
+                    task_id = None
+                    if task_raw:
+                        try:
+                            task_id = uuid.UUID(str(task_raw))
+                        except (ValueError, TypeError):
+                            task_id = None
                     # Use a fresh DB session for each message to avoid detached instances.
                     # The initial `db` session is invalid after the first await in the loop.
                     async with async_session_maker() as msg_db:
@@ -645,9 +654,13 @@ async def conversation_ws(
                                 msg_db, c, text, mentions,
                                 attached_file_ids=file_ids, owner_id=user_id,
                                 profile_id_override=p_id, reply_to_id=reply_to_id,
+                                task_id=task_id,
                             )
                         elif c:
-                            await svc.dispatch(msg_db, c, text, attached_file_ids=file_ids, owner_id=user_id, profile_id_override=p_id)
+                            await svc.dispatch(
+                                msg_db, c, text, attached_file_ids=file_ids, owner_id=user_id,
+                                profile_id_override=p_id, task_id=task_id,
+                            )
             elif action == "cancel":
                 await redis_core.request_cancel(cid)
     except WebSocketDisconnect:

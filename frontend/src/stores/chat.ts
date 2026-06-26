@@ -372,7 +372,7 @@ export const useChatStore = defineStore("chat", () => {
   async function send(
     text: string,
     agentId = "hermes",
-    opts?: { profileId?: string; webSearch?: boolean; deepThink?: boolean; stagedFiles?: File[]; attachedFileIds?: string[]; mentions?: string[]; replyToId?: string },
+    opts?: { profileId?: string; webSearch?: boolean; deepThink?: boolean; stagedFiles?: File[]; attachedFileIds?: string[]; mentions?: string[]; replyToId?: string; taskId?: string },
   ) {
     if (!activeId.value) await newConversation(agentId, opts?.profileId);
     const id = activeId.value!;
@@ -424,12 +424,13 @@ export const useChatStore = defineStore("chat", () => {
         text,
         mentions,
         reply_to_id: opts?.replyToId,
+        task_id: opts?.taskId,
         profileId: opts?.profileId,
         attached_file_ids: fileIds,
       });
     } else {
       // Personal conversation: existing logic
-      const passOpts = { profileId: opts?.profileId, fileIds };
+      const passOpts = { profileId: opts?.profileId, fileIds, taskId: opts?.taskId };
       if (activeAgents.value.length > 1) await sendRoundtable(id, text, passOpts);
       else await sendSingle(id, text, passOpts);
     }
@@ -440,7 +441,7 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   /** Single agent: open SSE, register handlers, then POST. */
-  async function sendSingle(id: string, text: string, opts?: { profileId?: string; fileIds?: string[] }) {
+  async function sendSingle(id: string, text: string, opts?: { profileId?: string; fileIds?: string[]; taskId?: string }) {
     closeStream();
     streamingConvoId.value = id;
     setupStreamHandlers();
@@ -494,7 +495,7 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   /** Roundtable: bidirectional WebSocket — send + stream over one socket. */
-  async function sendRoundtable(id: string, text: string, opts?: { profileId?: string; fileIds?: string[] }) {
+  async function sendRoundtable(id: string, text: string, opts?: { profileId?: string; fileIds?: string[]; taskId?: string }) {
     closeStream();
     streamingConvoId.value = id;
     setupStreamHandlers();
@@ -519,8 +520,8 @@ export const useChatStore = defineStore("chat", () => {
       created_at: new Date().toISOString(),
     });
 
-    const { fileIds, ...restOpts } = opts || {};
-    stream.send({ action: "send", text, ...restOpts, attached_file_ids: fileIds || [] });
+    const { fileIds, taskId, ...restOpts } = opts || {};
+    stream.send({ action: "send", text, ...restOpts, task_id: taskId, attached_file_ids: fileIds || [] });
   }
 
   async function cancel() {

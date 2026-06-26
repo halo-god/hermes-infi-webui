@@ -200,6 +200,7 @@ export interface Message {
   usage?: { input_tokens: number; output_tokens: number; context_size?: number; context_used?: number };
   reply_to_id?: string | null;
   reply_to?: ReplyRef | null;
+  task_id?: string | null;
   edited_at?: string | null;
   deleted_at?: string | null;
   reactions?: Record<string, string[]>;

@@ -400,8 +400,15 @@ async def team_pinned(db: AsyncSession, team_id: uuid.UUID) -> list[Conversation
     return list(res.scalars().all())
 
 
+_ACTIVITY_ICON: dict[str, str] = {
+    "task.created": "plus", "task.derived": "sparkle", "task.moved": "bolt",
+    "task.done": "check", "doc.created": "doc", "knowledge.created": "doc",
+}
+
+
 async def team_activity(db: AsyncSession, team: Team) -> list[dict]:
-    """Synthesize a recent-activity feed from members joined + projects created."""
+    """Recent-activity feed: real ProjectActivity rows merged with members joined,
+    projects created and knowledge uploaded (synthesized for events not yet logged)."""
     items: list[tuple[datetime, dict]] = []
     rows = await list_members(db, team.id)
     for m, u in rows:
@@ -413,6 +420,17 @@ async def team_activity(db: AsyncSession, team: Team) -> list[dict]:
     for k in await list_knowledge(db, team.id):
         items.append((k.created_at, {"who": k.uploaded_by_name or "成员", "action": "上传了文件",
                                      "target": k.name, "icon": "doc", "ago": _ago(k.created_at)}))
+    # Real closed-loop activity (task推进 / 沉淀 / 衍生) logged on project_activity.
+    res = await db.execute(
+        select(ProjectActivity)
+        .where(ProjectActivity.team_id == team.id)
+        .order_by(ProjectActivity.created_at.desc())
+        .limit(20)
+    )
+    for a in res.scalars().all():
+        items.append((a.created_at, {"who": a.actor_name or "成员", "action": a.summary,
+                                     "target": "", "icon": _ACTIVITY_ICON.get(a.kind, "bolt"),
+                                     "ago": _ago(a.created_at)}))
     items.sort(key=lambda x: x[0], reverse=True)
     return [d for _, d in items[:8]]
 

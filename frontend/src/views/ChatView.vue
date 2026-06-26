@@ -40,6 +40,8 @@ function escapeHtml(s: string): string {
 }
 
 const draft = ref("");
+// "针对某任务讨论" — sticky task context; messages sent while set are linked to the task.
+const discussTask = ref<{ id: string; title: string } | null>(null);
 const scroller = ref<HTMLElement | null>(null);
 const loadMoreSentinel = ref<HTMLElement | null>(null);
 const showWorkspace = ref(false);
@@ -70,6 +72,9 @@ onMounted(async () => {
   const teamCtx = route.query.team as string | undefined;
   const projCtx = route.query.project as string | undefined;
   const seed = route.query.seed as string | undefined;
+  const taskId = route.query.task as string | undefined;
+  const taskTitle = route.query.taskTitle as string | undefined;
+  if (taskId) discussTask.value = { id: taskId, title: taskTitle || "任务" };
   if (cid) {
     await chat.openConversation(cid);
     await scrollDown();
@@ -382,9 +387,14 @@ watch(() => chat.activeId, scrollDown);
 // ── Route query watcher: handle ?c= changes while already in ChatView ──
 watch(() => route.query.c as string | undefined, async (cid) => {
   if (cid && cid !== chat.activeId) {
+    discussTask.value = null;  // task context is per-discussion; drop it on switch
     await chat.openConversation(cid);
     await scrollDown();
   }
+});
+// Pick up a task context when navigating to a project group with ?task=.
+watch(() => route.query.task as string | undefined, (taskId) => {
+  if (taskId) discussTask.value = { id: taskId, title: (route.query.taskTitle as string) || "任务" };
 });
 
 // ── Virtual scroll for message list ──
@@ -465,7 +475,10 @@ async function onSend(opts?: SendOptions) {
   // We do NOT inline file content into the text — the backend resolves
   // attachments and tells the agent where they are in the workspace.
   // This avoids 422 (text too large) and keeps bubbles clean.
-  await chat.send(text, landingProfile.value?.default_agent_id || "hermes", opts);
+  await chat.send(text, landingProfile.value?.default_agent_id || "hermes", {
+    ...opts,
+    taskId: discussTask.value?.id,
+  });
   clearReply();
   await scrollDown();
 }
@@ -1134,6 +1147,13 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
 
       <div class="dock">
         <div v-if="isGroup && typingText" class="typing-indicator">{{ typingText }}</div>
+        <div v-if="discussTask" class="discuss-task-bar">
+          <Icon name="check" :size="12" />
+          <span>正在讨论任务：<b>{{ discussTask.title }}</b></span>
+          <button class="discuss-task-clear" title="取消任务关联" @click="discussTask = null">
+            <Icon name="close" :size="11" />
+          </button>
+        </div>
         <Composer
           v-model="draft"
           placeholder="继续对话…"
@@ -1277,4 +1297,29 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
   padding: 2px 10px 4px;
   font-style: italic;
 }
+.discuss-task-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 4px 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--accent-deep);
+  background: rgba(184, 133, 42, 0.10);
+  border: 1px solid rgba(184, 133, 42, 0.25);
+  border-radius: 8px;
+}
+.discuss-task-bar b { font-weight: 600; }
+.discuss-task-clear {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--ink-mute);
+  padding: 2px;
+  border-radius: 4px;
+}
+.discuss-task-clear:hover { color: var(--ink); background: rgba(0, 0, 0, 0.06); }
 </style>

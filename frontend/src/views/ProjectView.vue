@@ -240,6 +240,15 @@ function taskToAI(task?: Task, agentId?: string) {
   if (profile) q.profile = profile.id;
   router.push({ path: "/", query: q });
 }
+async function discussTask(task: Task) {
+  // Open the project group chat with a persistent link to this task.
+  try {
+    const { channel } = await teamsApi.getProjectGroup(projectId);
+    router.push({ path: "/", query: { c: channel.id, task: task.id, taskTitle: task.title } });
+  } catch {
+    router.push({ path: "/", query: { project: projectId, task: task.id, taskTitle: task.title } });
+  }
+}
 function docToAI(docName: string, agentId?: string) {
   const seed = `请帮我分析项目文件：${docName}`;
   const profile = agentId ? chat.profiles.find((p) => p.default_agent_id === agentId) : null;
@@ -355,6 +364,7 @@ async function removeProject() {
               </div>
             </div>
             <div class="row-actions">
+              <button class="row-act" title="在项目群聊中讨论此任务" @click="discussTask(t)"><Icon name="chat" :size="13" /></button>
               <button class="row-act accent" title="交给助手处理" @click="taskToAI(t)"><Icon name="sparkle" :size="13" /></button>
               <button class="row-act" title="重命名" @click="startEditTask(t)"><Icon name="copy" :size="13" /></button>
               <button class="row-act danger" title="删除" @click="deleteTask(t)"><Icon name="close" :size="13" /></button>
