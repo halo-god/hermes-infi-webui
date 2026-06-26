@@ -15,7 +15,11 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 # ── Set DATABASE_URL BEFORE any app import ──
-os.environ["DATABASE_URL"] = "postgresql+asyncpg://hermes:hermes@localhost:5432/hermes_test"
+# Honor a caller/CI-provided DATABASE_URL (CI's Postgres uses different creds);
+# only fall back to the local docker-compose default when it is unset.
+os.environ.setdefault(
+    "DATABASE_URL", "postgresql+asyncpg://hermes:hermes@localhost:5432/hermes_test"
+)
 
 from app.core.security import create_token  # noqa: E402
 from app.db import base as db_base  # noqa: E402
