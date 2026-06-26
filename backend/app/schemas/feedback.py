@@ -11,6 +11,7 @@ class FeedbackCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     content: str = Field(min_length=1)
     category: str = Field(default="bug", max_length=16)
+    images: list[str] = Field(default_factory=list)
 
 
 class FeedbackUpdate(BaseModel):
@@ -34,5 +35,6 @@ class FeedbackOut(BaseModel):
     reply: str | None = None
     replied_by: uuid.UUID | None = None
     replied_at: datetime | None = None
+    images: list[str] = []
     created_at: datetime
     updated_at: datetime
