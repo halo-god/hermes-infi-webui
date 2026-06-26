@@ -315,19 +315,25 @@ def _profile_dir(profile: Profile | None) -> str | None:
 
 
 def _build_attached_prompt(text: str, attached: list[dict]) -> str:
-    """Return the original user text unchanged.
+    """Inject file references into the prompt text so the agent knows about attachments.
 
-    File metadata is **not** injected into the prompt text — this prevents
-    the agent from echoing file paths or attachment labels in its reply,
-    which would leak into the conversation bubble.
-
-    The agent still learns about attachments through:
-    1. resource_link content blocks (workspace path, mime type, size)
-    2. read_file / read_image tools if it chooses to inspect them.
-
-    The frontend renders attachment chips from `message.content.files`
-    independently of the text.
+    Files are already written to the workspace directory; the agent needs to know
+    their relative paths to read them via read_file / read_image tools. References
+    are wrapped in lightweight markers so the agent can distinguish them from user text.
     """
+    if not attached:
+        return text
+    refs: list[str] = []
+    for f in attached:
+        ws_path = f.get("workspace_path")
+        if ws_path:
+            refs.append(f"- {f['name']} (attachments/{f['name']})")
+        elif f.get("is_image"):
+            refs.append(f"- {f['name']} (image attached)")
+        else:
+            refs.append(f"- {f['name']}")
+    if refs:
+        return f"{text}\n\n【当前对话已引用以下文件】\n" + "\n".join(refs)
     return text
 
 

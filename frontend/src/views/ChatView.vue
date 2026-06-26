@@ -431,28 +431,10 @@ async function onSend(opts?: SendOptions) {
       console.log('[onSend] final text length:', text.length);
     }
   }
-  // Prepend referenced file content inline (with size guard to avoid 422)
-  if (opts?.attachedFileIds?.length) {
-    const fileBlocks: string[] = [];
-    const MAX_INLINE_CHARS = 50000; // ~50 KB; aligns with SendMessageRequest max_length buffer
-    for (const fid of opts.attachedFileIds) {
-      try {
-        const fileContent = await filesApi.content(fid);
-        if (fileContent?.content) {
-          const content = fileContent.content;
-          if (content.length > MAX_INLINE_CHARS) {
-            fileBlocks.push(`【引用文件: ${fileContent.name}】`);
-          } else {
-            fileBlocks.push(`【文件: ${fileContent.name}】\n${content}`);
-          }
-        }
-      } catch (e) { console.error('[onSend] file fetch failed:', fid, e); }
-    }
-    if (fileBlocks.length) {
-      const fileBlock = fileBlocks.map(b => `<file>${b}</file>`).join("\n\n");
-      text = fileBlock + "\n\n" + text;
-    }
-  }
+  // File references are handled via attached_file_ids in the API payload.
+  // We do NOT inline file content into the text — the backend resolves
+  // attachments and tells the agent where they are in the workspace.
+  // This avoids 422 (text too large) and keeps bubbles clean.
   await chat.send(text, landingProfile.value?.default_agent_id || "hermes", opts);
   clearReply();
   await scrollDown();
