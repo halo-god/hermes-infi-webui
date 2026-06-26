@@ -155,7 +155,7 @@ async def _resolve_attached_files(
 ) -> list[dict]:
     """Look up workspace files by id, write to agent workspace dir, return metadata + content.
 
-    Returns [{id, name, kind, workspace_path, content, size_bytes, mime_type}].
+    Returns [{id, name, kind, workspace_path, content, size_bytes, mime_type, folder_path}].
     """
     if not file_ids:
         return []
@@ -195,6 +195,7 @@ async def _resolve_attached_files(
             mime = MIME_MAP.get(ext, "application/octet-stream")
             is_image = ext in IMAGE_EXTS
             is_text = ext in TEXT_EXTS
+            folder = (f.folder_path or "").strip("/")
 
             # Resolve content: storage_key wins, then inline content
             file_content = f.content or ""
@@ -212,11 +213,14 @@ async def _resolve_attached_files(
                 except Exception:
                     file_content = ""
 
+            # Build relative path preserving folder structure (e.g. "testfolder/foo.md")
+            rel_name = safe_relative_path(f.name)
+            rel_path = f"{folder}/{rel_name}" if folder else rel_name
+
             # Write file content to workspace so agent can read it — confine
             # the (possibly agent-authored) name so it can't escape ws_dir.
-            rel_name = safe_relative_path(f.name)
             if ws_dir and file_content and not is_image:
-                fpath = confine_to_dir(ws_dir, rel_name)
+                fpath = confine_to_dir(ws_dir, rel_path)
                 os.makedirs(os.path.dirname(fpath), exist_ok=True)
                 if raw_bytes and ext == "pdf":
                     with open(fpath, "wb") as fh:
@@ -227,7 +231,8 @@ async def _resolve_attached_files(
 
             result.append({
                 "id": str(f.id), "name": f.name, "kind": f.kind,
-                "workspace_path": f"attachments/{rel_name}" if ws_dir and file_content else None,
+                "folder_path": folder,
+                "workspace_path": f"attachments/{rel_path}" if ws_dir and file_content else None,
                 "content": file_content,
                 "size_bytes": f.size_bytes or len(file_content),
                 "mime_type": mime,
@@ -332,7 +337,7 @@ def _build_attached_prompt(text: str, attached: list[dict]) -> str:
     for f in attached:
         ws_path = f.get("workspace_path")
         if ws_path:
-            refs.append(f"- {f['name']} (attachments/{f['name']})")
+            refs.append(f"- {f['name']} ({ws_path})")
         elif f.get("is_image"):
             refs.append(f"- {f['name']} (image attached)")
         else:
