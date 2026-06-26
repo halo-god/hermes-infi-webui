@@ -1,5 +1,5 @@
 import { http } from "./client";
-import type { Project, ProjectDetail, ProjectDoc, Task } from "@/types";
+import type { Project, ProjectActivity, ProjectDetail, ProjectDoc, Task } from "@/types";
 
 export const projectsApi = {
   async listByTeam(teamId: string): Promise<Project[]> {
@@ -43,6 +43,19 @@ export const projectsApi = {
   },
   async updateTask(taskId: string, data: Partial<Task>): Promise<Task> {
     return (await http.patch<Task>(`/tasks/${taskId}`, data)).data;
+  },
+  async moveTaskStatus(taskId: string, status: string): Promise<Task> {
+    return (await http.patch<Task>(`/tasks/${taskId}/status`, { status })).data;
+  },
+  async tasksFromConversation(projectId: string, messageId: string): Promise<Task[]> {
+    return (
+      await http.post<Task[]>(`/projects/${projectId}/tasks/from-conversation`, {
+        message_id: messageId,
+      })
+    ).data;
+  },
+  async activity(projectId: string): Promise<ProjectActivity[]> {
+    return (await http.get<ProjectActivity[]>(`/projects/${projectId}/activity`)).data;
   },
   async deleteTask(taskId: string): Promise<void> {
     await http.delete(`/tasks/${taskId}`);

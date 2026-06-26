@@ -300,6 +300,37 @@ function canModify(msg: Message): boolean {
     (!msg.owner_id || msg.owner_id === auth.user?.id);
 }
 
+// ── closed-loop: consolidate output / derive tasks from a message ──
+const canConsolidate = computed(
+  () => isGroup.value && (!!activeConvo.value?.project_id || !!activeConvo.value?.team_id)
+);
+async function consolidateOutput(msg: Message, target: "project_doc" | "team_knowledge") {
+  if (!chat.activeId) return;
+  const text = (msg.content?.text || "").trim();
+  if (!text) { ns.toast("没有可沉淀的内容"); return; }
+  const defaultName = text.slice(0, 24).replace(/\n/g, " ");
+  const name = window.prompt(target === "project_doc" ? "沉淀为项目文档，命名：" : "沉淀为团队知识，命名：", defaultName);
+  if (!name) return;
+  try {
+    await conversationsApi.consolidateMessage(chat.activeId, msg.id, {
+      target, name,
+      project_id: activeConvo.value?.project_id || undefined,
+      team_id: activeConvo.value?.team_id || undefined,
+    });
+    ns.toast(target === "project_doc" ? "已沉淀为项目文档" : "已沉淀为团队知识");
+  } catch { ns.toast("沉淀失败（需相应权限）"); }
+}
+async function deriveTasks(msg: Message) {
+  const pid = activeConvo.value?.project_id;
+  if (!pid) { ns.toast("仅项目会话可生成任务"); return; }
+  try {
+    const created = await projectsApi.tasksFromConversation(pid, msg.id);
+    if (!created.length) { ns.toast("未识别到可创建的任务列表"); return; }
+    projectTasks.value = await projectsApi.tasks(pid).catch(() => projectTasks.value);
+    ns.toast(`已生成 ${created.length} 个任务`);
+  } catch { ns.toast("生成任务失败（需相应权限）"); }
+}
+
 function onComposerTyping() {
   const me = auth.user?.name || auth.user?.email || "有人";
   chat.sendTyping(me);
@@ -1080,6 +1111,9 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                   <button title="重新生成" @click="regenerate(chat.messages[row.index].id)"><Icon name="refresh" :size="12" /></button>
 
                   <button title="分享" @click="shareMessage(chat.messages[row.index].conversation_id)"><Icon name="share" :size="12" /></button>
+                  <button v-if="canConsolidate && activeConvo?.project_id" title="沉淀为项目文档" @click="consolidateOutput(chat.messages[row.index], 'project_doc')"><Icon name="doc" :size="12" /></button>
+                  <button v-if="canConsolidate && activeConvo?.team_id" title="沉淀为团队知识" @click="consolidateOutput(chat.messages[row.index], 'team_knowledge')"><Icon name="pin" :size="12" /></button>
+                  <button v-if="canConsolidate && activeConvo?.project_id" title="从此消息生成任务" @click="deriveTasks(chat.messages[row.index])"><Icon name="check" :size="12" /></button>
                 </div>
                 <!-- Smart follow-up suggestion chips -->
                 <div v-if="chat.features.followup_chips && chat.messages[row.index].role === 'agent' && chat.messages[row.index].status !== 'streaming' && chat.messages[row.index].content.text" class="followup-chips">

@@ -8,10 +8,14 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import json as _json
+
 from app.core import governance as gov
+from app.core import redis as redis_core
 from app.db.models.conversation import Conversation
 from app.db.models.team import (
     Project,
+    ProjectActivity,
     ProjectDoc,
     ProjectTask,
     Team,
@@ -190,13 +194,135 @@ async def create_task(db: AsyncSession, project_id: uuid.UUID, data) -> ProjectT
     task = ProjectTask(
         project_id=project_id,
         title=data.title,
-        owner_id=data.owner_id,
-        agent_id=data.agent_id,
+        owner_id=getattr(data, "owner_id", None),
+        agent_id=getattr(data, "agent_id", None),
+        description=getattr(data, "description", None),
+        source_conversation_id=getattr(data, "source_conversation_id", None),
+        source_message_id=getattr(data, "source_message_id", None),
         order_idx=count,
     )
     db.add(task)
     await db.commit()
     await db.refresh(task)
+    return task
+
+
+# ── project activity / progress / status (closed-loop core) ──
+async def log_activity(
+    db: AsyncSession,
+    *,
+    project: Project,
+    actor: User | None,
+    kind: str,
+    summary: str,
+    meta: dict | None = None,
+    commit: bool = True,
+) -> ProjectActivity:
+    """Record one closed-loop action onto the project's activity feed."""
+    act = ProjectActivity(
+        project_id=project.id,
+        team_id=project.team_id,
+        actor_id=actor.id if actor else None,
+        actor_name=(actor.name if actor else None) or "系统",
+        kind=kind,
+        summary=summary,
+        meta=meta or {},
+    )
+    db.add(act)
+    if commit:
+        await db.commit()
+        await db.refresh(act)
+    return act
+
+
+async def list_project_activity(
+    db: AsyncSession, project_id: uuid.UUID, limit: int = 30
+) -> list[ProjectActivity]:
+    res = await db.execute(
+        select(ProjectActivity)
+        .where(ProjectActivity.project_id == project_id)
+        .order_by(ProjectActivity.created_at.desc())
+        .limit(limit)
+    )
+    return list(res.scalars().all())
+
+
+async def recompute_progress(db: AsyncSession, project: Project) -> int:
+    """progress = round(done / total * 100). Writes back onto the project."""
+    tasks = await list_tasks(db, project.id)
+    total = len(tasks)
+    done = sum(1 for t in tasks if t.status == "done")
+    progress = round(done / total * 100) if total else 0
+    project.progress = progress
+    return progress
+
+
+async def notify_project_members(
+    db: AsyncSession,
+    project: Project,
+    *,
+    title: str,
+    snippet: str,
+    actor_id: uuid.UUID | None,
+) -> None:
+    """Push a `notify` event to every project member except the actor.
+
+    Mirrors conversation_service._publish_user_message's redis pipe pattern so the
+    existing /me/stream unread badges light up with zero new plumbing.
+    """
+    member_ids: list[str] = []
+    for x in (project.member_ids or []):
+        sx = str(x)
+        if sx and sx != str(actor_id):
+            member_ids.append(sx)
+    if not member_ids:
+        return
+    r = redis_core.get_redis()
+    pipe = r.pipeline()
+    for uid in member_ids:
+        event = _json.dumps({
+            "type": "notify",
+            "conversation_id": None,
+            "project_id": str(project.id),
+            "title": title,
+            "snippet": snippet[:80],
+            "mention": False,
+        })
+        pipe.xadd(
+            redis_core.user_stream(uid), {"data": event},
+            maxlen=redis_core.USER_STREAM_MAXLEN, approximate=True,
+        )
+        pipe.expire(redis_core.user_stream(uid), redis_core.USER_STREAM_TTL)
+    if len(pipe):
+        await pipe.execute()
+
+
+async def move_task_status(
+    db: AsyncSession, task: ProjectTask, new_status: str, actor: User | None
+) -> ProjectTask:
+    """Single entry point for task status changes: status → progress → activity → notify."""
+    project = await db.get(Project, task.project_id)
+    old_status = task.status
+    task.status = new_status
+    if project is not None:
+        await recompute_progress(db, project)
+        kind = "task.done" if new_status == "done" else "task.moved"
+        verb = "完成了任务" if new_status == "done" else "推进了任务"
+        await log_activity(
+            db, project=project, actor=actor, kind=kind,
+            summary=f"{verb}「{task.title}」",
+            meta={"task_id": str(task.id), "from_status": old_status, "to_status": new_status},
+            commit=False,
+        )
+    await db.commit()
+    await db.refresh(task)
+    if project is not None:
+        await notify_project_members(
+            db, project,
+            title=project.name,
+            snippet=f"任务「{task.title}」→ {new_status}",
+            actor_id=actor.id if actor else None,
+        )
     return task
 
 
@@ -315,12 +441,27 @@ async def list_docs(db: AsyncSession, project_id: uuid.UUID) -> list[ProjectDoc]
 async def add_doc(db: AsyncSession, project_id: uuid.UUID, data, user: User) -> ProjectDoc:
     d = ProjectDoc(
         project_id=project_id, name=data.name, kind=data.kind,
-        size_bytes=data.size_bytes, created_by_name=user.name,
+        size_bytes=data.size_bytes, created_by_name=user.name, created_by=user.id,
+        content=getattr(data, "content", None),
+        source_conversation_id=getattr(data, "source_conversation_id", None),
+        source_message_id=getattr(data, "source_message_id", None),
     )
     db.add(d)
     await db.commit()
     await db.refresh(d)
     return d
+
+
+async def get_doc(db: AsyncSession, did: uuid.UUID) -> ProjectDoc | None:
+    return await db.get(ProjectDoc, did)
+
+
+async def set_profile_knowledge(db: AsyncSession, profile, knowledge_ids: list[str]):
+    """Bind team_knowledge / project_docs ids to a Profile for context injection."""
+    profile.knowledge_ids = [str(k) for k in (knowledge_ids or [])]
+    await db.commit()
+    await db.refresh(profile)
+    return profile
 
 
 async def delete_doc(db: AsyncSession, did: uuid.UUID) -> None:

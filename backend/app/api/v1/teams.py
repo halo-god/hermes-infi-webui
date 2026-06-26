@@ -23,10 +23,13 @@ from app.db.models.user import User
 from app.deps import get_current_user
 from app.schemas.team import (
     ActivityItem,
+    ActivityOut,
     AddMemberRequest,
     ConversationBrief,
     DocCreate,
     DocOut,
+    TaskFromConversation,
+    TaskStatusUpdate,
     KnowledgeCreate,
     KnowledgeDetail,
     KnowledgeUpdate,
@@ -673,10 +676,16 @@ async def update_task(
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")
     await _project_with_perm(db, task.project_id, user, "project.edit")
-    for f, v in payload.model_dump(exclude_unset=True).items():
+    fields = payload.model_dump(exclude_unset=True)
+    new_status = fields.pop("status", None)
+    for f, v in fields.items():
         setattr(task, f, v)
-    await db.commit()
-    await db.refresh(task)
+    if fields:
+        await db.commit()
+        await db.refresh(task)
+    # Route status changes through the single source of truth (progress + activity + notify)
+    if new_status is not None and new_status != task.status:
+        task = await svc.move_task_status(db, task, new_status, user)
     return task
 
 
@@ -721,14 +730,88 @@ async def reorder_tasks(
             )
         ).scalars().all()
     }
+    status_changed: list = []
     for item in items:
         t = rows.get(uuid.UUID(item["id"]))
         if t:
             t.order_idx = item.get("order_idx", 0)
-            if "status" in item:
+            if "status" in item and item["status"] != t.status:
                 t.status = item["status"]
+                status_changed.append(t)
     await db.commit()
+    # Recompute progress + log/notify when any status changed (single source of truth)
+    if status_changed:
+        proj = await svc.get_project(db, project_id)
+        if proj is not None:
+            await svc.recompute_progress(db, proj)
+            for t in status_changed:
+                await svc.log_activity(
+                    db, project=proj, actor=user,
+                    kind="task.done" if t.status == "done" else "task.moved",
+                    summary=("完成了任务" if t.status == "done" else "推进了任务") + f"「{t.title}」",
+                    meta={"task_id": str(t.id), "to_status": t.status}, commit=False,
+                )
+            await db.commit()
+            await svc.notify_project_members(
+                db, proj, title=proj.name,
+                snippet=f"看板更新了 {len(status_changed)} 个任务", actor_id=user.id,
+            )
     return {"status": "ok"}
+
+
+# ── closed-loop: task status / derive / activity ──
+@router.patch("/tasks/{task_id}/status", response_model=TaskOut)
+async def move_task_status(
+    task_id: uuid.UUID, payload: TaskStatusUpdate,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """Advance a single task's status → auto progress, activity log, notify."""
+    from app.db.models.team import ProjectTask
+
+    task = await db.get(ProjectTask, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    await _project_with_perm(db, task.project_id, user, "task.move")
+    return await svc.move_task_status(db, task, payload.status, user)
+
+
+@router.post("/projects/{project_id}/tasks/from-conversation", response_model=list[TaskOut])
+async def tasks_from_conversation(
+    project_id: uuid.UUID, payload: TaskFromConversation,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """Derive tasks from a conversation message's bullet list."""
+    from app.services import conversation_service as conv_svc
+
+    proj = await _project_with_perm(db, project_id, user, "task.derive")
+    message = await conv_svc.get_message(db, payload.message_id)
+    if message is None:
+        raise HTTPException(status_code=404, detail="消息不存在")
+    return await conv_svc.auto_create_tasks_from_message(
+        db, message=message, project=proj, actor=user
+    )
+
+
+@router.get("/projects/{project_id}/activity", response_model=list[ActivityOut])
+async def project_activity(
+    project_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    proj = await svc.get_project(db, project_id)
+    if proj is None:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    await svc.require_membership(db, proj.team_id, user.id)
+    return await svc.list_project_activity(db, project_id)
+
+
+@router.get("/projects/docs/{doc_id}/raw")
+async def get_doc_raw(
+    doc_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    d = await svc.get_doc(db, doc_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    await svc.require_membership(db, (await svc.get_project(db, d.project_id)).team_id, user.id)
+    return {"id": str(d.id), "name": d.name, "kind": d.kind, "content": d.content}
 
 
 # ── helpers ──

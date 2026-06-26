@@ -17,6 +17,7 @@ export interface Profile {
   system_prompt?: string | null;
   skills?: string[];
   featured?: boolean;
+  knowledge_ids?: string[];
 }
 
 export interface ScanResult {
@@ -68,6 +69,7 @@ export interface ProfileUpdate {
   system_prompt?: string | null;
   skills?: string[];
   featured?: boolean;
+  knowledge_ids?: string[];
 }
 
 export const agentsApi = {

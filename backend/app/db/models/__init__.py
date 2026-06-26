@@ -13,6 +13,7 @@ from app.db.models.identity import DeptTeamMapping, IdentityProvider  # noqa: F4
 from app.db.models.system import SystemSettings  # noqa: F401
 from app.db.models.team import (  # noqa: F401
     Project,
+    ProjectActivity,
     ProjectDoc,
     ProjectTask,
     Team,

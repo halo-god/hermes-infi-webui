@@ -194,6 +194,9 @@ class DocCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     kind: str = "doc"
     size_bytes: int = 0
+    content: str | None = None
+    source_conversation_id: uuid.UUID | None = None
+    source_message_id: uuid.UUID | None = None
 
 
 class ProjectDetail(ProjectOut):
@@ -211,6 +214,9 @@ class TaskCreate(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     owner_id: uuid.UUID | None = None
     agent_id: str | None = None
+    description: str | None = None
+    source_conversation_id: uuid.UUID | None = None
+    source_message_id: uuid.UUID | None = None
 
 
 class TaskUpdate(BaseModel):
@@ -231,4 +237,40 @@ class TaskOut(BaseModel):
     owner_id: uuid.UUID | None
     agent_id: str | None
     order_idx: int
+    description: str | None = None
+    source_conversation_id: uuid.UUID | None = None
+    source_message_id: uuid.UUID | None = None
     created_at: datetime
+
+
+# ── Closed-loop: activity / status / consolidate / profile knowledge ──
+class ActivityOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    project_id: uuid.UUID
+    actor_id: uuid.UUID | None = None
+    actor_name: str | None = None
+    kind: str
+    summary: str
+    meta: dict = Field(default_factory=dict)
+    created_at: datetime
+
+
+class TaskStatusUpdate(BaseModel):
+    status: str
+
+
+class TaskFromConversation(BaseModel):
+    message_id: uuid.UUID
+
+
+class ConsolidateRequest(BaseModel):
+    target: str  # project_doc | team_knowledge
+    name: str = Field(min_length=1, max_length=255)
+    project_id: uuid.UUID | None = None
+    team_id: uuid.UUID | None = None
+
+
+class ProfileKnowledgeUpdate(BaseModel):
+    knowledge_ids: list[str] = Field(default_factory=list)

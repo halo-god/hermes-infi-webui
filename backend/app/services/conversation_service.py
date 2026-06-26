@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -555,6 +556,47 @@ async def _build_memory_prompt(db: AsyncSession, owner_id: uuid.UUID | None) -> 
     )
 
 
+_KNOWLEDGE_PER_ITEM = 2000   # chars per bound knowledge entry
+_KNOWLEDGE_TOTAL = 8000      # chars across all entries
+
+
+async def _build_knowledge_prompt(db: AsyncSession, profile: Profile | None) -> str | None:
+    """Inject the content of a Profile's bound knowledge entries into the prompt.
+
+    Full-text concatenation (truncated) of the linked team_knowledge / project_docs,
+    so the assistant can reuse knowledge consolidated from prior conversations.
+    """
+    if not profile or not getattr(profile, "knowledge_ids", None):
+        return None
+    from app.db.models.team import ProjectDoc, TeamKnowledge
+
+    parts: list[str] = []
+    used = 0
+    for kid in profile.knowledge_ids:
+        try:
+            kuid = uuid.UUID(str(kid))
+        except (ValueError, TypeError):
+            continue
+        entry = await db.get(TeamKnowledge, kuid) or await db.get(ProjectDoc, kuid)
+        if entry is None or not getattr(entry, "content", None):
+            continue
+        body = entry.content[:_KNOWLEDGE_PER_ITEM]
+        if used + len(body) > _KNOWLEDGE_TOTAL:
+            body = body[: max(0, _KNOWLEDGE_TOTAL - used)]
+        if not body:
+            break
+        parts.append(f"[{entry.name}]\n{body}")
+        used += len(body)
+        if used >= _KNOWLEDGE_TOTAL:
+            break
+    if not parts:
+        return None
+    return (
+        "【团队知识库】请在回答时参考以下资料，不要向用户复述这段说明：\n"
+        + "\n\n".join(parts)
+    )
+
+
 async def dispatch(
     db: AsyncSession,
     convo: Conversation,
@@ -578,6 +620,12 @@ async def dispatch(
         if profile:
             system_prompt = profile.system_prompt or None
             profile_dir = _profile_dir(profile)
+            # Inject the Profile's bound knowledge-base content (reuse loop)
+            knowledge_prompt = await _build_knowledge_prompt(db, profile)
+            if knowledge_prompt:
+                system_prompt = (
+                    f"{system_prompt}\n\n{knowledge_prompt}" if system_prompt else knowledge_prompt
+                )
 
     # Inject the user's long-term agent memory into system_prompt
     memory_prompt = await _build_memory_prompt(db, owner_id)
@@ -1506,3 +1554,122 @@ async def get_or_create_project_group(
 
     await sync_group_membership(db, convo, human_user_ids=human_ids, agent_ids=agents)
     return convo
+
+
+# ── closed-loop: consolidate conversation output → knowledge / tasks ──
+_TASK_LINE_RE = re.compile(r"^\s*(?:\d+[\.\)、]|\*|-|·|•)\s+(.+)$")
+
+
+def _parse_task_lines(text: str) -> list[str]:
+    """Extract bullet/numbered list items as candidate task titles (deduped, capped).
+
+    Shared by the extract-items endpoint and auto_create_tasks_from_message.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in (text or "").splitlines():
+        m = _TASK_LINE_RE.match(line.strip())
+        if not m:
+            continue
+        title = m.group(1).strip()
+        title = title.strip("*` ").rstrip(":：")
+        if not (3 <= len(title) <= 120):
+            continue
+        key = title[:50].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(title)
+        if len(out) >= 20:
+            break
+    return out
+
+
+async def get_message(db: AsyncSession, message_id: uuid.UUID) -> Message | None:
+    return await db.get(Message, message_id)
+
+
+async def consolidate_message(
+    db: AsyncSession,
+    *,
+    message: Message,
+    target: str,
+    name: str,
+    actor,
+    project=None,
+    team=None,
+):
+    """Archive a message's text into a ProjectDoc or TeamKnowledge with source tracing."""
+    from app.schemas.team import DocCreate, KnowledgeCreate
+    from app.services import team_service
+
+    text = (message.content or {}).get("text", "") or ""
+    size = len(text.encode("utf-8"))
+
+    if target == "project_doc":
+        if project is None:
+            raise ValueError("project required for project_doc target")
+        payload = DocCreate(name=name, kind="doc", size_bytes=size, content=text)
+        payload.source_conversation_id = message.conversation_id
+        payload.source_message_id = message.id
+        doc = await team_service.add_doc(db, project.id, payload, actor)
+        await team_service.log_activity(
+            db, project=project, actor=actor, kind="doc.created",
+            summary=f"沉淀了会话产出为文档「{name}」",
+            meta={"doc_id": str(doc.id), "source_message_id": str(message.id)},
+        )
+        await team_service.notify_project_members(
+            db, project, title=project.name, snippet=f"新文档：{name}",
+            actor_id=actor.id if actor else None,
+        )
+        return doc
+
+    if target == "team_knowledge":
+        if team is None:
+            raise ValueError("team required for team_knowledge target")
+        payload = KnowledgeCreate(name=name, kind="doc", size_bytes=size, content=text)
+        k = await team_service.add_knowledge(db, team.id, payload, actor)
+        k.source_conversation_id = message.conversation_id
+        k.source_message_id = message.id
+        await db.commit()
+        await db.refresh(k)
+        if project is not None:
+            await team_service.log_activity(
+                db, project=project, actor=actor, kind="knowledge.created",
+                summary=f"沉淀了会话产出为团队知识「{name}」",
+                meta={"knowledge_id": str(k.id), "source_message_id": str(message.id)},
+            )
+        return k
+
+    raise ValueError(f"unknown consolidate target: {target}")
+
+
+async def auto_create_tasks_from_message(
+    db: AsyncSession, *, message: Message, project, actor
+) -> list:
+    """Parse a message's bullet list into ProjectTasks (source-traced) + log activity."""
+    from app.schemas.team import TaskCreate
+    from app.services import team_service
+
+    text = (message.content or {}).get("text", "") or ""
+    titles = _parse_task_lines(text)
+    created = []
+    for title in titles:
+        payload = TaskCreate(title=title)
+        payload.source_conversation_id = message.conversation_id
+        payload.source_message_id = message.id
+        task = await team_service.create_task(db, project.id, payload)
+        created.append(task)
+    if created:
+        await team_service.recompute_progress(db, project)
+        await db.commit()
+        await team_service.log_activity(
+            db, project=project, actor=actor, kind="task.derived",
+            summary=f"从会话生成了 {len(created)} 个任务",
+            meta={"count": len(created), "source_message_id": str(message.id)},
+        )
+        await team_service.notify_project_members(
+            db, project, title=project.name,
+            snippet=f"新增 {len(created)} 个任务", actor_id=actor.id if actor else None,
+        )
+    return created

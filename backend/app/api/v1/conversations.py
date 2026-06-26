@@ -58,6 +58,7 @@ from app.schemas.conversation import (
     WorkspaceFileVersionOut,
 )
 from app.db.models.conversation import ConversationFolder
+from app.schemas.team import ConsolidateRequest
 from app.services import conversation_service as svc
 
 router = APIRouter()
@@ -915,6 +916,51 @@ async def extract_items(
         "conversation_id": str(convo.id),
         "team_id": str(convo.team_id) if convo.team_id else None,
     }
+
+
+@router.post("/{conversation_id}/messages/{message_id}/consolidate")
+async def consolidate_message(
+    conversation_id: uuid.UUID,
+    message_id: uuid.UUID,
+    payload: ConsolidateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Archive a message's text into a project doc or team knowledge (closed loop)."""
+    from app.services import team_service
+
+    convo = await _require_convo(db, conversation_id, user)
+    message = await svc.get_message(db, message_id)
+    if message is None or message.conversation_id != convo.id:
+        raise HTTPException(status_code=404, detail="消息不存在")
+
+    project = None
+    team = None
+    if payload.target == "project_doc":
+        if not payload.project_id:
+            raise HTTPException(status_code=400, detail="缺少 project_id")
+        project = await team_service.get_project(db, payload.project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="项目不存在")
+        await team_service.require_permission(db, project.team_id, user.id, "conversation.consolidate")
+    elif payload.target == "team_knowledge":
+        if not payload.team_id:
+            raise HTTPException(status_code=400, detail="缺少 team_id")
+        from app.db.models.team import Team
+        team = await db.get(Team, payload.team_id)
+        if team is None:
+            raise HTTPException(status_code=404, detail="团队不存在")
+        await team_service.require_permission(db, team.id, user.id, "conversation.consolidate")
+        if convo.project_id:
+            project = await team_service.get_project(db, convo.project_id)
+    else:
+        raise HTTPException(status_code=400, detail="target 必须为 project_doc 或 team_knowledge")
+
+    entry = await svc.consolidate_message(
+        db, message=message, target=payload.target, name=payload.name,
+        actor=user, project=project, team=team,
+    )
+    return {"id": str(entry.id), "name": entry.name, "target": payload.target}
 
 
 # ── ACP session control endpoints ──

@@ -10,7 +10,7 @@ import { projectsApi } from "@/api/projects";
 import { teamsApi } from "@/api/teams";
 import { agentsApi } from "@/api/agents";
 import { useChatStore } from "@/stores/chat";
-import type { Agent, Member, Project, Task } from "@/types";
+import type { Agent, Member, Project, ProjectActivity, Task } from "@/types";
 
 const route = useRoute();
 const router = useRouter();
@@ -26,6 +26,7 @@ const convos = ref<import("@/types").ConversationBrief[]>([]);
 const docFileInput = ref<HTMLInputElement | null>(null);
 const uploadingDoc = ref(false);
 const agents = ref<Agent[]>([]);
+const activity = ref<ProjectActivity[]>([]);
 const editingTaskId = ref<string | null>(null);
 const editDraft = ref("");
 const openingGroup = ref(false);
@@ -84,12 +85,25 @@ async function load() {
   ]);
   tasks.value = ts;
   agents.value = ags;
+  await loadActivity();
   try {
     teamName.value = (await teamsApi.get(p.team_id)).name;
   } catch {
     /* not a member view */
   }
 }
+
+function activityAgo(iso: string): string {
+  const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
+  if (mins < 1) return "刚刚";
+  if (mins < 60) return `${mins} 分钟前`;
+  if (mins < 1440) return `${Math.floor(mins / 60)} 小时前`;
+  return `${Math.floor(mins / 1440)} 天前`;
+}
+const ACTIVITY_ICON: Record<string, string> = {
+  "task.created": "plus", "task.derived": "sparkle", "task.moved": "arrow-right",
+  "task.done": "check", "doc.created": "doc", "knowledge.created": "doc",
+};
 async function addDoc() {
   // Trigger file picker
   docFileInput.value?.click();
@@ -145,10 +159,32 @@ const taskStats = computed(() => ({
 }));
 const progress = computed(() => project.value?.progress ?? 0);
 
+// Recompute progress locally (mirrors backend round(done/total*100)) + refresh feed.
+function syncProgressLocal() {
+  if (!project.value) return;
+  const total = tasks.value.length;
+  const done = tasks.value.filter((t) => t.status === "done").length;
+  project.value.progress = total ? Math.round((done / total) * 100) : 0;
+}
+async function loadActivity() {
+  activity.value = await projectsApi.activity(projectId).catch(() => []);
+}
+async function applyStatus(t: Task, next: string) {
+  const prev = t.status;
+  t.status = next;
+  syncProgressLocal();
+  try {
+    await projectsApi.moveTaskStatus(t.id, next);
+    await loadActivity();
+  } catch {
+    t.status = prev;
+    syncProgressLocal();
+  }
+}
+
 async function cycleStatus(t: Task) {
   const next = STATUS_NEXT[t.status] || "todo";
-  t.status = next;
-  await projectsApi.updateTask(t.id, { status: next });
+  await applyStatus(t, next);
 }
 function startEditTask(t: Task) {
   editingTaskId.value = t.id;
@@ -194,12 +230,7 @@ async function onKanbanDrop(e: DragEvent, col: string) {
   if (!taskId) return;
   const t = tasks.value.find((x) => x.id === taskId);
   if (!t || t.status === col) return;
-  t.status = col;
-  try {
-    await projectsApi.updateTask(t.id, { status: col });
-  } catch {
-    await load(); // Reload on failure
-  }
+  await applyStatus(t, col);
 }
 function taskToAI(task?: Task, agentId?: string) {
   const seed = task ? `请帮我完成以下任务：${task.title}` : undefined;
@@ -385,6 +416,24 @@ async function removeProject() {
             </div>
             <div v-if="col.key === 'todo'" class="kanban-add">
               <input class="task-add-input" v-model="newTaskTitle" placeholder="+ 新任务" @keydown.enter="addTask" />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ACTIVITY LOG (closed-loop visibility) -->
+      <div class="section-card" style="margin-bottom: 18px">
+        <div class="section-head">
+          <div class="section-title"><Icon name="bolt" /> 活动日志</div>
+          <span style="font-size: 11.5px; color: var(--ink-mute)">任务推进 · 产出沉淀 · 自动记录</span>
+        </div>
+        <div class="section-body flush">
+          <div v-if="!activity.length" class="empty-state">暂无活动。推进任务或沉淀会话产出后将自动记录。</div>
+          <div v-for="a in activity" :key="a.id" class="file-row">
+            <div class="file-ico"><Icon :name="ACTIVITY_ICON[a.kind] || 'bolt'" :size="13" /></div>
+            <div class="flex-1-min">
+              <div class="row-title"><b>{{ a.actor_name || "成员" }}</b> {{ a.summary }}</div>
+              <div class="file-meta">{{ activityAgo(a.created_at) }}</div>
             </div>
           </div>
         </div>

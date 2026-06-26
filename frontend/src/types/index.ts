@@ -452,6 +452,17 @@ export interface ProjectDoc {
   created_by_name: string | null;
   created_at: string;
 }
+
+export interface ProjectActivity {
+  id: string;
+  project_id: string;
+  actor_id: string | null;
+  actor_name: string | null;
+  kind: string;
+  summary: string;
+  meta: Record<string, unknown>;
+  created_at: string;
+}
 export interface ProjectDetail extends Project {
   members: Member[];
   docs: ProjectDoc[];
@@ -466,6 +477,9 @@ export interface Task {
   owner_id: string | null;
   agent_id: string | null;
   order_idx: number;
+  description?: string | null;
+  source_conversation_id?: string | null;
+  source_message_id?: string | null;
   created_at: string;
 }
 
