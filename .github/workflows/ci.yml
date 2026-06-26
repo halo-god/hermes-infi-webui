@@ -75,6 +75,7 @@ jobs:
         env:
           DATABASE_URL: postgresql+asyncpg://hermes:test@localhost:5432/hermes_test
           REDIS_URL: redis://localhost:6379
+          FIRST_ADMIN_PASSWORD: CiTestAdminPw2026
         run: python -m app.seed
 
       - name: Run tests
@@ -82,6 +83,7 @@ jobs:
         env:
           DATABASE_URL: postgresql+asyncpg://hermes:test@localhost:5432/hermes_test
           REDIS_URL: redis://localhost:6379
+          FIRST_ADMIN_PASSWORD: CiTestAdminPw2026
         run: pytest -x -q
 
   # ── 前端检查 ──
