@@ -62,6 +62,10 @@ function removeImage(idx: number) {
   attachedImages.value.splice(idx, 1);
 }
 
+function openImage(url: string) {
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
 // Admin reply form
 const replyText = ref("");
 const replyStatus = ref("");
@@ -126,13 +130,12 @@ async function submitFeedback() {
   }
   submitting.value = true;
   try {
-    // Append image references to content
-    let content = form.value.content;
-    if (attachedImages.value.length) {
-      const imgList = attachedImages.value.map((img, i) => `[截图${i + 1}: ${img.name}]`).join("\n");
-      content += "\n\n--- 附带截图 ---\n" + imgList;
-    }
-    await feedbackApi.create({ ...form.value, content });
+    await feedbackApi.create({
+      title: form.value.title,
+      content: form.value.content,
+      category: form.value.category,
+      images: attachedImages.value.map((img) => img.dataUrl),
+    });
     ns.toast("反馈已提交");
     showForm.value = false;
     form.value = { title: "", content: "", category: "bug" };
@@ -299,6 +302,12 @@ onMounted(async () => {
               <span v-if="isAdmin" class="fb-cat-pill" style="color: var(--ink-mute); border-color: var(--rule)">优先级: {{ PRIORITY_LABELS[selected.priority] }}</span>
             </div>
             <div style="font-size: 13px; color: var(--ink); line-height: 1.6; background: var(--bg-canvas); border-radius: 8px; padding: 12px; margin-bottom: 12px; white-space: pre-wrap">{{ selected.content }}</div>
+            <!-- Images gallery -->
+            <div v-if="selected.images?.length" style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px">
+              <div v-for="(img, i) in selected.images" :key="i" style="position: relative">
+                <img :src="img" style="max-width: 200px; max-height: 200px; object-fit: cover; border-radius: 8px; border: 1px solid var(--rule); cursor: pointer" @click="openImage(img)" />
+              </div>
+            </div>
             <div style="font-size: 11px; color: var(--ink-mute); margin-bottom: 16px">
               提交者: {{ selected.user_name }} · {{ new Date(selected.created_at).toLocaleString('zh-CN') }}
             </div>

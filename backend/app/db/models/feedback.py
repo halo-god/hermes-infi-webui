@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import BigInteger, DateTime, ForeignKey, Identity, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -33,3 +33,4 @@ class Feedback(Timestamps, Base):
     reply: Mapped[str | None] = mapped_column(Text, nullable=True)
     replied_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     replied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    images: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)

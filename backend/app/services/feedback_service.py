@@ -50,6 +50,7 @@ async def create_feedback(
         title=payload.title,
         content=payload.content,
         category=payload.category,
+        images=list(payload.images) if payload.images else [],
     )
     db.add(fb)
     await db.commit()
