@@ -372,12 +372,13 @@ export const useChatStore = defineStore("chat", () => {
   async function send(
     text: string,
     agentId = "hermes",
-    opts?: { profileId?: string; webSearch?: boolean; deepThink?: boolean; stagedFiles?: File[]; mentions?: string[]; replyToId?: string },
+    opts?: { profileId?: string; webSearch?: boolean; deepThink?: boolean; stagedFiles?: File[]; attachedFileIds?: string[]; mentions?: string[]; replyToId?: string },
   ) {
     if (!activeId.value) await newConversation(agentId, opts?.profileId);
     const id = activeId.value!;
 
     let fileIds: string[] = [];
+    // stagedFiles: new uploads in this turn
     if (opts?.stagedFiles?.length) {
       try {
         const uploaded = await Promise.all(opts.stagedFiles.map((f) => conversationsApi.upload(id, f)));
@@ -386,6 +387,10 @@ export const useChatStore = defineStore("chat", () => {
       } catch (e) {
         console.error("[chat] file upload failed:", e);
       }
+    }
+    // attachedFileIds: previously-uploaded files referenced in this turn
+    if (opts?.attachedFileIds?.length) {
+      fileIds = [...fileIds, ...opts.attachedFileIds];
     }
 
     // Check if this is a group conversation

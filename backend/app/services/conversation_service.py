@@ -365,7 +365,12 @@ async def send_message(
     if existing_user_msg is None:
         user_content: dict = {"text": text}
         if attached:
-            user_content["files"] = attached
+            # Persist only lightweight metadata (no file content) to avoid
+            # PostgreSQL JSONB \u0000 rejection and message bloat.
+            user_content["files"] = [
+                {"id": f["id"], "name": f["name"], "kind": f.get("kind")}
+                for f in attached
+            ]
         user_msg = Message(
             conversation_id=convo.id,
             owner_id=owner_id,
@@ -464,7 +469,10 @@ async def send_roundtable(
     if existing_user_msg is None:
         user_content: dict = {"text": text}
         if attached:
-            user_content["files"] = attached
+            user_content["files"] = [
+                {"id": f["id"], "name": f["name"], "kind": f.get("kind")}
+                for f in attached
+            ]
         user_msg = Message(
             conversation_id=convo.id, owner_id=owner_id, role="user", content=user_content, mentions=mentions or [], status="complete"
         )
