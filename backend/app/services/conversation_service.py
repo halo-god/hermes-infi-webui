@@ -48,20 +48,13 @@ async def list_conversations(
     if pinned_only:
         stmt = stmt.where(Conversation.pinned.is_(True))
     if q:
-        # Use PostgreSQL full-text search for better performance on large datasets
-        # Falls back to LIKE for simple prefix matching
-        if len(q) >= 2:
-            # Full-text search with tsvector. `.match()` wraps its argument in
-            # plainto_tsquery itself, so pass the raw string — wrapping it here too
-            # produces plainto_tsquery(plainto_tsquery(...)), which is invalid SQL.
-            stmt = stmt.where(
-                func.to_tsvector("simple", func.coalesce(Conversation.title, "")).match(
-                    q, postgresql_regconfig="simple"
-                )
-            )
-        else:
-            # Short queries: use case-insensitive prefix match
-            stmt = stmt.where(Conversation.title.ilike(f"{q}%"))
+        # Case-insensitive substring match on title. Postgres full-text search
+        # (to_tsvector/plainto_tsquery with the 'simple' config) can't do
+        # substring matching and has no CJK word segmentation, so a query like
+        # "关键词" never matches a title "唯一关键词". ILIKE '%q%' gives correct
+        # substring semantics across languages; title is short so it's cheap.
+        like = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        stmt = stmt.where(Conversation.title.ilike(f"%{like}%"))
     stmt = stmt.order_by(Conversation.pinned.desc(), Conversation.updated_at.desc())
     # Bound the query — a user with thousands of conversations must not pull
     # them all in one request. Callers page with limit/offset.
@@ -301,6 +294,7 @@ async def send_user_only(
     text: str,
     attached_file_ids: list[str] | None = None,
     owner_id: uuid.UUID | None = None,
+    task_id: uuid.UUID | None = None,
 ) -> tuple[Message, None]:
     """Save a user message without triggering agent (for channel mention mode)."""
     user_msg = Message(
@@ -309,6 +303,7 @@ async def send_user_only(
         role="user",
         content={"text": text},
         status="complete",
+        task_id=task_id,
     )
     db.add(user_msg)
     if convo.title == "新会话":
@@ -359,6 +354,7 @@ async def send_message(
     existing_user_msg: Message | None = None,
     profile_dir: str | None = None,
     agent_id_override: str | None = None,
+    task_id: uuid.UUID | None = None,
 ) -> tuple[Message, Message]:
     """Persist the user turn + an empty streaming agent turn, then enqueue ACP work.
 
@@ -389,6 +385,7 @@ async def send_message(
             role="user",
             content=user_content,
             status="complete",
+            task_id=task_id,
         )
         db.add(user_msg)
     else:
@@ -470,6 +467,7 @@ async def send_roundtable(
     mentions: list[str] | None = None,
     profile_dir: str | None = None,
     existing_user_msg: Message | None = None,
+    task_id: uuid.UUID | None = None,
 ) -> tuple[Message, Message]:
     """Multi-agent turn: one roundtable message holding per-agent replies + a
     synthesized merge. The runner streams each reply in parallel, then merges.
@@ -486,7 +484,7 @@ async def send_roundtable(
                 for f in attached
             ]
         user_msg = Message(
-            conversation_id=convo.id, owner_id=owner_id, role="user", content=user_content, mentions=mentions or [], status="complete"
+            conversation_id=convo.id, owner_id=owner_id, role="user", content=user_content, mentions=mentions or [], status="complete", task_id=task_id
         )
     else:
         user_msg = existing_user_msg
@@ -606,11 +604,14 @@ async def dispatch(
     owner_id: uuid.UUID | None = None,
     skip_agent: bool = False,
     profile_id_override: str | None = None,
+    task_id: uuid.UUID | None = None,
 ) -> tuple[Message, Message | None]:
     """Route to single or roundtable based on the conversation's active agents."""
     agents = list(convo.active_agent_ids or [convo.primary_agent_id])
     if skip_agent:
-        return await send_user_only(db, convo, text, attached_file_ids=attached_file_ids, owner_id=owner_id)
+        return await send_user_only(
+            db, convo, text, attached_file_ids=attached_file_ids, owner_id=owner_id, task_id=task_id
+        )
 
     # Load profile system_prompt — request-level override wins over conversation default
     system_prompt: str | None = None
@@ -642,12 +643,12 @@ async def dispatch(
         return await send_roundtable(
             db, convo, text, agents,
             attached_file_ids=attached_file_ids, owner_id=owner_id,
-            system_prompt=system_prompt, profile_dir=profile_dir,
+            system_prompt=system_prompt, profile_dir=profile_dir, task_id=task_id,
         )
     return await send_message(
         db, convo, text,
         attached_file_ids=attached_file_ids, owner_id=owner_id,
-        system_prompt=system_prompt, profile_dir=profile_dir,
+        system_prompt=system_prompt, profile_dir=profile_dir, task_id=task_id,
     )
 
 
@@ -1084,6 +1085,7 @@ async def message_to_event_dict(db: AsyncSession, msg: Message) -> dict:
         "created_at": msg.created_at.isoformat() if msg.created_at else None,
         "reply_to_id": str(msg.reply_to_id) if msg.reply_to_id else None,
         "reply_to": await _build_reply_ref(db, msg.reply_to_id),
+        "task_id": str(msg.task_id) if msg.task_id else None,
         "edited_at": msg.edited_at.isoformat() if msg.edited_at else None,
         "deleted_at": msg.deleted_at.isoformat() if msg.deleted_at else None,
         "reactions": msg.reactions or {},
@@ -1132,6 +1134,7 @@ async def _persist_group_user_msg(
     *,
     attached_file_ids: list[str] | None = None,
     reply_to_id: uuid.UUID | None = None,
+    task_id: uuid.UUID | None = None,
 ) -> Message:
     """持久化群聊用户消息（统一入口，附带文件 + 回复引用）。"""
     attached = await _resolve_attached_files(db, attached_file_ids or [], conversation_id=str(convo.id))
@@ -1146,6 +1149,7 @@ async def _persist_group_user_msg(
         mentions=mentions or [],
         reply_to_id=reply_to_id,
         status="complete",
+        task_id=task_id,
     )
     db.add(user_msg)
     if convo.title == "新会话":
@@ -1165,6 +1169,7 @@ async def dispatch_group(
     skip_agent: bool = False,
     profile_id_override: str | None = None,
     reply_to_id: uuid.UUID | None = None,
+    task_id: uuid.UUID | None = None,
 ) -> tuple[Message, Message | None]:
     """群聊消息路由：按 channel_mode + mentions 决定走人→人 / 人→机 / 圆桌。
 
@@ -1186,7 +1191,7 @@ async def dispatch_group(
     # 始终先落库 + 广播人类消息
     user_msg = await _persist_group_user_msg(
         db, convo, text, mentions, owner_id,
-        attached_file_ids=attached_file_ids, reply_to_id=reply_to_id,
+        attached_file_ids=attached_file_ids, reply_to_id=reply_to_id, task_id=task_id,
     )
     await _publish_user_message(db, convo, user_msg, resolved)
 
