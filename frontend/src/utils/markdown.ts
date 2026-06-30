@@ -151,7 +151,9 @@ async function ensureMermaid() {
     mermaid.initialize({
       startOnLoad: false,
       theme: isDark ? "dark" : "default",
-      securityLevel: "loose",
+      // "strict" — diagrams render from chat content authored by other users/agents,
+      // not just trusted app code; "loose" allows click-bound JS and raw HTML labels.
+      securityLevel: "strict",
     });
     (window as Window & { __mermaid?: unknown }).__mermaid = mermaid;
     mermaidReady = true;

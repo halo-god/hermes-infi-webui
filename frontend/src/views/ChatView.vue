@@ -232,17 +232,35 @@ function profileDisplay(profile: Profile | null | undefined): { label: string; i
   return { label: profile?.name || branding.shortName, icon: profile?.icon || "sparkle", color: profile?.color || branding.accent, description: profile?.desc || "" };
 }
 
+// Markdown rendering (highlight.js/KaTeX) is not cheap — memoize per raw-text input so
+// re-renders triggered by unrelated reactive changes (e.g. typing in the search box)
+// don't redo the full parse for every visible message.
+const mdCache = new Map<string, string>();
+function renderMarkdownCached(text: string): string {
+  let html = mdCache.get(text);
+  if (html === undefined) {
+    html = renderMarkdown(text);
+    if (mdCache.size > 500) mdCache.clear();
+    mdCache.set(text, html);
+  }
+  return html;
+}
 function md(text: string) {
-  return renderMarkdown(text);
+  return renderMarkdownCached(text);
 }
 
 // ── @mention highlighting for group chats ──
+// profile.color is a free-form string (admin-set), not validated server-side —
+// never interpolate it into a style attribute unescaped.
+function safeColor(color: string | null | undefined): string {
+  return color && /^#[0-9a-fA-F]{3,8}$/.test(color) ? color : branding.accent;
+}
 function highlightMentions(html: string): string {
   if (!isGroup.value) return html;
   return html.replace(/@([\w-]+)/g, (_match, agentId) => {
     const profile = chat.profiles.find(p => p.default_agent_id === agentId);
     const name = profile?.name || agentId;
-    const color = profile?.color || branding.accent;
+    const color = safeColor(profile?.color);
     return `<span class="mention-tag" style="background:${color}22;color:${color};border:1px solid ${color}44">@${escapeHtml(name)}</span>`;
   });
 }
@@ -740,7 +758,7 @@ function displayHtml(text: string): string {
       const quoted = lines.map((l: string) => `> ${l}`).join("\n");
       return summary ? `> **${summary}**\n${quoted}` : quoted;
     });
-  return renderMarkdown(stripped);
+  return renderMarkdownCached(stripped);
 }
 
 // ── Agent working phase display ──

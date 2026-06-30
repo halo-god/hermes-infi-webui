@@ -1138,12 +1138,20 @@ async def get_members(
             select(ProfileModel).where(ProfileModel.id.in_(profile_ids))
         )).scalars().all()
         profile_map = {p.id: p for p in prof_rows}
+    # Batch-load users instead of one db.get() per member.
+    user_ids = [m.user_id for m in members if m.user_id]
+    user_map: dict = {}
+    if user_ids:
+        user_rows = (await db.execute(
+            select(UserModel).where(UserModel.id.in_(user_ids))
+        )).scalars().all()
+        user_map = {u.id: u for u in user_rows}
     presence = await redis_core.presence_status(human_ids) if human_ids else {}
     result = []
     for m in members:
         data = GroupMemberOut.model_validate(m).model_dump()
         if m.user_id:
-            u = await db.get(UserModel, m.user_id)
+            u = user_map.get(m.user_id)
             if u:
                 data["user_name"] = u.name or u.email or str(m.user_id)[:8]
             data["presence"] = presence.get(str(m.user_id), "offline")
@@ -1186,10 +1194,14 @@ async def remove_member(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """移除群聊成员。"""
+    """移除群聊成员（本人可自行退出；移除他人需群管理员权限）。"""
     convo = await _require_convo(db, conversation_id, user)
     if convo.type != "group":
         raise HTTPException(status_code=400, detail="该会话不是群聊")
+    if member_id != user.id:
+        is_admin = await svc.is_group_admin(db, conversation_id, user.id)
+        if not is_admin:
+            raise HTTPException(status_code=403, detail="只有群管理员可以移除其他成员")
     # member_id could be user_id — try removing by user_id
     await svc.remove_group_member(db, conversation_id, user_id=member_id)
 
