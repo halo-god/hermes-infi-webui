@@ -178,34 +178,55 @@ async def wecom_exchange(payload: dict):
 
 # ── WeCom OAuth ──────────────────────────────────────────────────────
 
+@router.get("/wecom/orgs")
+async def wecom_orgs(db: AsyncSession = Depends(get_db)):
+    """List configured WeCom orgs (id + name) for the login page to render a
+    button per org. Returns an empty list when WeCom login is disabled."""
+    from app.auth_providers.wecom import normalize_orgs
+
+    provider = await db.get(IdentityProvider, "wecom")
+    if provider is None or not provider.enabled:
+        return {"orgs": []}
+    orgs = [
+        {"id": o["id"], "name": o["name"]}
+        for o in normalize_orgs(provider.config)
+        if o.get("corp_id")
+    ]
+    return {"orgs": orgs}
+
+
 @router.get("/wecom/authorize")
-async def wecom_authorize(db: AsyncSession = Depends(get_db)):
-    """Return the WeCom OAuth authorize URL for frontend redirect."""
-    from app.auth_providers.wecom import build_authorize_url
+async def wecom_authorize(org: str = "", db: AsyncSession = Depends(get_db)):
+    """Return the WeCom OAuth authorize URL for frontend redirect (per org)."""
+    from app.auth_providers.wecom import build_authorize_url, get_org
 
     provider = await db.get(IdentityProvider, "wecom")
     if provider is None or not provider.enabled:
         raise HTTPException(status_code=403, detail="企业微信登录未启用")
 
-    cfg = provider.config or {}
-    corp_id = (cfg.get("corp_id") or "").strip()
-    agent_id = (cfg.get("agent_id") or "").strip()
-    redirect_uri = (cfg.get("redirect_uri") or "").strip()
+    org_cfg = get_org(provider.config, org)
+    if org_cfg is None:
+        raise HTTPException(status_code=404, detail="未找到该企业微信组织配置")
+
+    corp_id = org_cfg["corp_id"]
+    agent_id = org_cfg["agent_id"]
+    redirect_uri = org_cfg["redirect_uri"]
     if not corp_id or not agent_id or not redirect_uri:
         raise HTTPException(status_code=500, detail="企业微信 OAuth 参数未完整配置")
 
-    url = build_authorize_url(corp_id, agent_id, redirect_uri)
+    # Carry the org id in `state` so the callback can pick the right corp config.
+    url = build_authorize_url(corp_id, agent_id, redirect_uri, state=org_cfg["id"])
     return {"authorize_url": url}
 
 
 @router.get("/wecom/silent")
-async def wecom_silent(db: AsyncSession = Depends(get_db)):
+async def wecom_silent(org: str = "", db: AsyncSession = Depends(get_db)):
     """Silent login from WeCom workbench. Redirects to OAuth2 authorize (scope=snsapi_base).
 
-    Configure this URL as the app's homepage in WeCom admin.
-    WeCom will auto-redirect with code — no QR scan needed.
+    Configure this URL as the app's homepage in WeCom admin (append ?org=<id>
+    for a non-default org). WeCom will auto-redirect with code — no QR scan needed.
     """
-    from app.auth_providers.wecom import build_silent_authorize_url
+    from app.auth_providers.wecom import build_silent_authorize_url, get_org
 
     provider = await db.get(IdentityProvider, "wecom")
     if provider is None or not provider.enabled:
@@ -215,11 +236,17 @@ async def wecom_silent(db: AsyncSession = Depends(get_db)):
             status_code=403,
         )
 
-    cfg = provider.config or {}
-    corp_id = (cfg.get("corp_id") or "").strip()
-    agent_id = (cfg.get("agent_id") or "").strip()
+    org_cfg = get_org(provider.config, org)
+    if org_cfg is None:
+        return Response(
+            content="<html><body><h3>未找到该企业微信组织配置</h3></body></html>",
+            media_type="text/html; charset=utf-8",
+            status_code=404,
+        )
+    corp_id = org_cfg["corp_id"]
+    agent_id = org_cfg["agent_id"]
     # Silent flow uses silent_redirect_uri if configured, falls back to redirect_uri
-    silent_redirect_uri = (cfg.get("silent_redirect_uri") or cfg.get("redirect_uri") or "").strip()
+    silent_redirect_uri = org_cfg["silent_redirect_uri"] or org_cfg["redirect_uri"]
     if not corp_id or not agent_id or not silent_redirect_uri:
         return Response(
             content="<html><body><h3>企业微信免登未完整配置</h3><p>请联系管理员配置回调地址。</p></body></html>",
@@ -227,7 +254,7 @@ async def wecom_silent(db: AsyncSession = Depends(get_db)):
             status_code=500,
         )
 
-    url = build_silent_authorize_url(corp_id, agent_id, silent_redirect_uri)
+    url = build_silent_authorize_url(corp_id, agent_id, silent_redirect_uri, state=org_cfg["id"])
     from fastapi.responses import RedirectResponse
     return RedirectResponse(url=url, status_code=302)
 
@@ -236,7 +263,7 @@ async def wecom_silent(db: AsyncSession = Depends(get_db)):
 async def wecom_callback(code: str = "", state: str = "", db: AsyncSession = Depends(get_db)):
     """WeCom OAuth callback. Exchanges code for user identity, provisions, returns HTML with tokens."""
     from app.services import identity_service
-    from app.auth_providers.wecom import authenticate as wecom_authenticate
+    from app.auth_providers.wecom import DEFAULT_ORG_ID, authenticate as wecom_authenticate, get_org
 
     if not code:
         raise HTTPException(status_code=400, detail="缺少授权码")
@@ -245,15 +272,29 @@ async def wecom_callback(code: str = "", state: str = "", db: AsyncSession = Dep
     if provider is None or not provider.enabled:
         raise HTTPException(status_code=403, detail="企业微信登录未启用")
 
+    # `state` carries the org id chosen at authorize time.
+    org_cfg = get_org(provider.config, state)
+    if org_cfg is None:
+        return await _wecom_callback_html(error="未找到该企业微信组织配置")
+
     try:
-        info = await wecom_authenticate(provider.config, code)
+        info = await wecom_authenticate(org_cfg, code)
     except ProviderError as e:
         # Return HTML with error message
         return await _wecom_callback_html(error=str(e))
 
-    # Provision user (create/update + team mapping)
-    mappings = await identity_service.list_mappings(db, "wecom")
-    user = await identity_service.provision_user(db, info, mappings)
+    # Provision user (create/update + per-org team mapping). The default org also
+    # accepts the legacy bare-userid identity for users created before namespacing.
+    org_id = org_cfg["id"]
+    mappings = await identity_service.list_mappings(db, "wecom", org_id=org_id)
+    legacy_external_id = (
+        info.external_id.split(":", 1)[1]
+        if org_id == DEFAULT_ORG_ID and ":" in info.external_id
+        else None
+    )
+    user = await identity_service.provision_user(
+        db, info, mappings, legacy_external_id=legacy_external_id
+    )
 
     # Issue JWT tokens
     tokens = auth_service.issue_tokens(user)

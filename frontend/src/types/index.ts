@@ -133,11 +133,24 @@ export interface IdentityProvider {
 export interface DeptMapping {
   id: string;
   provider_id: string;
+  org_id?: string | null;
   match_basis: string;
   source_value: string;
   dept: string | null;
   default_role: string;
   auto_join_team_id: string | null;
+}
+
+/** One connected WeChat Work (企业微信) organization. Stored as config.orgs[]
+ *  inside the "wecom" identity provider. */
+export interface WecomOrg {
+  id: string;
+  name: string;
+  corp_id: string;
+  agent_id: string;
+  app_secret: string;
+  redirect_uri: string;
+  silent_redirect_uri: string;
 }
 
 // ── Agents / conversations (P2) ──

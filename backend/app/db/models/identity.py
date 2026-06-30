@@ -26,6 +26,9 @@ class DeptTeamMapping(UUIDPrimaryKey, Timestamps, Base):
     provider_id: Mapped[str] = mapped_column(
         String(24), ForeignKey("identity_providers.id", ondelete="CASCADE"), index=True
     )
+    # For multi-org providers (WeCom): scopes the mapping to one configured org.
+    # NULL = applies to the legacy/default org. Other providers (LDAP) leave it NULL.
+    org_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     match_basis: Mapped[str] = mapped_column(String(16), default="attribute")  # dn | attribute
     source_value: Mapped[str] = mapped_column(String(255), nullable=False)
     dept: Mapped[str | None] = mapped_column(String(120))
