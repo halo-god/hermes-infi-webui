@@ -425,7 +425,7 @@ async def delete_knowledge(
     user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
 ):
     await svc.require_permission(db, team_id, user.id, "knowledge.delete")
-    await svc.delete_knowledge(db, kid)
+    await svc.delete_knowledge(db, team_id, kid)
 
 
 @router.patch("/teams/{team_id}/knowledge/{kid}", response_model=KnowledgeOut)
@@ -434,7 +434,7 @@ async def update_knowledge(
     user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
 ):
     await svc.require_permission(db, team_id, user.id, "knowledge.upload")
-    k = await svc.update_knowledge(db, kid, payload)
+    k = await svc.update_knowledge(db, team_id, kid, payload)
     if k is None:
         raise HTTPException(status_code=404, detail="知识条目不存在")
     return k

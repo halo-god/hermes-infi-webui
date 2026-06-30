@@ -2,19 +2,29 @@
 
 Security hardening:
 - Filters environment variables (whitelist only safe ones, never SECRET_KEY etc.)
-- Confines working directory to a per-user workspace under settings.workspace_root
+- Sets the shell's initial working directory to a per-user workspace under
+  settings.workspace_root (NOT a filesystem jail — the shell can `cd` anywhere the
+  host user can access; real isolation is a deployment concern, see
+  agent_runner/sandbox.py and docs/方案设计.md §12)
 - Audit-logs session start/end
 """
 from __future__ import annotations
 
 import asyncio
+import codecs
+import fcntl
+import logging
 import os
+import pty
 import signal
+import struct
+import termios
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 
 router = APIRouter()
+logger = logging.getLogger("hermes.terminal")
 
 #: Environment variables safe to pass to the terminal subprocess.
 #: NEVER include SECRET_KEY, DATABASE_URL, REDIS_URL, MINIO_SECRET_KEY, etc.
@@ -22,6 +32,10 @@ _SAFE_ENV_KEYS = frozenset({
     "TERM", "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "SHELL",
     "USER", "LOGNAME", "EDITOR", "VISUAL", "PAGER", "LESS",
 })
+
+#: Initial terminal size — matches the frontend xterm.js default (TerminalView.vue).
+_INITIAL_ROWS = 24
+_INITIAL_COLS = 100
 
 
 def _build_safe_env() -> dict[str, str]:
@@ -31,9 +45,37 @@ def _build_safe_env() -> dict[str, str]:
         if key in _SAFE_ENV_KEYS or key.startswith(("TERM_", "LC_")):
             safe[key] = val
     safe["TERM"] = "xterm-256color"
-    safe["COLUMNS"] = "120"
-    safe["LINES"] = "30"
     return safe
+
+
+def _spawn_pty_shell(shell: str, cwd: str) -> tuple[int, int]:
+    """Fork a shell attached to a real pseudo-terminal.
+
+    Uses `pty.fork()` rather than `subprocess` + a manually-passed slave fd:
+    pty.fork() handles session creation, controlling-tty assignment, and fd
+    wiring atomically in the forked child, which sidesteps the well-known
+    footgun of doing that by hand via Popen's preexec_fn (fd ordering vs.
+    close_fds is fragile and easy to get subtly wrong).
+
+    Returns (pid, master_fd). In the child, this never returns — it execs.
+    """
+    pid, master_fd = pty.fork()
+    if pid == 0:
+        # Child: real pty is already wired to fd 0/1/2 by pty.fork().
+        try:
+            os.chdir(cwd)
+            os.execvpe(shell, [shell, "-i"], _build_safe_env())
+        except Exception:
+            os._exit(1)
+    # Parent
+    try:
+        fcntl.ioctl(
+            master_fd, termios.TIOCSWINSZ,
+            struct.pack("HHHH", _INITIAL_ROWS, _INITIAL_COLS, 0, 0),
+        )
+    except OSError:
+        pass
+    return pid, master_fd
 
 
 @router.websocket("/terminal/ws")
@@ -77,7 +119,7 @@ async def terminal_ws(
 
     await websocket.accept()
 
-    # Per-user workspace directory (confined cwd).
+    # Per-user workspace directory (initial cwd only — see module docstring).
     ws_dir = os.path.join(settings.workspace_root, f"terminal-{user_id}")
     os.makedirs(ws_dir, exist_ok=True)
 
@@ -95,74 +137,75 @@ async def terminal_ws(
     if not os.path.exists(shell):
         shell = "/bin/sh"
 
-    process = None
+    loop = asyncio.get_event_loop()
+    pid: int | None = None
+    master_fd: int | None = None
+
     try:
-        # Create subprocess with filtered env + confined cwd.
-        process = await asyncio.create_subprocess_exec(
-            shell,
-            "-i",  # interactive mode
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=ws_dir,
-            env=_build_safe_env(),
-        )
+        pid, master_fd = await loop.run_in_executor(None, _spawn_pty_shell, shell, ws_dir)
+        os.set_blocking(master_fd, False)
+
+        output_queue: asyncio.Queue[bytes] = asyncio.Queue()
+
+        def _on_master_readable():
+            try:
+                data = os.read(master_fd, 4096)
+            except BlockingIOError:
+                return
+            except OSError:
+                # EIO is the normal Linux signal that the slave side closed (child exited).
+                data = b""
+            output_queue.put_nowait(data)
+            if not data:
+                try:
+                    loop.remove_reader(master_fd)
+                except (ValueError, OSError):
+                    pass
+
+        loop.add_reader(master_fd, _on_master_readable)
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
         async def read_output():
-            """Read from process stdout/stderr and send to WebSocket."""
+            """Bridge pty master output to the WebSocket, decoding incrementally
+            so multi-byte UTF-8 sequences split across reads aren't mangled."""
             try:
                 while True:
-                    # Read from stdout
-                    data = await process.stdout.read(1024)
+                    data = await output_queue.get()
                     if not data:
                         break
-                    await websocket.send_text(data.decode("utf-8", errors="replace"))
-            except (WebSocketDisconnect, ConnectionResetError):
-                pass
-            except Exception:
-                pass
-
-        async def read_stderr():
-            """Read from process stderr and send to WebSocket."""
-            try:
-                while True:
-                    data = await process.stderr.read(1024)
-                    if not data:
-                        break
-                    await websocket.send_text(data.decode("utf-8", errors="replace"))
+                    text = decoder.decode(data)
+                    if text:
+                        await websocket.send_text(text)
             except (WebSocketDisconnect, ConnectionResetError):
                 pass
             except Exception:
                 pass
 
         async def write_input():
-            """Read from WebSocket and write to process stdin."""
+            """Read from WebSocket and write to the pty master (kernel tty driver
+            handles control bytes like Ctrl-C as real signals via the real pty)."""
             try:
                 while True:
                     msg = await websocket.receive_text()
-                    if process.stdin and not process.stdin.is_closing():
-                        process.stdin.write(msg.encode("utf-8"))
-                        await process.stdin.drain()
+                    try:
+                        os.write(master_fd, msg.encode("utf-8"))
+                    except OSError:
+                        break
             except WebSocketDisconnect:
-                # Clean shutdown
-                if process.stdin and not process.stdin.is_closing():
-                    process.stdin.close()
-            except (ConnectionResetError, BrokenPipeError):
                 pass
             except Exception:
                 pass
 
-        # Run all three tasks concurrently
+        # Run output/input bridging concurrently; stop on the first to finish
+        # (read_output ends on EOF/EIO once the child exits — see _on_master_readable).
         done, pending = await asyncio.wait(
             [
                 asyncio.create_task(read_output()),
-                asyncio.create_task(read_stderr()),
                 asyncio.create_task(write_input()),
             ],
             return_when=asyncio.FIRST_COMPLETED,
         )
 
-        # Cancel remaining tasks
         for task in pending:
             task.cancel()
             try:
@@ -176,16 +219,29 @@ async def terminal_ws(
         except Exception:
             pass
     finally:
-        # Clean up process
-        if process is not None:
+        if master_fd is not None:
             try:
-                if process.returncode is None:
-                    process.send_signal(signal.SIGTERM)
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=3.0)
-                    except asyncio.TimeoutError:
-                        process.kill()
-                        await process.wait()
+                loop.remove_reader(master_fd)
+            except (ValueError, OSError):
+                pass
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+
+        # Clean up the child process.
+        if pid is not None:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                try:
+                    await asyncio.wait_for(
+                        loop.run_in_executor(None, os.waitpid, pid, 0), timeout=3.0
+                    )
+                except asyncio.TimeoutError:
+                    os.kill(pid, signal.SIGKILL)
+                    await loop.run_in_executor(None, os.waitpid, pid, 0)
+            except (ProcessLookupError, ChildProcessError):
+                pass
             except Exception:
                 pass
 

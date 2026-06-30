@@ -360,16 +360,18 @@ async def add_knowledge(db: AsyncSession, team_id: uuid.UUID, data, user: User) 
     return k
 
 
-async def delete_knowledge(db: AsyncSession, kid: uuid.UUID) -> None:
+async def delete_knowledge(db: AsyncSession, team_id: uuid.UUID, kid: uuid.UUID) -> None:
     k = await db.get(TeamKnowledge, kid)
-    if k:
+    if k and k.team_id == team_id:
         await db.delete(k)
         await db.commit()
 
 
-async def update_knowledge(db: AsyncSession, kid: uuid.UUID, data) -> TeamKnowledge | None:
+async def update_knowledge(
+    db: AsyncSession, team_id: uuid.UUID, kid: uuid.UUID, data
+) -> TeamKnowledge | None:
     k = await db.get(TeamKnowledge, kid)
-    if k is None:
+    if k is None or k.team_id != team_id:
         return None
     for f, v in data.model_dump(exclude_unset=True).items():
         setattr(k, f, v)
