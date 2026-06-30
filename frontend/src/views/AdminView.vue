@@ -24,6 +24,7 @@ import type {
   PermissionGroup,
   SystemSettings,
   User,
+  WecomOrg,
 } from "@/types";
 
 const authStore = useAuthStore();
@@ -53,12 +54,27 @@ const activeProvider = ref<string>("ldap");
 const ldap = ref<IdentityProvider | null>(null);
 const wecom = ref<IdentityProvider | null>(null);
 const mappings = ref<DeptMapping[]>([]);
-const wecomMappings = ref<DeptMapping[]>([]);
 const teamsOpt = ref<{ id: string; name: string }[]>([]);
 const roles = ref<AdminRole[]>([]);
 const permissions = ref<PermissionGroup[]>([]);
 const newMap = reactive({ source_value: "", default_role: "member", auto_join_team_id: "" });
-const newWecomMap = reactive({ source_value: "", default_role: "member", auto_join_team_id: "" });
+
+// ── WeCom multi-org state ──
+// Editable org list (mirrors wecom.config.orgs); mappings + test results keyed by org id.
+const wecomOrgs = ref<WecomOrg[]>([]);
+const wecomMappingsByOrg = reactive<Record<string, DeptMapping[]>>({});
+const wecomMapDrafts = reactive<Record<string, { source_value: string; default_role: string; auto_join_team_id: string }>>({});
+const wecomTestByOrg = reactive<Record<string, { ok: boolean; message: string } | null>>({});
+const wecomTestingOrg = ref<string | null>(null);
+const wecomSecretShown = reactive<Record<string, boolean>>({});
+
+function blankWecomOrg(id: string, name = ""): WecomOrg {
+  return { id, name, corp_id: "", agent_id: "", app_secret: "", redirect_uri: "", silent_redirect_uri: "" };
+}
+function wecomMapDraft(orgId: string) {
+  if (!wecomMapDrafts[orgId]) wecomMapDrafts[orgId] = { source_value: "", default_role: "member", auto_join_team_id: "" };
+  return wecomMapDrafts[orgId];
+}
 
 const LDAP_DEFAULTS: Record<string, string | number | boolean> = {
   host: "", port: 389, use_ssl: false, start_tls: false,
@@ -67,19 +83,12 @@ const LDAP_DEFAULTS: Record<string, string | number | boolean> = {
   bind_dn: "", bind_password: "", base_dn: "", search_filter: "(uid={username})",
   attr_email: "mail", attr_name: "cn", attr_dept: "departmentNumber", email_domain: "",
 };
-const WECOM_DEFAULTS: Record<string, string> = {
-  corp_id: "", agent_id: "", app_secret: "", redirect_uri: "", silent_redirect_uri: "",
-};
-
 const ldapShowPw = ref(false);
 const ldapTesting = ref(false);
 const ldapSaving = ref(false);
 const ldapTestResult = ref<{ ok: boolean; message: string } | null>(null);
 
-const wecomShowSecret = ref(false);
-const wecomTesting = ref(false);
 const wecomSaving = ref(false);
-const wecomTestResult = ref<{ ok: boolean; message: string } | null>(null);
 
 const ROLES = ["super_admin", "admin", "team_admin", "member", "viewer"];
 const ROLE_NAME: Record<string, string> = { super_admin: "超级管理员", admin: "管理员", team_admin: "团队管理员", member: "成员", viewer: "只读" };
@@ -223,9 +232,10 @@ async function loadIdentity() {
   }
   wecom.value = providers.value.find((p) => p.id === "wecom") || null;
   if (wecom.value) {
-    for (const [k, v] of Object.entries(WECOM_DEFAULTS))
-      if (wecom.value.config[k] === undefined) wecom.value.config[k] = v;
-    wecomMappings.value = await adminApi.mappings("wecom");
+    wecomOrgs.value = normalizeWecomOrgs(wecom.value.config);
+    for (const o of wecomOrgs.value) {
+      wecomMappingsByOrg[o.id] = await adminApi.mappings("wecom", o.id);
+    }
   }
   try {
     teamsOpt.value = (await http.get("/teams")).data;
@@ -359,25 +369,65 @@ async function testLdap() {
     ldapTesting.value = false;
   }
 }
+/** Normalize a wecom provider config into an editable org list, mirroring the
+ *  backend's wecom.normalize_orgs (supports the legacy single-org config). */
+function normalizeWecomOrgs(config: Record<string, string | number | boolean>): WecomOrg[] {
+  const raw = (config as { orgs?: unknown }).orgs;
+  if (Array.isArray(raw) && raw.length) {
+    return raw.map((o, i) => {
+      const oo = (o || {}) as Partial<WecomOrg>;
+      return {
+        id: (oo.id || "").trim() || (i === 0 ? "default" : `org${i}`),
+        name: (oo.name || "").trim() || "企业微信",
+        corp_id: oo.corp_id || "", agent_id: oo.agent_id || "", app_secret: oo.app_secret || "",
+        redirect_uri: oo.redirect_uri || "", silent_redirect_uri: oo.silent_redirect_uri || "",
+      };
+    });
+  }
+  if (String(config.corp_id || "").trim()) {
+    return [{
+      id: "default", name: "企业微信",
+      corp_id: String(config.corp_id || ""), agent_id: String(config.agent_id || ""),
+      app_secret: String(config.app_secret || ""), redirect_uri: String(config.redirect_uri || ""),
+      silent_redirect_uri: String(config.silent_redirect_uri || ""),
+    }];
+  }
+  // No org yet — start with one blank default org so the form has something to edit.
+  return [blankWecomOrg("default")];
+}
 async function saveWecom() {
   if (!wecom.value) return;
   wecomSaving.value = true;
   try {
-    await adminApi.updateProvider("wecom", { config: wecom.value.config });
+    await adminApi.updateProvider("wecom", { config: { orgs: wecomOrgs.value } });
+    await loadIdentity();
     await loadAudit();
   } finally {
     wecomSaving.value = false;
   }
 }
-async function testWecom() {
-  wecomTesting.value = true;
-  wecomTestResult.value = null;
+function addWecomOrg() {
+  const id = `org_${Math.random().toString(36).slice(2, 8)}`;
+  wecomOrgs.value.push(blankWecomOrg(id, "新组织"));
+}
+async function removeWecomOrg(org: WecomOrg) {
+  if (!confirm(`确定删除组织「${org.name}」及其登录配置？`)) return;
+  wecomOrgs.value = wecomOrgs.value.filter((o) => o.id !== org.id);
+  delete wecomMappingsByOrg[org.id];
+  delete wecomTestByOrg[org.id];
+  await saveWecom();
+}
+async function testWecomOrg(org: WecomOrg) {
+  wecomTestingOrg.value = org.id;
+  wecomTestByOrg[org.id] = null;
   try {
-    wecomTestResult.value = await adminApi.testProvider("wecom");
+    // Persist first so the backend tests the latest credentials.
+    await adminApi.updateProvider("wecom", { config: { orgs: wecomOrgs.value } });
+    wecomTestByOrg[org.id] = await adminApi.testProvider("wecom", org.id);
   } catch {
-    wecomTestResult.value = { ok: false, message: "请求失败，请检查服务端日志" };
+    wecomTestByOrg[org.id] = { ok: false, message: "请求失败，请检查服务端日志" };
   } finally {
-    wecomTesting.value = false;
+    wecomTestingOrg.value = null;
   }
 }
 async function addMapping() {
@@ -387,20 +437,21 @@ async function addMapping() {
   newMap.source_value = "";
   newMap.auto_join_team_id = "";
 }
-async function addWecomMapping() {
-  if (!newWecomMap.source_value.trim()) return;
-  const m = await adminApi.addMapping("wecom", { match_basis: "attribute", source_value: newWecomMap.source_value.trim(), default_role: newWecomMap.default_role, auto_join_team_id: newWecomMap.auto_join_team_id || null });
-  wecomMappings.value.push(m);
-  newWecomMap.source_value = "";
-  newWecomMap.auto_join_team_id = "";
+async function addWecomMapping(org: WecomOrg) {
+  const draft = wecomMapDraft(org.id);
+  if (!draft.source_value.trim()) return;
+  const m = await adminApi.addMapping("wecom", { org_id: org.id, match_basis: "attribute", source_value: draft.source_value.trim(), default_role: draft.default_role, auto_join_team_id: draft.auto_join_team_id || null });
+  (wecomMappingsByOrg[org.id] ||= []).push(m);
+  draft.source_value = "";
+  draft.auto_join_team_id = "";
 }
 async function deleteMapping(id: string) {
   await adminApi.deleteMapping(id);
   mappings.value = mappings.value.filter((m) => m.id !== id);
 }
-async function deleteWecomMapping(id: string) {
+async function deleteWecomMapping(orgId: string, id: string) {
   await adminApi.deleteMapping(id);
-  wecomMappings.value = wecomMappings.value.filter((m) => m.id !== id);
+  wecomMappingsByOrg[orgId] = (wecomMappingsByOrg[orgId] || []).filter((m) => m.id !== id);
 }
 
 function providerLetter(k: string) {
@@ -1028,84 +1079,78 @@ async function confirmImport() {
               <!-- 接入说明 -->
               <div class="cfg-section" style="background:var(--bg-plate);border-radius:var(--r-md);padding:14px 18px;margin-bottom:4px">
                 <div style="font-size:12.5px;color:var(--ink-mute);line-height:1.7">
-                  <b style="color:var(--ink)">接入步骤：</b>① 在 <a href="https://work.weixin.qq.com/wework_admin/frame#apps" target="_blank" style="color:var(--accent-deep)">企业微信后台</a> 创建自建应用，获取企业ID、AgentID 和 Secret；② 将回调地址域名配置到应用的「网页授权及JS-SDK」可信域名；③ 填写下方参数并保存；④ 点击「验证凭证」确认配置正确。<b>免登：</b>将应用「工作台主页」设为 <code class="mono">/api/v1/auth/wecom/silent</code>，用户从工作台点击即免扫码登录。
+                  <b style="color:var(--ink)">接入步骤：</b>① 在 <a href="https://work.weixin.qq.com/wework_admin/frame#apps" target="_blank" style="color:var(--accent-deep)">企业微信后台</a> 创建自建应用，获取企业ID、AgentID 和 Secret；② 将回调地址域名配置到应用的「网页授权及JS-SDK」可信域名；③ 填写下方参数并保存；④ 点击「验证凭证」确认配置正确。<b>免登：</b>将应用「工作台主页」设为 <code class="mono">/api/v1/auth/wecom/silent?org=组织ID</code>，用户从工作台点击即免扫码登录。<b>多组织：</b>可添加多个企业微信组织，登录页将为每个组织提供独立的扫码入口。
                 </div>
               </div>
 
-              <!-- 应用配置 -->
-              <div class="cfg-section">
-                <div class="cfg-section-title"><Icon name="user" /> 企业微信应用配置</div>
-                <div class="cfg-grid">
+              <!-- 每个组织一张卡片 -->
+              <div v-for="org in wecomOrgs" :key="org.id" class="cfg-section wecom-org-card">
+                <div class="wecom-org-head">
+                  <Icon name="user" />
+                  <input class="cfg-input wecom-org-name" v-model="org.name" placeholder="组织名称（如：北京公司）" />
+                  <span class="wecom-org-id">{{ org.id }}</span>
+                  <button class="map-del" style="margin-left:auto" title="删除此组织" @click="removeWecomOrg(org)"><Icon name="trash" :size="14" /></button>
+                </div>
+
+                <!-- 应用配置 -->
+                <div class="cfg-grid" style="margin-top:8px">
                   <div class="lbl">企业 ID (CorpID)</div>
-                  <div class="val"><input class="cfg-input" v-model="wecom.config['corp_id']" placeholder="ww1234567890abcdef" /></div>
+                  <div class="val"><input class="cfg-input" v-model="org.corp_id" placeholder="ww1234567890abcdef" /></div>
                   <div class="lbl">应用 AgentID</div>
-                  <div class="val"><input class="cfg-input short" v-model="wecom.config['agent_id']" placeholder="1000000" /></div>
+                  <div class="val"><input class="cfg-input short" v-model="org.agent_id" placeholder="1000000" /></div>
                   <div class="lbl">应用密钥 (Secret)</div>
                   <div class="val" style="display:flex;gap:6px">
-                    <input class="cfg-input" style="flex:1" :type="wecomShowSecret ? 'text' : 'password'" v-model="wecom.config['app_secret']" placeholder="应用 Secret" autocomplete="new-password" />
-                    <button class="btn" style="flex-shrink:0" @click="wecomShowSecret = !wecomShowSecret">{{ wecomShowSecret ? "隐藏" : "显示" }}</button>
+                    <input class="cfg-input" style="flex:1" :type="wecomSecretShown[org.id] ? 'text' : 'password'" v-model="org.app_secret" placeholder="应用 Secret（留空则不改动）" autocomplete="new-password" />
+                    <button class="btn" style="flex-shrink:0" @click="wecomSecretShown[org.id] = !wecomSecretShown[org.id]">{{ wecomSecretShown[org.id] ? "隐藏" : "显示" }}</button>
                   </div>
-                </div>
-              </div>
-
-              <!-- OAuth 回调 -->
-              <div class="cfg-section">
-                <div class="cfg-section-title"><Icon name="globe" /> OAuth 回调配置</div>
-                <div class="cfg-grid">
                   <div class="lbl">扫码回调地址</div>
                   <div class="val">
-                    <input class="cfg-input" v-model="wecom.config['redirect_uri']" placeholder="https://hermes.company.com/api/v1/auth/wecom/callback" />
-                    <div class="text-mute-xs" style="margin-top:4px">需要与企业微信后台「可信域名」保持一致，路径为 <code class="mono">/api/v1/auth/wecom/callback</code></div>
+                    <input class="cfg-input" v-model="org.redirect_uri" placeholder="https://hermes.company.com/api/v1/auth/wecom/callback" />
+                    <div class="text-mute-xs" style="margin-top:4px">需与企业微信后台「可信域名」一致，路径为 <code class="mono">/api/v1/auth/wecom/callback</code></div>
                   </div>
                   <div class="lbl">免登回调地址</div>
                   <div class="val">
-                    <input class="cfg-input" v-model="wecom.config['silent_redirect_uri']" placeholder="同扫码回调（留空则复用）" />
-                    <div class="text-mute-xs" style="margin-top:4px">工作台免登 OAuth2 回调。留空则复用扫码回调地址。企业微信应用「工作台主页」设为 <code class="mono">/api/v1/auth/wecom/silent</code></div>
+                    <input class="cfg-input" v-model="org.silent_redirect_uri" placeholder="同扫码回调（留空则复用）" />
+                    <div class="text-mute-xs" style="margin-top:4px">工作台免登 OAuth2 回调，留空则复用扫码回调地址。</div>
                   </div>
                 </div>
-              </div>
 
-              <!-- 连接验证 -->
-              <div class="cfg-section">
-                <div class="cfg-section-title"><Icon name="bolt" /> 验证凭证</div>
-                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-                  <button class="btn primary" :disabled="wecomTesting" @click="testWecom">
-                    <Icon name="refresh" :size="13" /> {{ wecomTesting ? "验证中…" : "验证凭证" }}
+                <!-- 连接验证 -->
+                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px">
+                  <button class="btn primary" :disabled="wecomTestingOrg === org.id" @click="testWecomOrg(org)">
+                    <Icon name="refresh" :size="13" /> {{ wecomTestingOrg === org.id ? "验证中…" : "保存并验证凭证" }}
                   </button>
-                  <span v-if="wecomTestResult" :style="{ color: wecomTestResult.ok ? 'var(--ok)' : 'var(--danger)', fontSize: '13px' }">
-                    {{ wecomTestResult.ok ? "✓" : "✗" }} {{ wecomTestResult.message }}
+                  <span v-if="wecomTestByOrg[org.id]" :style="{ color: wecomTestByOrg[org.id]!.ok ? 'var(--ok)' : 'var(--danger)', fontSize: '13px' }">
+                    {{ wecomTestByOrg[org.id]!.ok ? "✓" : "✗" }} {{ wecomTestByOrg[org.id]!.message }}
                   </span>
                 </div>
-                <div class="text-mute-xs" style="margin-top:8px">
-                  验证会向企业微信 API 请求 access_token；成功则说明企业ID和密钥配置正确。
-                </div>
-              </div>
 
-              <!-- 部门 → 团队映射 -->
-              <div class="cfg-section">
-                <div class="cfg-section-title"><Icon name="user" /> 部门 → 团队映射</div>
+                <!-- 部门 → 团队映射（按组织） -->
+                <div class="cfg-section-title" style="margin-top:16px"><Icon name="user" /> 部门 → 团队映射</div>
                 <div class="map-table">
                   <div class="map-row head"><div>部门名称</div><div></div><div>默认角色</div><div>自动加入团队</div><div></div><div></div></div>
-                  <div v-for="m in wecomMappings" :key="m.id" class="map-row">
+                  <div v-for="m in (wecomMappingsByOrg[org.id] || [])" :key="m.id" class="map-row">
                     <div style="font-family:var(--monofont, var(--font-mono));font-size:11.5px">{{ m.source_value }}</div>
                     <div class="map-arrow">→</div>
                     <div><span class="map-pill role">{{ ROLE_NAME[m.default_role] || m.default_role }}</span></div>
                     <div><span class="map-pill team" :class="{ none: !m.auto_join_team_id }"><Icon v-if="m.auto_join_team_id" name="user" :size="11" /> {{ teamName(m.auto_join_team_id) }}</span></div>
                     <div></div>
-                    <div><button class="map-del" @click="deleteWecomMapping(m.id)" title="删除此映射"><Icon name="close" :size="13" /></button></div>
+                    <div><button class="map-del" @click="deleteWecomMapping(org.id, m.id)" title="删除此映射"><Icon name="close" :size="13" /></button></div>
                   </div>
                   <div class="map-row">
-                    <div><input class="cfg-input" style="font-size:11.5px" v-model="newWecomMap.source_value" placeholder="例如：研发部" /></div>
+                    <div><input class="cfg-input" style="font-size:11.5px" v-model="wecomMapDraft(org.id).source_value" placeholder="例如：研发部" /></div>
                     <div class="map-arrow">→</div>
-                    <div><select class="cfg-input" v-model="newWecomMap.default_role"><option value="member">成员</option><option value="team_admin">团队管理员</option><option value="viewer">只读</option></select></div>
-                    <div><select class="cfg-input" v-model="newWecomMap.auto_join_team_id"><option value="">不自动加入</option><option v-for="t in teamsOpt" :key="t.id" :value="t.id">{{ t.name }}</option></select></div>
+                    <div><select class="cfg-input" v-model="wecomMapDraft(org.id).default_role"><option value="member">成员</option><option value="team_admin">团队管理员</option><option value="viewer">只读</option></select></div>
+                    <div><select class="cfg-input" v-model="wecomMapDraft(org.id).auto_join_team_id"><option value="">不自动加入</option><option v-for="t in teamsOpt" :key="t.id" :value="t.id">{{ t.name }}</option></select></div>
                     <div></div>
-                    <div><button class="map-del" style="color:var(--accent-deep)" @click="addWecomMapping" title="添加映射"><Icon name="plus" :size="14" /></button></div>
+                    <div><button class="map-del" style="color:var(--accent-deep)" @click="addWecomMapping(org)" title="添加映射"><Icon name="plus" :size="14" /></button></div>
                   </div>
                 </div>
-                <div style="margin-top:10px;font-size:11px;color:var(--ink-mute);line-height:1.5">
-                  企业微信用户扫码登录后，Hermes 通过通讯录 API 拉取用户所在部门，按上表匹配并赋予角色、加入团队。
-                </div>
+              </div>
+
+              <button class="btn" style="margin-top:4px" @click="addWecomOrg"><Icon name="plus" :size="13" /> 添加组织</button>
+              <div style="margin-top:10px;font-size:11px;color:var(--ink-mute);line-height:1.5">
+                企业微信用户扫码登录后，Hermes 通过通讯录 API 拉取用户所在部门，按所属组织的映射表赋予角色、加入团队。点击右上角「保存」可统一保存所有组织配置。
               </div>
             </template>
 

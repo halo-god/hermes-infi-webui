@@ -119,6 +119,7 @@ class MappingOut(BaseModel):
 
     id: uuid.UUID
     provider_id: str
+    org_id: str | None = None
     match_basis: str
     source_value: str
     dept: str | None
@@ -127,6 +128,7 @@ class MappingOut(BaseModel):
 
 
 class MappingCreate(BaseModel):
+    org_id: str | None = None
     match_basis: str = "attribute"
     source_value: str
     dept: str | None = None

@@ -1900,6 +1900,28 @@
     display: flex; align-items: center; gap: 6px;
   }
   .cfg-section-title svg { width: 13px; height: 13px; color: var(--accent-deep); }
+  .wecom-org-card {
+    border: 1px solid var(--rule-soft);
+    border-radius: var(--r-md);
+    padding: 16px 18px;
+    background: var(--bg-plate);
+  }
+  .wecom-org-head {
+    display: flex; align-items: center; gap: 8px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--rule-soft);
+  }
+  .wecom-org-head svg { color: var(--accent-deep); }
+  .wecom-org-name { max-width: 280px; font-weight: 600; }
+  .wecom-org-id {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--ink-mute);
+    background: var(--surface);
+    border: 1px solid var(--rule-soft);
+    border-radius: 4px;
+    padding: 1px 6px;
+  }
   .cfg-grid {
     display: grid;
     grid-template-columns: 180px 1fr;

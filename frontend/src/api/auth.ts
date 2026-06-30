@@ -24,8 +24,12 @@ export const authApi = {
   async logout(refresh_token: string | null): Promise<void> {
     await http.post("/auth/logout", { refresh_token });
   },
-  async wecomAuthorize(): Promise<{ authorize_url: string }> {
-    const { data } = await http.get<{ authorize_url: string }>("/auth/wecom/authorize");
+  async wecomOrgs(): Promise<{ orgs: { id: string; name: string }[] }> {
+    const { data } = await http.get<{ orgs: { id: string; name: string }[] }>("/auth/wecom/orgs");
+    return data;
+  },
+  async wecomAuthorize(org?: string): Promise<{ authorize_url: string }> {
+    const { data } = await http.get<{ authorize_url: string }>("/auth/wecom/authorize", { params: org ? { org } : {} });
     return data;
   },
   async wecomExchange(code: string): Promise<{ access_token: string; refresh_token: string }> {

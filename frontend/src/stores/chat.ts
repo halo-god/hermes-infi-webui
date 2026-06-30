@@ -6,6 +6,7 @@ import { teamsApi } from "@/api/teams";
 import { mediaTicket, tokenStore } from "@/api/client";
 import { useStream } from "@/composables/useStream";
 import { registerStreamHandlers } from "@/stores/chatStream";
+import { useNotificationStore } from "@/stores/notifications";
 import type { ClarifyEntry, Conversation, ConversationFolder, Message, Team, WorkspaceFile, ConfirmationRequest, PlanEntry } from "@/types";
 import type { Profile } from "@/api/agents";
 
@@ -525,10 +526,20 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   async function cancel() {
-    if (activeId.value) await conversationsApi.cancel(activeId.value).catch(() => {});
-    // Close the SSE/WS stream immediately so the UI stops showing "generating"
-    // instead of waiting for the server to notice the disconnect.
+    const id = activeId.value;
+    // Optimistic UI first so the user gets instant feedback even before the
+    // cancel request round-trips: mark the in-flight message cancelled, drop
+    // the "generating" state (hides the stop button + sidebar 生成中 badge),
+    // and surface a toast.
+    for (const m of messages.value) {
+      if (m.status === "streaming") m.status = "cancelled";
+    }
+    streamingConvoId.value = null;
+    useNotificationStore().toast("已停止生成", "info");
+    // Close the SSE/WS stream immediately instead of waiting for the server to
+    // notice the disconnect.
     closeStream();
+    if (id) await conversationsApi.cancel(id).catch(() => {});
   }
 
   async function respondConfirmation(requestId: string, choice: string) {

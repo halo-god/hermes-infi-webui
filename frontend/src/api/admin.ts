@@ -53,8 +53,8 @@ export const adminApi = {
   ): Promise<IdentityProvider> {
     return (await http.patch<IdentityProvider>(`/admin/identity/${id}`, payload)).data;
   },
-  async mappings(pid: string): Promise<DeptMapping[]> {
-    return (await http.get<DeptMapping[]>(`/admin/identity/${pid}/mappings`)).data;
+  async mappings(pid: string, org?: string): Promise<DeptMapping[]> {
+    return (await http.get<DeptMapping[]>(`/admin/identity/${pid}/mappings`, { params: org ? { org } : {} })).data;
   },
   async addMapping(pid: string, payload: Partial<DeptMapping>): Promise<DeptMapping> {
     return (await http.post<DeptMapping>(`/admin/identity/${pid}/mappings`, payload)).data;
@@ -62,8 +62,8 @@ export const adminApi = {
   async deleteMapping(id: string): Promise<void> {
     await http.delete(`/admin/identity/mappings/${id}`);
   },
-  async testProvider(pid: string): Promise<{ ok: boolean; message: string }> {
-    return (await http.post(`/admin/identity/${pid}/test`)).data;
+  async testProvider(pid: string, org?: string): Promise<{ ok: boolean; message: string }> {
+    return (await http.post(`/admin/identity/${pid}/test`, null, { params: org ? { org } : {} })).data;
   },
   async togglePermission(perm_id: string, role: string, granted: boolean): Promise<void> {
     await http.patch("/admin/roles/permissions", { perm_id, role, granted });
