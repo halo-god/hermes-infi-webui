@@ -18,6 +18,60 @@ _WECOM_DEPT_URL = "https://qyapi.weixin.qq.com/cgi-bin/department/list"
 
 _TIMEOUT = 10
 
+# The implicit org synthesized from a legacy single-org config (top-level
+# corp_id/agent_id/... without an `orgs` list). It keeps the bare-userid
+# external_id fallback so users provisioned before multi-org still resolve.
+DEFAULT_ORG_ID = "default"
+
+# State sentinels emitted by older single-org authorize links.
+_STATE_SENTINELS = {"", "wecom", "wecom_silent"}
+
+_ORG_FIELDS = ("corp_id", "agent_id", "app_secret", "redirect_uri", "silent_redirect_uri")
+
+
+def normalize_orgs(config: dict | None) -> list[dict]:
+    """Return the configured WeCom orgs as a normalized list.
+
+    Supports both the new `config.orgs = [...]` shape and the legacy single
+    top-level config (treated as one implicit org with id ``default``).
+    """
+    config = config or {}
+    raw = config.get("orgs")
+    out: list[dict] = []
+    if isinstance(raw, list) and raw:
+        for i, o in enumerate(raw):
+            if not isinstance(o, dict):
+                continue
+            oid = (o.get("id") or "").strip() or (DEFAULT_ORG_ID if i == 0 else f"org{i}")
+            out.append({
+                "id": oid,
+                "name": (o.get("name") or "").strip() or "企业微信",
+                **{k: (o.get(k) or "").strip() for k in _ORG_FIELDS},
+            })
+        return out
+    # Legacy single-org config
+    if (config.get("corp_id") or "").strip():
+        out.append({
+            "id": DEFAULT_ORG_ID,
+            "name": (config.get("name") or "").strip() or "企业微信",
+            **{k: (config.get(k) or "").strip() for k in _ORG_FIELDS},
+        })
+    return out
+
+
+def get_org(config: dict | None, org_id: str | None) -> dict | None:
+    """Resolve a single org by id. Falls back to the first org for empty/legacy
+    state sentinels; returns None for an unknown explicit id."""
+    orgs = normalize_orgs(config)
+    if not orgs:
+        return None
+    if org_id and org_id not in _STATE_SENTINELS:
+        for o in orgs:
+            if o["id"] == org_id:
+                return o
+        return None
+    return orgs[0]
+
 
 def build_authorize_url(corp_id: str, agent_id: str, redirect_uri: str, state: str = "") -> str:
     """Build the WeCom OAuth authorize URL for QR scan login."""
@@ -98,8 +152,9 @@ async def authenticate(config: dict, code: str) -> IdentityInfo:
         name = data.get("name", userid)
         email = data.get("email", "")
         if not email:
-            # WeCom may return empty email; generate placeholder
-            email = f"{userid}@wecom.infiled.com"
+            # WeCom may return empty email; generate a placeholder namespaced by
+            # corp so the same userid across two orgs never collides on email.
+            email = f"{userid}@{corp_id}.wecom.infiled.com"
         department_ids = data.get("department", [])  # list of int dept IDs
 
         # Step 4: Resolve department name from first department ID
@@ -108,7 +163,10 @@ async def authenticate(config: dict, code: str) -> IdentityInfo:
             dept_name = await _resolve_department(client, access_token, department_ids[0])
 
     return IdentityInfo(
-        external_id=userid,
+        # Namespace by corp_id: a WeCom userid is only unique within one corp,
+        # so multi-org deployments must not let corp-B's "zhangsan" land on
+        # corp-A's account.
+        external_id=f"{corp_id}:{userid}",
         email=email.lower(),
         name=name,
         source="wecom",

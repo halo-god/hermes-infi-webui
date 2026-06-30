@@ -1109,6 +1109,9 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                     </div>
                   </template>
                 </div>
+                <div v-if="chat.messages[row.index].role === 'agent' && chat.messages[row.index].status === 'cancelled'" class="msg-cancelled-tag">
+                  <Icon name="stop" :size="11" /> 已停止生成
+                </div>
                 <!-- group: reactions + edited marker + hover actions -->
                 <template v-if="isGroup && !chat.messages[row.index].deleted_at">
                   <div v-if="reactionEntries(chat.messages[row.index]).length || chat.messages[row.index].edited_at" class="msg-reactions">
@@ -1281,6 +1284,17 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
   background: var(--accent-tint, rgba(184, 133, 42, 0.14));
 }
 .edited-tag { font-size: 11px; color: var(--ink-faint); margin-left: 2px; }
+.msg-cancelled-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 5px;
+  font-size: 11.5px;
+  color: var(--ink-faint);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 7px;
+}
 .group-actions {
   display: flex;
   align-items: center;

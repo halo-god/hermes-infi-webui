@@ -38,16 +38,17 @@ const form = reactive({
 });
 
 // WeCom OAuth popup flow
-const wecomLoading = ref(false);
+const wecomOrgs = ref<{ id: string; name: string }[]>([]);
+const wecomLoadingOrg = ref<string | null>(null);
 const wecomError = ref("");
 let wecomPopup: Window | null = null;
 let wecomListener: ((e: MessageEvent) => void) | null = null;
 
-async function startWecomOAuth() {
+async function startWecomOAuth(orgId?: string) {
   wecomError.value = "";
-  wecomLoading.value = true;
+  wecomLoadingOrg.value = orgId || "__loading__";
   try {
-    const { authorize_url } = await authApi.wecomAuthorize();
+    const { authorize_url } = await authApi.wecomAuthorize(orgId);
     // Open popup centered
     const w = 480, h = 640;
     const left = (window.innerWidth - w) / 2 + window.screenX;
@@ -77,18 +78,18 @@ async function startWecomOAuth() {
       if (wecomPopup?.closed) {
         clearInterval(poll);
         cleanupWecom();
-        wecomLoading.value = false;
+        wecomLoadingOrg.value = null;
       }
     }, 500);
   } catch (e) {
-    wecomLoading.value = false;
+    wecomLoadingOrg.value = null;
     const ax = e as AxiosError<{ detail?: string }>;
     wecomError.value = ax.response?.data?.detail || "企业微信登录未启用";
   }
 }
 
 function cleanupWecom() {
-  wecomLoading.value = false;
+  wecomLoadingOrg.value = null;
   if (wecomListener) {
     window.removeEventListener("message", wecomListener);
     wecomListener = null;
@@ -109,6 +110,13 @@ onMounted(async () => {
     providers.value = await authApi.providers();
   } catch {
     providers.value = [{ id: "local", label: "账号密码", enabled: true, kind: "local" }];
+  }
+
+  // Load the configured WeCom orgs so the tab can render one button per org.
+  if (providers.value.some((p) => p.id === "wecom" && p.enabled)) {
+    try {
+      wecomOrgs.value = (await authApi.wecomOrgs()).orgs;
+    } catch { /* WeCom not configured — single fallback button stays */ }
   }
 
   // Handle WeCom workbench callback (one-time exchange code in query string)
@@ -278,14 +286,30 @@ async function submit() {
                 <circle cx="27" cy="19.5" r="1.5" fill="#3a7a2a"/>
               </svg>
             </div>
+            <!-- One button per configured org (single org → one button). -->
+            <template v-if="wecomOrgs.length > 1">
+              <button
+                v-for="o in wecomOrgs"
+                :key="o.id"
+                class="login-submit"
+                style="margin-bottom:8px"
+                :class="{ busy: wecomLoadingOrg === o.id }"
+                :disabled="!!wecomLoadingOrg"
+                @click="startWecomOAuth(o.id)"
+              >
+                <span v-if="wecomLoadingOrg === o.id" class="login-spinner"></span>
+                {{ wecomLoadingOrg === o.id ? "等待扫码确认…" : `${o.name} · 扫码登录` }}
+              </button>
+            </template>
             <button
+              v-else
               class="login-submit"
-              :class="{ busy: wecomLoading }"
-              :disabled="wecomLoading"
-              @click="startWecomOAuth"
+              :class="{ busy: !!wecomLoadingOrg }"
+              :disabled="!!wecomLoadingOrg"
+              @click="startWecomOAuth(wecomOrgs[0]?.id)"
             >
-              <span v-if="wecomLoading" class="login-spinner"></span>
-              {{ wecomLoading ? "等待扫码确认…" : "企业微信扫码登录" }}
+              <span v-if="wecomLoadingOrg" class="login-spinner"></span>
+              {{ wecomLoadingOrg ? "等待扫码确认…" : "企业微信扫码登录" }}
             </button>
             <div class="login-wecom-tip">点击后将弹出企业微信扫码窗口，扫码授权即可登录。</div>
           </div>

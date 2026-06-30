@@ -272,7 +272,9 @@ export function registerStreamHandlers(
         m.content.merged.status = "complete";
       }
     }
-    if (document.hidden || !activeId.value) {
+    // A cancelled turn is not a "completion" — never fire the success
+    // notification for it (the cancel action already gave the user feedback).
+    if (ev.status !== "cancelled" && (document.hidden || !activeId.value)) {
       const ns = useNotificationStore();
       const text = (ev.text || m?.content?.text || "").slice(0, 80);
       ns.push({ title: t("stream.aiReplyComplete"), body: text || t("stream.clickToView"), kind: "success", link: `/?c=${activeId.value}` });

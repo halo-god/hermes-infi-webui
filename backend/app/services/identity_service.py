@@ -6,9 +6,10 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth_providers import wecom as _wecom
 from app.auth_providers.base import IdentityInfo, ProviderError
 from app.auth_providers.ldap import LDAPProvider
 from app.db.models.identity import DeptTeamMapping, IdentityProvider
@@ -49,22 +50,47 @@ async def update_provider(
             if k in _SECRET_KEYS and v == "" and existing.get(k):
                 continue  # keep existing secret if field was cleared
             merged[k] = v
+        # Per-org secret preservation for WeCom's `orgs` list: keep an org's
+        # existing app_secret when the admin saved without re-entering it.
+        if isinstance(merged.get("orgs"), list):
+            prev_orgs = {
+                o.get("id"): o
+                for o in (existing.get("orgs") or [])
+                if isinstance(o, dict) and o.get("id")
+            }
+            for o in merged["orgs"]:
+                if not isinstance(o, dict):
+                    continue
+                prev = prev_orgs.get(o.get("id")) or {}
+                if not (o.get("app_secret") or "").strip() and prev.get("app_secret"):
+                    o["app_secret"] = prev["app_secret"]
         p.config = merged
     await db.commit()
     await db.refresh(p)
     return p
 
 
-async def list_mappings(db: AsyncSession, provider_id: str) -> list[DeptTeamMapping]:
-    res = await db.execute(
-        select(DeptTeamMapping).where(DeptTeamMapping.provider_id == provider_id)
-    )
+async def list_mappings(
+    db: AsyncSession, provider_id: str, org_id: str | None = None
+) -> list[DeptTeamMapping]:
+    q = select(DeptTeamMapping).where(DeptTeamMapping.provider_id == provider_id)
+    if org_id is not None:
+        # The default/legacy org also owns rows with a NULL org_id (created
+        # before per-org mappings existed).
+        if org_id == _wecom.DEFAULT_ORG_ID:
+            q = q.where(
+                or_(DeptTeamMapping.org_id == org_id, DeptTeamMapping.org_id.is_(None))
+            )
+        else:
+            q = q.where(DeptTeamMapping.org_id == org_id)
+    res = await db.execute(q)
     return list(res.scalars().all())
 
 
 async def add_mapping(db: AsyncSession, provider_id: str, data: dict) -> DeptTeamMapping:
     m = DeptTeamMapping(
         provider_id=provider_id,
+        org_id=(data.get("org_id") or None),
         match_basis=data.get("match_basis", "attribute"),
         source_value=data["source_value"],
         dept=data.get("dept"),
@@ -99,13 +125,29 @@ def _match(info: IdentityInfo, mappings: list[DeptTeamMapping]) -> DeptTeamMappi
 
 
 async def provision_user(
-    db: AsyncSession, info: IdentityInfo, mappings: list[DeptTeamMapping]
+    db: AsyncSession,
+    info: IdentityInfo,
+    mappings: list[DeptTeamMapping],
+    legacy_external_id: str | None = None,
 ) -> User:
     # 1) by (source, external_id)
     res = await db.execute(
         select(User).where(User.source == info.source, User.external_id == info.external_id)
     )
     user = res.scalar_one_or_none()
+
+    # 1b) legacy fallback: users provisioned before external_id was namespaced
+    # by corp_id were stored under the bare userid. Only the default/legacy org
+    # passes this so a new org can never hijack an existing account.
+    if user is None and legacy_external_id:
+        res = await db.execute(
+            select(User).where(
+                User.source == info.source, User.external_id == legacy_external_id
+            )
+        )
+        user = res.scalar_one_or_none()
+        if user is not None:
+            user.external_id = info.external_id  # upgrade to namespaced id
 
     # 2) by email (link an existing local account)
     if user is None:
@@ -158,7 +200,7 @@ async def provision_user(
     return user
 
 
-async def test_provider(db: AsyncSession, pid: str) -> dict:
+async def test_provider(db: AsyncSession, pid: str, org_id: str | None = None) -> dict:
     """Test connectivity/credentials for an identity provider.
 
     Returns {"ok": bool, "message": str}.
@@ -171,7 +213,10 @@ async def test_provider(db: AsyncSession, pid: str) -> dict:
         return await asyncio.to_thread(LDAP.test_connection, p.config)
 
     if pid == "wecom":
-        return await _test_wecom(p.config)
+        org = _wecom.get_org(p.config, org_id)
+        if org is None:
+            return {"ok": False, "message": "未找到该企业微信组织配置"}
+        return await _test_wecom(org)
 
     return {"ok": False, "message": f"{pid} 连接测试暂未实现"}
 

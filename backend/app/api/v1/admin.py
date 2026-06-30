@@ -339,8 +339,8 @@ async def update_identity(
 
 
 @router.get("/identity/{pid}/mappings", response_model=list[MappingOut])
-async def list_mappings(pid: str, db: AsyncSession = Depends(get_db)):
-    return await identity_service.list_mappings(db, pid)
+async def list_mappings(pid: str, org: str | None = None, db: AsyncSession = Depends(get_db)):
+    return await identity_service.list_mappings(db, pid, org_id=org)
 
 
 @router.post("/identity/{pid}/mappings", response_model=MappingOut, status_code=201)
@@ -358,11 +358,12 @@ async def delete_mapping(mapping_id: uuid.UUID, db: AsyncSession = Depends(get_d
 @router.post("/identity/{pid}/test")
 async def test_identity(
     pid: str,
+    org: str | None = None,
     admin: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db),
 ):
     """Test connectivity and credential validity for an identity provider."""
-    return await identity_service.test_provider(db, pid)
+    return await identity_service.test_provider(db, pid, org_id=org)
 
 
 # ── MCP Server management ──
