@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import Date, DateTime, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -116,6 +116,9 @@ class TeamKnowledge(UUIDPrimaryKey, Timestamps, Base):
     uploaded_by_name: Mapped[str | None] = mapped_column(String(120))
     source_conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     source_message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    folder_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    is_folder: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class ProjectDoc(UUIDPrimaryKey, Timestamps, Base):
@@ -132,6 +135,8 @@ class ProjectDoc(UUIDPrimaryKey, Timestamps, Base):
     created_by_name: Mapped[str | None] = mapped_column(String(120))
     source_conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     source_message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    folder_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    is_folder: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
 class ProjectActivity(UUIDPrimaryKey, Timestamps, Base):

@@ -54,6 +54,7 @@ class Conversation(UUIDPrimaryKey, Timestamps, Base):
     # "personal" = 个人1:1对话, "group" = 群聊（多人+多Agent）
     primary_agent_id: Mapped[str] = mapped_column(String(64), default="hermes")
     active_agent_ids: Mapped[list] = mapped_column(JSONB, default=lambda: ["hermes"])
+    active_profile_ids: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     profile_id: Mapped[str | None] = mapped_column(String(64))
     acp_session_id: Mapped[str | None] = mapped_column(String(128))
     session_mode: Mapped[str | None] = mapped_column(String(32))
@@ -116,7 +117,7 @@ class GroupMember(UUIDPrimaryKey, Timestamps, Base):
     __tablename__ = "group_members"
     __table_args__ = (
         UniqueConstraint("conversation_id", "user_id", name="group_members_unique_user"),
-        UniqueConstraint("conversation_id", "agent_id", name="group_members_unique_agent"),
+        UniqueConstraint("conversation_id", "profile_id", name="group_members_unique_profile"),
     )
 
     conversation_id: Mapped[uuid.UUID] = mapped_column(
@@ -126,6 +127,9 @@ class GroupMember(UUIDPrimaryKey, Timestamps, Base):
     )
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True
+    )
+    profile_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("profiles.id", ondelete="SET NULL"), nullable=True
     )
     agent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     role: Mapped[str] = mapped_column(String(16), default="member", nullable=False)

@@ -30,10 +30,14 @@ class GroupMemberOut(BaseModel):
 
     id: uuid.UUID
     user_id: uuid.UUID | None = None
+    profile_id: uuid.UUID | None = None
     agent_id: str | None = None
     role: str
     joined_at: datetime
     user_name: str | None = None
+    profile_name: str | None = None  # resolved from Profile
+    profile_icon: str | None = None
+    profile_color: str | None = None
     last_read_at: datetime | None = None
     presence: str | None = None  # "online" | "offline"; assembled in route
 
@@ -89,6 +93,7 @@ class ConversationOut(BaseModel):
     type: str = "personal"
     primary_agent_id: str
     active_agent_ids: list[str]
+    active_profile_ids: list = Field(default_factory=list)
     profile_id: str | None
     team_id: uuid.UUID | None = None
     project_id: uuid.UUID | None = None

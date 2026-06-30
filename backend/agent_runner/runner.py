@@ -445,6 +445,10 @@ class Runner:
             from agent_runner.runner_scheduled import handle_scheduled
             await handle_scheduled(task, self.agents)
             return
+        if task.get("type") == "task_execution":
+            from agent_runner.runner_task_execution import handle_task_execution
+            await handle_task_execution(task, self.agents)
+            return
         await self.handle_single(task)
 
     # ── one prompt (single agent) ──

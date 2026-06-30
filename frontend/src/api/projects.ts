@@ -47,6 +47,9 @@ export const projectsApi = {
   async moveTaskStatus(taskId: string, status: string): Promise<Task> {
     return (await http.patch<Task>(`/tasks/${taskId}/status`, { status })).data;
   },
+  async executeTask(taskId: string, profileId: string): Promise<{ status: string; task_id: string; profile: string }> {
+    return (await http.post(`/tasks/${taskId}/execute`, { profile_id: profileId })).data;
+  },
   async tasksFromConversation(projectId: string, messageId: string): Promise<Task[]> {
     return (
       await http.post<Task[]>(`/projects/${projectId}/tasks/from-conversation`, {

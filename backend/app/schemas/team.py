@@ -70,6 +70,9 @@ class KnowledgeOut(BaseModel):
     kind: str
     size_bytes: int
     uploaded_by_name: str | None = None
+    folder_id: uuid.UUID | None = None
+    is_folder: bool = False
+    sort_order: int = 0
     created_at: datetime
 
 

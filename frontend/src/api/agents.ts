@@ -18,6 +18,7 @@ export interface Profile {
   skills?: string[];
   featured?: boolean;
   knowledge_ids?: string[];
+  knowledge_folder_ids?: string[];
 }
 
 export interface ScanResult {
@@ -70,6 +71,7 @@ export interface ProfileUpdate {
   skills?: string[];
   featured?: boolean;
   knowledge_ids?: string[];
+  knowledge_folder_ids?: string[];
 }
 
 export const agentsApi = {

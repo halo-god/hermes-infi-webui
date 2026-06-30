@@ -97,6 +97,9 @@ export const conversationsApi = {
   async extractItems(id: string): Promise<{ project_name: string; tasks: string[]; conversation_id: string; team_id: string | null }> {
     return (await http.post(`/conversations/${id}/extract-items`)).data;
   },
+  async detectTasks(id: string): Promise<{ transcript: string; prompt: string; agent_id: string }> {
+    return (await http.post(`/conversations/${id}/detect-tasks`)).data;
+  },
   async consolidateMessage(
     conversationId: string,
     messageId: string,

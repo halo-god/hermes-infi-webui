@@ -40,8 +40,14 @@ export const teamsApi = {
   async setSharedProfiles(id: string, profileIds: string[]): Promise<TeamDetail> {
     return (await http.put<TeamDetail>(`/teams/${id}/shared-profiles`, { profile_ids: profileIds })).data;
   },
-  async listKnowledge(id: string): Promise<Knowledge[]> {
-    return (await http.get<Knowledge[]>(`/teams/${id}/knowledge`)).data;
+  async listKnowledge(id: string, folderId?: string): Promise<Knowledge[]> {
+    return (await http.get<Knowledge[]>(`/teams/${id}/knowledge`, { params: folderId ? { folder_id: folderId } : {} })).data;
+  },
+  async createKnowledgeFolder(id: string, name: string, folderId?: string): Promise<Knowledge> {
+    return (await http.post<Knowledge>(`/teams/${id}/knowledge/folder`, { name, folder_id: folderId || null })).data;
+  },
+  async moveKnowledge(id: string, kid: string, folderId: string | null): Promise<void> {
+    await http.patch(`/teams/${id}/knowledge/${kid}/move`, { folder_id: folderId });
   },
   async clearChannel(id: string): Promise<void> {
     await http.delete(`/teams/${id}/channel/messages`);

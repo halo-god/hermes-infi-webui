@@ -213,6 +213,7 @@ export interface Conversation {
   type?: "personal" | "group";
   primary_agent_id: string;
   active_agent_ids: string[];
+  active_profile_ids: string[];
   profile_id: string | null;
   acp_session_id: string | null;
   session_mode?: string | null;
@@ -246,6 +247,10 @@ export interface GroupMember {
   id: string;
   user_id: string | null;
   user_name?: string;
+  profile_id: string | null;
+  profile_name?: string;
+  profile_icon?: string;
+  profile_color?: string;
   agent_id: string | null;
   role: "admin" | "member";
   joined_at: string;
@@ -379,6 +384,9 @@ export interface Knowledge {
   kind: string;
   size_bytes: number;
   uploaded_by_name: string | null;
+  folder_id: string | null;
+  is_folder: boolean;
+  sort_order: number;
   created_at?: string;
 }
 export interface ActivityItem {
@@ -451,6 +459,8 @@ export interface ProjectDoc {
   kind: string;
   size_bytes: number;
   created_by_name: string | null;
+  folder_id: string | null;
+  is_folder: boolean;
   created_at: string;
 }
 

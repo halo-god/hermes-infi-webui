@@ -931,6 +931,18 @@ async def extract_items(
     }
 
 
+@router.post("/{conversation_id}/detect-tasks")
+async def detect_tasks(
+    conversation_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Detect action items from conversation — returns transcript + prompt for the frontend to send."""
+    convo = await _require_convo(db, conversation_id, user)
+    result = await svc.detect_action_items(db, convo.id)
+    return result
+
+
 @router.post("/{conversation_id}/messages/{message_id}/consolidate")
 async def consolidate_message(
     conversation_id: uuid.UUID,
@@ -1114,9 +1126,18 @@ async def get_members(
     if convo.type != "group":
         raise HTTPException(status_code=400, detail="该会话不是群聊")
     members = await svc.get_group_members(db, conversation_id)
-    # Enrich with user names + live presence (online/offline).
+    # Enrich with user names + profile info + live presence.
     from app.db.models.user import User as UserModel
+    from app.db.models.agent import Profile as ProfileModel
     human_ids = [str(m.user_id) for m in members if m.user_id]
+    profile_ids = [m.profile_id for m in members if m.profile_id]
+    # Batch-load profiles.
+    profile_map: dict = {}
+    if profile_ids:
+        prof_rows = (await db.execute(
+            select(ProfileModel).where(ProfileModel.id.in_(profile_ids))
+        )).scalars().all()
+        profile_map = {p.id: p for p in prof_rows}
     presence = await redis_core.presence_status(human_ids) if human_ids else {}
     result = []
     for m in members:
@@ -1126,6 +1147,12 @@ async def get_members(
             if u:
                 data["user_name"] = u.name or u.email or str(m.user_id)[:8]
             data["presence"] = presence.get(str(m.user_id), "offline")
+        if m.profile_id:
+            p = profile_map.get(m.profile_id)
+            if p:
+                data["profile_name"] = p.name
+                data["profile_icon"] = p.icon or "sparkle"
+                data["profile_color"] = p.color or "#b8852a"
         result.append(data)
     return result
 

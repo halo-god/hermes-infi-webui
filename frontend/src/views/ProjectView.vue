@@ -10,11 +10,13 @@ import { projectsApi } from "@/api/projects";
 import { teamsApi } from "@/api/teams";
 import { agentsApi } from "@/api/agents";
 import { useChatStore } from "@/stores/chat";
+import { useNotificationStore } from "@/stores/notifications";
 import type { Agent, Member, Project, ProjectActivity, Task } from "@/types";
 
 const route = useRoute();
 const router = useRouter();
 const chat = useChatStore();
+const ns = useNotificationStore();
 const projectId = route.params.id as string;
 
 const project = ref<(Project & import("@/types").ProjectDetail) | null>(null);
@@ -179,6 +181,30 @@ async function applyStatus(t: Task, next: string) {
   } catch {
     t.status = prev;
     syncProgressLocal();
+    ns.toast("更新失败", "error");
+  }
+}
+
+async function executeTaskWithProfile(t: Task) {
+  // Prompt user to select a profile
+  const profileNames = chat.profiles.filter((p) => p.is_active).map((p) => `${p.name} (${p.default_agent_id})`).join("\n");
+  const choice = window.prompt(`选择助手执行任务「${t.title}」：\n\n${profileNames}\n\n输入助手序号（从1开始）：`);
+  if (!choice) return;
+  const idx = parseInt(choice, 10) - 1;
+  const activeProfiles = chat.profiles.filter((p) => p.is_active);
+  if (isNaN(idx) || idx < 0 || idx >= activeProfiles.length) {
+    ns.toast("无效的选择", "error");
+    return;
+  }
+  const profile = activeProfiles[idx];
+  try {
+    ns.toast(`正在用 ${profile.name} 执行任务…`);
+    await projectsApi.executeTask(t.id, profile.id);
+    t.status = "doing";
+    syncProgressLocal();
+    ns.toast("任务已提交执行");
+  } catch {
+    ns.toast("执行失败", "error");
   }
 }
 
@@ -366,6 +392,7 @@ async function removeProject() {
             <div class="row-actions">
               <button class="row-act" title="在项目群聊中讨论此任务" @click="discussTask(t)"><Icon name="chat" :size="13" /></button>
               <button class="row-act accent" title="交给助手处理" @click="taskToAI(t)"><Icon name="sparkle" :size="13" /></button>
+              <button class="row-act" title="指定助手执行" @click="executeTaskWithProfile(t)"><Icon name="bolt" :size="13" /></button>
               <button class="row-act" title="重命名" @click="startEditTask(t)"><Icon name="copy" :size="13" /></button>
               <button class="row-act danger" title="删除" @click="deleteTask(t)"><Icon name="close" :size="13" /></button>
             </div>

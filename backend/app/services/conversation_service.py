@@ -559,24 +559,100 @@ _KNOWLEDGE_PER_ITEM = 2000   # chars per bound knowledge entry
 _KNOWLEDGE_TOTAL = 8000      # chars across all entries
 
 
-async def _build_knowledge_prompt(db: AsyncSession, profile: Profile | None) -> str | None:
-    """Inject the content of a Profile's bound knowledge entries into the prompt.
+async def _collect_folder_knowledge_ids(
+    db: AsyncSession, folder_ids: list[str]
+) -> list[uuid.UUID]:
+    """Recursively collect all non-folder item IDs under the given folder IDs.
 
-    Full-text concatenation (truncated) of the linked team_knowledge / project_docs,
-    so the assistant can reuse knowledge consolidated from prior conversations.
+    Works for both TeamKnowledge and ProjectDoc tables.
     """
-    if not profile or not getattr(profile, "knowledge_ids", None):
+    from app.db.models.team import TeamKnowledge, ProjectDoc
+
+    result: list[uuid.UUID] = []
+    seen_folders: set[uuid.UUID] = set()
+
+    async def _recurse(fids: list[uuid.UUID]):
+        for fid in fids:
+            if fid in seen_folders:
+                continue
+            seen_folders.add(fid)
+            # TeamKnowledge children
+            tk_rows = (await db.execute(
+                select(TeamKnowledge).where(
+                    TeamKnowledge.folder_id == fid,
+                    TeamKnowledge.is_folder.is_(False),
+                )
+            )).scalars().all()
+            for r in tk_rows:
+                result.append(r.id)
+            # ProjectDoc children
+            pd_rows = (await db.execute(
+                select(ProjectDoc).where(
+                    ProjectDoc.folder_id == fid,
+                    ProjectDoc.is_folder.is_(False),
+                )
+            )).scalars().all()
+            for r in pd_rows:
+                result.append(r.id)
+            # Recurse into sub-folders (both tables)
+            tk_sub = (await db.execute(
+                select(TeamKnowledge.id).where(
+                    TeamKnowledge.folder_id == fid,
+                    TeamKnowledge.is_folder.is_(True),
+                )
+            )).scalars().all()
+            pd_sub = (await db.execute(
+                select(ProjectDoc.id).where(
+                    ProjectDoc.folder_id == fid,
+                    ProjectDoc.is_folder.is_(True),
+                )
+            )).scalars().all()
+            await _recurse(list(tk_sub) + list(pd_sub))
+
+    valid_ids = []
+    for fid_str in folder_ids:
+        try:
+            valid_ids.append(uuid.UUID(str(fid_str)))
+        except (ValueError, TypeError):
+            continue
+    await _recurse(valid_ids)
+    return result
+
+
+async def _build_knowledge_prompt(db: AsyncSession, profile: Profile | None) -> str | None:
+    """Inject the content of a Profile's bound knowledge into the prompt.
+
+    Supports both:
+    - knowledge_ids: individual item IDs (backward compat)
+    - knowledge_folder_ids: folder IDs — all items under these folders are injected
+    """
+    if not profile:
         return None
     from app.db.models.team import ProjectDoc, TeamKnowledge
 
-    parts: list[str] = []
-    used = 0
-    for kid in profile.knowledge_ids:
+    # Collect all knowledge IDs to load
+    all_ids: list[uuid.UUID] = []
+
+    # 1. Direct item bindings (backward compat)
+    for kid in (getattr(profile, "knowledge_ids", None) or []):
         try:
-            kuid = uuid.UUID(str(kid))
+            all_ids.append(uuid.UUID(str(kid)))
         except (ValueError, TypeError):
             continue
-        entry = await db.get(TeamKnowledge, kuid) or await db.get(ProjectDoc, kuid)
+
+    # 2. Folder bindings — recursively collect all items under folders
+    folder_ids = getattr(profile, "knowledge_folder_ids", None) or []
+    if folder_ids:
+        folder_item_ids = await _collect_folder_knowledge_ids(db, folder_ids)
+        all_ids.extend(folder_item_ids)
+
+    if not all_ids:
+        return None
+
+    parts: list[str] = []
+    used = 0
+    for kid in all_ids:
+        entry = await db.get(TeamKnowledge, kid) or await db.get(ProjectDoc, kid)
         if entry is None or not getattr(entry, "content", None):
             continue
         body = entry.content[:_KNOWLEDGE_PER_ITEM]
@@ -801,6 +877,7 @@ async def create_group(
 
     # If team_id, auto-populate members + agents from team
     channel_mode = "mention"
+    profile_pairs: list[tuple[str, str]] = []  # (profile_id, agent_id)
     if team_id:
         team = await db.get(Team, team_id)
         if team:
@@ -811,17 +888,28 @@ async def create_group(
                     select(TM.user_id).where(TM.team_id == team_id)
                 )
                 member_user_ids = [row[0] for row in res.all()]
-            # Auto-add team shared agents (resolve from shared_profile_ids).
+            # Auto-add team shared profiles (resolve from shared_profile_ids).
             if not member_agent_ids:
-                member_agent_ids = await _resolve_team_agents(db, team)
+                profile_pairs = await _resolve_team_profiles(db, team)
 
-    agent_ids = member_agent_ids or ["hermes"]
+    # Fallback: if no profiles resolved and no explicit agents, use default.
+    if not profile_pairs and not member_agent_ids:
+        profile_pairs = [(str(uuid.uuid4()), "hermes")]
+
+    # If explicit agent_ids were passed (no profiles), convert to pairs.
+    if not profile_pairs and member_agent_ids:
+        profile_pairs = [(str(uuid.uuid4()), aid) for aid in member_agent_ids]
+
+    agent_ids = [aid for _pid, aid in profile_pairs]
+    profile_ids = [pid for pid, _aid in profile_pairs]
+
     convo = Conversation(
         title=title,
         owner_id=owner_id,
         type="group",
-        primary_agent_id=agent_ids[0],
+        primary_agent_id=agent_ids[0] if agent_ids else "hermes",
         active_agent_ids=agent_ids,
+        active_profile_ids=profile_ids,
         team_id=team_id,
         channel_mode=channel_mode,
         visibility="private" if not team_id else "team",
@@ -847,13 +935,19 @@ async def create_group(
                 role="member",
             ))
 
-    # Add agent members
-    for aid in agent_ids:
-        db.add(GroupMember(
+    # Add agent members (with profile_id when available)
+    for pid, aid in profile_pairs:
+        gm = GroupMember(
             conversation_id=convo.id,
             agent_id=aid,
             role="member",
-        ))
+        )
+        # Only set profile_id if it's a real UUID (not the synthetic placeholder)
+        try:
+            gm.profile_id = uuid.UUID(pid)
+        except (ValueError, TypeError):
+            pass
+        db.add(gm)
 
     await db.commit()
     await db.refresh(convo)
@@ -1402,11 +1496,13 @@ async def _team_member_ids(db: AsyncSession, team_id: uuid.UUID) -> list[uuid.UU
     return [row[0] for row in res.all()]
 
 
-async def _resolve_team_agents(db: AsyncSession, team) -> list[str]:
-    """Resolve shared Profile ids → agent ids for team dispatch (batch query).
+async def _resolve_team_profiles(db: AsyncSession, team) -> list[tuple[str, str]]:
+    """Resolve shared Profile ids → (profile_id, agent_id) pairs for team dispatch.
 
-    Only shared_profile_ids is consulted (shared_agents column was dropped).
-    Falls back to ["hermes"] when no profiles are shared or none resolve.
+    Does NOT deduplicate by agent_id — each shared Profile is kept independently
+    so that multiple profiles with the same default_agent_id are all included
+    (they may have different system_prompt/model/icon/color).
+    Falls back to [(None, "hermes")] when no profiles are shared.
     """
     pids_raw = [pid for pid in (team.shared_profile_ids or []) if pid]
     valid_uuids = []
@@ -1416,13 +1512,19 @@ async def _resolve_team_agents(db: AsyncSession, team) -> list[str]:
         except (ValueError, TypeError):
             continue
     if not valid_uuids:
-        return ["hermes"]
+        return [(str(uuid.uuid4()), "hermes")]  # synthetic placeholder for default
     result = await db.execute(select(Profile).where(Profile.id.in_(valid_uuids)))
-    agent_ids: list[str] = []
+    pairs: list[tuple[str, str]] = []
     for p in result.scalars().all():
-        if p.default_agent_id and p.default_agent_id not in agent_ids:
-            agent_ids.append(p.default_agent_id)
-    return agent_ids or ["hermes"]
+        if p.default_agent_id:
+            pairs.append((str(p.id), p.default_agent_id))
+    return pairs or [(str(uuid.uuid4()), "hermes")]
+
+
+# Backward-compatible alias for callers that only need agent_ids.
+async def _resolve_team_agents(db: AsyncSession, team) -> list[str]:
+    pairs = await _resolve_team_profiles(db, team)
+    return [agent_id for _pid, agent_id in pairs]
 
 
 async def sync_group_membership(
@@ -1431,32 +1533,77 @@ async def sync_group_membership(
     *,
     human_user_ids: list[uuid.UUID],
     agent_ids: list[str],
+    profile_pairs: list[tuple[str, str]] | None = None,
 ) -> None:
-    """把群成员与团队/项目成员集做差量增删；admin 成员保留。"""
+    """把群成员与团队/项目成员集做差量增删；admin 成员保留。
+
+    When profile_pairs is provided, agent members are synced by profile_id
+    (allows multiple profiles with the same agent_id).
+    """
     members = await get_group_members(db, convo.id)
     existing_users = {m.user_id for m in members if m.user_id}
-    existing_agents = {m.agent_id for m in members if m.agent_id}
+    existing_profile_ids = {m.profile_id for m in members if m.profile_id}
     desired_users = set(human_user_ids)
-    desired_agents = set(agent_ids)
     changed = False
+
+    # Desired profile set (from pairs)
+    desired_profile_set: set[uuid.UUID] = set()
+    if profile_pairs:
+        for pid, _aid in profile_pairs:
+            try:
+                desired_profile_set.add(uuid.UUID(pid))
+            except (ValueError, TypeError):
+                pass
 
     for uid in desired_users - existing_users:
         db.add(GroupMember(conversation_id=convo.id, user_id=uid, role="member"))
         changed = True
-    for aid in desired_agents - existing_agents:
-        db.add(GroupMember(conversation_id=convo.id, agent_id=aid, role="member"))
-        changed = True
+
+    # Add agent members — deduplicate by profile_id (not agent_id)
+    if profile_pairs:
+        for pid, aid in profile_pairs:
+            try:
+                puid = uuid.UUID(pid)
+            except (ValueError, TypeError):
+                continue  # skip synthetic placeholders in sync
+            if puid not in existing_profile_ids and puid not in desired_profile_set:
+                # Already added in this loop? No — desired_profile_set has it.
+                pass
+            if puid in existing_profile_ids:
+                continue
+            gm = GroupMember(conversation_id=convo.id, agent_id=aid, role="member")
+            gm.profile_id = puid
+            db.add(gm)
+            changed = True
+    else:
+        existing_agent_keys = {m.agent_id for m in members if m.agent_id}
+        desired_agent_keys = set(agent_ids)
+        for aid in desired_agent_keys - existing_agent_keys:
+            db.add(GroupMember(conversation_id=convo.id, agent_id=aid, role="member"))
+            changed = True
+
+    # Remove agent members no longer desired
+    desired_agent_set = set(agent_ids)
     for m in members:
         if m.user_id and m.user_id not in desired_users and m.role != "admin":
             await db.delete(m)
             changed = True
-        elif m.agent_id and m.agent_id not in desired_agents:
-            await db.delete(m)
-            changed = True
+        elif m.agent_id:
+            # If we have profile_pairs, remove by profile_id; else by agent_id
+            if profile_pairs and m.profile_id:
+                if m.profile_id not in desired_profile_set:
+                    await db.delete(m)
+                    changed = True
+            elif not profile_pairs:
+                if m.agent_id not in desired_agent_set:
+                    await db.delete(m)
+                    changed = True
 
     if changed:
-        if desired_agents:
-            convo.active_agent_ids = list(desired_agents)
+        if agent_ids:
+            convo.active_agent_ids = agent_ids
+        if profile_pairs:
+            convo.active_profile_ids = [pid for pid, _aid in profile_pairs]
         await db.commit()
         await redis_core.publish_event(str(convo.id), {"type": "members_changed"})
 
@@ -1485,15 +1632,18 @@ async def get_or_create_team_group(
     human_ids = await _team_member_ids(db, team.id)
     if owner_id not in human_ids:
         human_ids.append(owner_id)
-    agents = await _resolve_team_agents(db, team)
+    pairs = await _resolve_team_profiles(db, team)
+    agents = [aid for _pid, aid in pairs]
+    profile_ids = [pid for pid, _aid in pairs]
 
     if convo is None:
         convo = Conversation(
             title=f"{team.name} · 群聊",
             owner_id=owner_id,
             type="group",
-            primary_agent_id=agents[0],
+            primary_agent_id=agents[0] if agents else "hermes",
             active_agent_ids=agents,
+            active_profile_ids=profile_ids,
             team_id=team.id,
             channel_mode=team.channel_mode or "mention",
             visibility="team",
@@ -1505,7 +1655,7 @@ async def get_or_create_team_group(
         await db.commit()
         await db.refresh(convo)
 
-    await sync_group_membership(db, convo, human_user_ids=human_ids, agent_ids=agents)
+    await sync_group_membership(db, convo, human_user_ids=human_ids, agent_ids=agents, profile_pairs=pairs)
     return convo
 
 
@@ -1529,24 +1679,28 @@ async def get_or_create_project_group(
             continue
     if owner_id not in human_ids:
         human_ids.append(owner_id)
-    # Resolve pinned Profile ids → agent ids for project dispatch.
-    agents: list[str] = []
+    # Resolve pinned Profile ids → (profile_id, agent_id) pairs for project dispatch.
+    pairs: list[tuple[str, str]] = []
     for pid in (project.pinned_profile_ids or []):
         try:
             p = await db.get(Profile, uuid.UUID(pid))
         except (ValueError, TypeError):
             continue
-        if p and p.default_agent_id and p.default_agent_id not in agents:
-            agents.append(p.default_agent_id)
-    agents = agents or ["hermes"]
+        if p and p.default_agent_id:
+            pairs.append((str(p.id), p.default_agent_id))
+    if not pairs:
+        pairs = [(str(uuid.uuid4()), "hermes")]
+    agents = [aid for _pid, aid in pairs]
+    profile_ids = [pid for pid, _aid in pairs]
 
     if convo is None:
         convo = Conversation(
             title=f"{project.name} · 群聊",
             owner_id=owner_id,
             type="group",
-            primary_agent_id=agents[0],
+            primary_agent_id=agents[0] if agents else "hermes",
             active_agent_ids=agents,
+            active_profile_ids=profile_ids,
             team_id=project.team_id,
             project_id=project.id,
             channel_mode="mention",
@@ -1558,7 +1712,7 @@ async def get_or_create_project_group(
         await db.commit()
         await db.refresh(convo)
 
-    await sync_group_membership(db, convo, human_user_ids=human_ids, agent_ids=agents)
+    await sync_group_membership(db, convo, human_user_ids=human_ids, agent_ids=agents, profile_pairs=pairs)
     return convo
 
 
@@ -1679,3 +1833,83 @@ async def auto_create_tasks_from_message(
             snippet=f"新增 {len(created)} 个任务", actor_id=actor.id if actor else None,
         )
     return created
+
+
+async def detect_action_items(
+    db: AsyncSession, conversation_id: uuid.UUID
+) -> dict:
+    """Send a special prompt to the agent asking it to extract action items
+    from the conversation. Returns the agent's text response for the frontend
+    to parse and confirm."""
+    convo = await db.get(Conversation, conversation_id)
+    if not convo:
+        raise ValueError("conversation not found")
+
+    msgs = await get_messages(db, conversation_id, limit=20)
+    if not msgs:
+        return {"text": "", "items": []}
+
+    # Build a transcript of recent messages
+    transcript = []
+    for m in msgs:
+        role = "用户" if m.role == "user" else "助手"
+        text = (m.content or {}).get("text", "")
+        if text:
+            transcript.append(f"{role}: {text[:300]}")
+
+    prompt = (
+        "分析以上对话，提取所有待办事项、决策和截止日期。\n"
+        "以 JSON 格式输出，格式如下：\n"
+        '{"tasks":[{"title":"任务标题","priority":"normal","deadline":null}],"decisions":["决策1"]}\n'
+        "只输出 JSON，不要加其他文字。如果没有待办，返回 {\"tasks\":[],\"decisions\":[]}"
+    )
+
+    # Use the conversation's primary agent to process
+    agent_id = convo.primary_agent_id or "hermes"
+    # For simplicity, we just return the transcript + prompt and let the frontend
+    # send it as a regular message to get the AI response.
+    return {
+        "transcript": "\n".join(transcript),
+        "prompt": prompt,
+        "agent_id": agent_id,
+    }
+
+
+async def execute_task_with_profile(
+    db: AsyncSession,
+    task_id: uuid.UUID,
+    profile_id: uuid.UUID,
+    actor_id: uuid.UUID,
+) -> dict:
+    """Execute a project task using the specified profile via the agent runner.
+
+    Enqueues a 'task_execution' prompt that the runner picks up and executes.
+    """
+    from app.db.models.team import ProjectTask
+    from app.core import redis as redis_core
+
+    task = await db.get(ProjectTask, task_id)
+    if not task:
+        raise ValueError("task not found")
+
+    profile = await db.get(Profile, profile_id)
+    if not profile:
+        raise ValueError("profile not found")
+
+    prompt_text = f"请执行以下任务：\n标题：{task.title}\n描述：{task.description or '无'}"
+
+    await redis_core.enqueue_prompt({
+        "type": "task_execution",
+        "task_id": str(task.id),
+        "user_id": str(actor_id),
+        "agent_id": profile.default_agent_id,
+        "profile_id": str(profile.id),
+        "prompt": prompt_text,
+        "system_prompt": profile.system_prompt or "",
+    })
+
+    # Mark task as in-progress
+    task.status = "doing"
+    await db.commit()
+
+    return {"status": "enqueued", "task_id": str(task_id), "profile": profile.name}

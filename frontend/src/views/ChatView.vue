@@ -140,6 +140,20 @@ const primaryProfile = computed(() => {
 const isGroup = computed(() => activeConvo.value?.type === "group");
 const groupAgents = computed(() => {
   if (!isGroup.value || !activeConvo.value) return [];
+  // Prefer active_profile_ids (each profile is independent, even if same agent_id).
+  const profileIds = activeConvo.value.active_profile_ids || [];
+  if (profileIds.length) {
+    return profileIds.map((pid) => {
+      const p = chat.profiles.find((pp) => pp.id === pid);
+      return {
+        agent_id: p?.default_agent_id || "hermes",
+        name: p?.name || "助手",
+        color: p?.color || branding.accent,
+        icon: p?.icon || "sparkle",
+      };
+    });
+  }
+  // Fallback: resolve from active_agent_ids (backward compat for old data).
   return (activeConvo.value.active_agent_ids || []).map((aid) => {
     const p = chat.profiles.find((pp) => pp.default_agent_id === aid);
     return {
@@ -334,6 +348,17 @@ async function deriveTasks(msg: Message) {
     projectTasks.value = await projectsApi.tasks(pid).catch(() => projectTasks.value);
     ns.toast(`已生成 ${created.length} 个任务`);
   } catch { ns.toast("生成任务失败（需相应权限）"); }
+}
+
+async function detectTasks() {
+  if (!chat.activeId) return;
+  try {
+    const result = await conversationsApi.detectTasks(chat.activeId);
+    // Send the transcript + prompt as a regular message to get AI analysis
+    const fullText = result.transcript + "\n\n" + result.prompt;
+    await chat.send(fullText, result.agent_id, {});
+    ns.toast("已发送智能提取请求，等待 AI 分析…");
+  } catch { ns.toast("提取失败", "error"); }
 }
 
 function onComposerTyping() {
@@ -1127,6 +1152,7 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                   <button v-if="canConsolidate && activeConvo?.project_id" title="沉淀为项目文档" @click="consolidateOutput(chat.messages[row.index], 'project_doc')"><Icon name="doc" :size="12" /></button>
                   <button v-if="canConsolidate && activeConvo?.team_id" title="沉淀为团队知识" @click="consolidateOutput(chat.messages[row.index], 'team_knowledge')"><Icon name="pin" :size="12" /></button>
                   <button v-if="canConsolidate && activeConvo?.project_id" title="从此消息生成任务" @click="deriveTasks(chat.messages[row.index])"><Icon name="check" :size="12" /></button>
+                  <button v-if="isGroup" title="智能提取待办" @click="detectTasks"><Icon name="sparkle" :size="12" /></button>
                 </div>
                 <!-- Smart follow-up suggestion chips -->
                 <div v-if="chat.features.followup_chips && chat.messages[row.index].role === 'agent' && chat.messages[row.index].status !== 'streaming' && chat.messages[row.index].content.text" class="followup-chips">

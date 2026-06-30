@@ -348,10 +348,22 @@ async def set_shared_profiles(
 # ── knowledge ──
 @router.get("/teams/{team_id}/knowledge", response_model=list[KnowledgeOut])
 async def list_knowledge(
-    team_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    team_id: uuid.UUID,
+    folder_id: uuid.UUID | None = Query(None),
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
 ):
+    """List knowledge items. If folder_id given, only items in that folder.
+    If folder_id is None, returns root-level items (folder_id IS NULL)."""
+    from app.db.models.team import TeamKnowledge
     await svc.require_membership(db, team_id, user.id)
-    return await svc.list_knowledge(db, team_id)
+    stmt = select(TeamKnowledge).where(TeamKnowledge.team_id == team_id)
+    if folder_id is not None:
+        stmt = stmt.where(TeamKnowledge.folder_id == folder_id)
+    else:
+        stmt = stmt.where(TeamKnowledge.folder_id.is_(None))
+    stmt = stmt.order_by(TeamKnowledge.is_folder.desc(), TeamKnowledge.sort_order, TeamKnowledge.created_at)
+    rows = (await db.execute(stmt)).scalars().all()
+    return [KnowledgeOut.model_validate(k) for k in rows]
 
 
 @router.post("/teams/{team_id}/knowledge", response_model=KnowledgeOut, status_code=201)
@@ -361,6 +373,50 @@ async def add_knowledge(
 ):
     await svc.require_permission(db, team_id, user.id, "knowledge.upload")
     return await svc.add_knowledge(db, team_id, payload, user)
+
+
+@router.post("/teams/{team_id}/knowledge/folder", response_model=KnowledgeOut, status_code=201)
+async def create_knowledge_folder(
+    team_id: uuid.UUID, payload: dict,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """Create a knowledge folder (directory)."""
+    from app.db.models.team import TeamKnowledge
+    await svc.require_permission(db, team_id, user.id, "knowledge.upload")
+    name = (payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="目录名不能为空")
+    parent_id = payload.get("folder_id")
+    folder = TeamKnowledge(
+        team_id=team_id,
+        name=name,
+        kind="folder",
+        is_folder=True,
+        folder_id=uuid.UUID(parent_id) if parent_id else None,
+        uploaded_by=user.id,
+        uploaded_by_name=user.name,
+    )
+    db.add(folder)
+    await db.commit()
+    await db.refresh(folder)
+    return KnowledgeOut.model_validate(folder)
+
+
+@router.patch("/teams/{team_id}/knowledge/{kid}/move")
+async def move_knowledge(
+    team_id: uuid.UUID, kid: uuid.UUID, payload: dict,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """Move a knowledge item to a different folder."""
+    from app.db.models.team import TeamKnowledge
+    await svc.require_permission(db, team_id, user.id, "knowledge.upload")
+    item = await db.get(TeamKnowledge, kid)
+    if item is None or item.team_id != team_id:
+        raise HTTPException(status_code=404, detail="知识条目不存在")
+    target_folder = payload.get("folder_id")  # None = root
+    item.folder_id = uuid.UUID(target_folder) if target_folder else None
+    await db.commit()
+    return {"status": "ok"}
 
 
 @router.delete("/teams/{team_id}/knowledge/{kid}", status_code=204)
@@ -790,6 +846,35 @@ async def tasks_from_conversation(
     return await conv_svc.auto_create_tasks_from_message(
         db, message=message, project=proj, actor=user
     )
+
+
+@router.post("/tasks/{task_id}/execute")
+async def execute_task(
+    task_id: uuid.UUID, payload: dict,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """Execute a task with the specified profile via the agent runner."""
+    from app.services import conversation_service as conv_svc
+    from app.db.models.team import ProjectTask
+
+    profile_id = payload.get("profile_id")
+    if not profile_id:
+        raise HTTPException(status_code=400, detail="缺少 profile_id")
+
+    task = await db.get(ProjectTask, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    await _project_with_perm(db, task.project_id, user, "task.move")
+
+    try:
+        result = await conv_svc.execute_task_with_profile(
+            db, task_id=uuid.UUID(str(task_id)),
+            profile_id=uuid.UUID(str(profile_id)),
+            actor_id=user.id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return result
 
 
 @router.get("/projects/{project_id}/activity", response_model=list[ActivityOut])
