@@ -52,14 +52,15 @@ export const conversationsApi = {
   async unshare(id: string): Promise<void> {
     await http.patch(`/conversations/${id}`, { visibility: "private" });
   },
-  async send(id: string, text: string, opts?: { profileId?: string; fileIds?: string[]; skipAgent?: boolean }): Promise<SendResponse> {
-    const { fileIds, skipAgent, profileId, ...restOpts } = opts || {};
+  async send(id: string, text: string, opts?: { profileId?: string; fileIds?: string[]; skipAgent?: boolean; taskId?: string }): Promise<SendResponse> {
+    const { fileIds, skipAgent, profileId, taskId, ...restOpts } = opts || {};
     return (await http.post<SendResponse>(`/conversations/${id}/messages`, {
       text,
       ...restOpts,
       profile_id: profileId || null,
       attached_file_ids: fileIds || [],
       skip_agent: skipAgent || false,
+      task_id: taskId || null,
     })).data;
   },
   async cancel(id: string): Promise<void> {
@@ -95,6 +96,15 @@ export const conversationsApi = {
   },
   async extractItems(id: string): Promise<{ project_name: string; tasks: string[]; conversation_id: string; team_id: string | null }> {
     return (await http.post(`/conversations/${id}/extract-items`)).data;
+  },
+  async consolidateMessage(
+    conversationId: string,
+    messageId: string,
+    data: { target: "project_doc" | "team_knowledge"; name: string; project_id?: string; team_id?: string },
+  ): Promise<{ id: string; name: string; target: string }> {
+    return (
+      await http.post(`/conversations/${conversationId}/messages/${messageId}/consolidate`, data)
+    ).data;
   },
   async getMessages(id: string, params?: { limit?: number; before?: string }): Promise<Message[]> {
     return (await http.get<Message[]>(`/conversations/${id}/messages`, { params: params || {} })).data;

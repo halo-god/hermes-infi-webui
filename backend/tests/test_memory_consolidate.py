@@ -17,7 +17,7 @@ from app.config import settings
 from app.core import redis as R
 from app.core.security import create_token
 from app.db.models.user import User
-from agent_runner.runner import _message_excerpt, parse_memory_json, trim_memory_to_budget
+from agent_runner.runner_memory import _message_excerpt, parse_memory_json, trim_memory_to_budget
 
 
 @pytest_asyncio.fixture(autouse=True)

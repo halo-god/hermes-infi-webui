@@ -45,3 +45,5 @@ class Profile(UUIDPrimaryKey, Timestamps, Base):
     system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     skills: Mapped[str | None] = mapped_column(Text, nullable=True)   # JSON array e.g. '["coding","analysis"]'
     featured: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Bound team_knowledge / project_docs ids — their content is injected into system_prompt.
+    knowledge_ids: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)

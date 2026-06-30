@@ -58,6 +58,7 @@ from app.schemas.conversation import (
     WorkspaceFileVersionOut,
 )
 from app.db.models.conversation import ConversationFolder
+from app.schemas.team import ConsolidateRequest
 from app.services import conversation_service as svc
 
 router = APIRouter()
@@ -457,6 +458,7 @@ async def send_message(
             skip_agent=payload.skip_agent,
             profile_id_override=payload.profile_id,
             reply_to_id=payload.reply_to_id,
+            task_id=payload.task_id,
         )
     else:
         user_msg, agent_msg = await svc.dispatch(
@@ -465,6 +467,7 @@ async def send_message(
             owner_id=user.id,
             skip_agent=payload.skip_agent,
             profile_id_override=payload.profile_id,
+            task_id=payload.task_id,
         )
 
     return SendMessageResponse(
@@ -634,6 +637,13 @@ async def conversation_ws(
                             reply_to_id = uuid.UUID(str(reply_raw))
                         except (ValueError, TypeError):
                             reply_to_id = None
+                    task_raw = payload.get("task_id")
+                    task_id = None
+                    if task_raw:
+                        try:
+                            task_id = uuid.UUID(str(task_raw))
+                        except (ValueError, TypeError):
+                            task_id = None
                     # Use a fresh DB session for each message to avoid detached instances.
                     # The initial `db` session is invalid after the first await in the loop.
                     async with async_session_maker() as msg_db:
@@ -644,9 +654,13 @@ async def conversation_ws(
                                 msg_db, c, text, mentions,
                                 attached_file_ids=file_ids, owner_id=user_id,
                                 profile_id_override=p_id, reply_to_id=reply_to_id,
+                                task_id=task_id,
                             )
                         elif c:
-                            await svc.dispatch(msg_db, c, text, attached_file_ids=file_ids, owner_id=user_id, profile_id_override=p_id)
+                            await svc.dispatch(
+                                msg_db, c, text, attached_file_ids=file_ids, owner_id=user_id,
+                                profile_id_override=p_id, task_id=task_id,
+                            )
             elif action == "cancel":
                 await redis_core.request_cancel(cid)
     except WebSocketDisconnect:
@@ -915,6 +929,51 @@ async def extract_items(
         "conversation_id": str(convo.id),
         "team_id": str(convo.team_id) if convo.team_id else None,
     }
+
+
+@router.post("/{conversation_id}/messages/{message_id}/consolidate")
+async def consolidate_message(
+    conversation_id: uuid.UUID,
+    message_id: uuid.UUID,
+    payload: ConsolidateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Archive a message's text into a project doc or team knowledge (closed loop)."""
+    from app.services import team_service
+
+    convo = await _require_convo(db, conversation_id, user)
+    message = await svc.get_message(db, message_id)
+    if message is None or message.conversation_id != convo.id:
+        raise HTTPException(status_code=404, detail="消息不存在")
+
+    project = None
+    team = None
+    if payload.target == "project_doc":
+        if not payload.project_id:
+            raise HTTPException(status_code=400, detail="缺少 project_id")
+        project = await team_service.get_project(db, payload.project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="项目不存在")
+        await team_service.require_permission(db, project.team_id, user.id, "conversation.consolidate")
+    elif payload.target == "team_knowledge":
+        if not payload.team_id:
+            raise HTTPException(status_code=400, detail="缺少 team_id")
+        from app.db.models.team import Team
+        team = await db.get(Team, payload.team_id)
+        if team is None:
+            raise HTTPException(status_code=404, detail="团队不存在")
+        await team_service.require_permission(db, team.id, user.id, "conversation.consolidate")
+        if convo.project_id:
+            project = await team_service.get_project(db, convo.project_id)
+    else:
+        raise HTTPException(status_code=400, detail="target 必须为 project_doc 或 team_knowledge")
+
+    entry = await svc.consolidate_message(
+        db, message=message, target=payload.target, name=payload.name,
+        actor=user, project=project, team=team,
+    )
+    return {"id": str(entry.id), "name": entry.name, "target": payload.target}
 
 
 # ── ACP session control endpoints ──

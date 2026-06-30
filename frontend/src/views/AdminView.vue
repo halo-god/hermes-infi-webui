@@ -11,6 +11,7 @@ import { brandingApi } from "@/api/branding";
 import { http } from "@/api/client";
 import { fmtDate } from "@/utils/format";
 import { agentsApi, profilesApi, type Profile, type ProfileCreate } from "@/api/agents";
+import { teamsApi } from "@/api/teams";
 import { useAuthStore } from "@/stores/auth";
 import { useBrandingStore } from "@/stores/branding";
 import { usePresence } from "@/composables/usePresence";
@@ -436,11 +437,29 @@ const scanMsg = ref("");
 const hermesVersion = ref("");
 const showProfileForm = ref(false);
 const editingProfileId = ref<string | null>(null);
-const profileForm = reactive<ProfileCreate>({
+const profileForm = reactive<ProfileCreate & { knowledge_ids: string[] }>({
   name: "", handle: "", scope: "global", color: "#b8852a",
   icon: "sparkle", desc: "", default_model: "hermes-4", team_id: null,
-  system_prompt: null, skills: [], featured: false,
+  system_prompt: null, skills: [], featured: false, knowledge_ids: [],
 });
+// Selectable knowledge entries (team knowledge, labeled by team) for prompt injection.
+const knowledgeOptions = ref<{ id: string; label: string }[]>([]);
+async function loadKnowledgeOptions() {
+  const opts: { id: string; label: string }[] = [];
+  for (const t of teamsOpt.value) {
+    try {
+      const ks = await teamsApi.listKnowledge(t.id);
+      for (const k of ks) opts.push({ id: k.id, label: `${t.name} · ${k.name}` });
+    } catch { /* skip teams without access */ }
+  }
+  knowledgeOptions.value = opts;
+}
+function toggleKnowledge(id: string) {
+  const arr = profileForm.knowledge_ids;
+  const i = arr.indexOf(id);
+  if (i >= 0) arr.splice(i, 1);
+  else arr.push(id);
+}
 const skillInput = ref("");
 const profileSaving = ref(false);
 const profileError = ref("");
@@ -497,11 +516,12 @@ function openCreateProfile() {
   Object.assign(profileForm, {
     name: "", handle: "", scope: "global", color: "#b8852a",
     icon: "sparkle", desc: "", default_model: "hermes-4", team_id: null,
-    system_prompt: null, skills: [], featured: false,
+    system_prompt: null, skills: [], featured: false, knowledge_ids: [],
   });
   skillInput.value = "";
   profileError.value = "";
   showProfileForm.value = true;
+  loadKnowledgeOptions();
 }
 function openEditProfile(p: Profile) {
   editingProfileId.value = p.id;
@@ -509,10 +529,12 @@ function openEditProfile(p: Profile) {
     name: p.name, handle: p.handle, scope: p.scope, color: p.color,
     icon: p.icon, desc: p.desc, default_model: p.default_model, team_id: p.team_id,
     system_prompt: p.system_prompt ?? null, skills: [...(p.skills || [])], featured: p.featured ?? false,
+    knowledge_ids: [...(p.knowledge_ids || [])],
   });
   skillInput.value = "";
   profileError.value = "";
   showProfileForm.value = true;
+  loadKnowledgeOptions();
 }
 function addSkill() {
   const s = skillInput.value.trim();
@@ -534,6 +556,7 @@ async function saveProfile() {
         icon: profileForm.icon, desc: profileForm.desc, default_model: profileForm.default_model,
         team_id: profileForm.team_id, system_prompt: profileForm.system_prompt,
         skills: profileForm.skills, featured: profileForm.featured,
+        knowledge_ids: profileForm.knowledge_ids,
       });
     } else {
       await profilesApi.create({ ...profileForm });
@@ -1281,6 +1304,17 @@ async function confirmImport() {
                 <button type="button" style="background:none;border:none;cursor:pointer;padding:0;color:inherit;line-height:1;font-size:12px" @click="removeSkill(s)">&times;</button>
               </span>
               <input v-model="skillInput" placeholder="输入技能 + Enter" @keydown.enter.prevent="addSkill" style="padding:2px 8px;border:1px solid var(--rule);border-radius:999px;font-size:12px;background:var(--bg-canvas);color:var(--ink);outline:none;min-width:120px" />
+            </div>
+          </label>
+          <!-- knowledge binding (injected into system_prompt) -->
+          <label class="text-mute-sm" style="display:block;margin-top:12px">
+            绑定知识库（其正文将注入助手上下文供复用）
+            <div v-if="!knowledgeOptions.length" style="margin-top:6px;font-size:12px;color:var(--ink-mute)">暂无可绑定的团队知识。</div>
+            <div v-else style="margin-top:6px;max-height:160px;overflow-y:auto;border:1px solid var(--rule);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:4px">
+              <label v-for="k in knowledgeOptions" :key="k.id" style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;color:var(--ink)">
+                <input type="checkbox" :checked="profileForm.knowledge_ids.includes(k.id)" @change="toggleKnowledge(k.id)" style="width:13px;height:13px;cursor:pointer" />
+                {{ k.label }}
+              </label>
             </div>
           </label>
           <!-- featured toggle -->

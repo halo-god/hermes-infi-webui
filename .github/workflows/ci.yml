@@ -70,11 +70,23 @@ jobs:
           REDIS_URL: redis://localhost:6379
         run: alembic upgrade head
 
+      - name: Seed super-admin
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://hermes:test@localhost:5432/hermes_test
+          REDIS_URL: redis://localhost:6379
+          FIRST_ADMIN_PASSWORD: Hermes@2026
+        run: python -m app.seed
+
       - name: Run tests
         working-directory: backend
         env:
           DATABASE_URL: postgresql+asyncpg://hermes:test@localhost:5432/hermes_test
           REDIS_URL: redis://localhost:6379
+          FIRST_ADMIN_PASSWORD: Hermes@2026
+          # Tests share one Redis for the whole run and log in as the same admin
+          # many times; the per-IP login guard (default 10/min) would trip a 429.
+          LOGIN_RATE_LIMIT_PER_MIN: "100000"
         run: pytest -x -q
 
   # ── 前端检查 ──

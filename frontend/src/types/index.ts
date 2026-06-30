@@ -200,6 +200,7 @@ export interface Message {
   usage?: { input_tokens: number; output_tokens: number; context_size?: number; context_used?: number };
   reply_to_id?: string | null;
   reply_to?: ReplyRef | null;
+  task_id?: string | null;
   edited_at?: string | null;
   deleted_at?: string | null;
   reactions?: Record<string, string[]>;
@@ -452,6 +453,17 @@ export interface ProjectDoc {
   created_by_name: string | null;
   created_at: string;
 }
+
+export interface ProjectActivity {
+  id: string;
+  project_id: string;
+  actor_id: string | null;
+  actor_name: string | null;
+  kind: string;
+  summary: string;
+  meta: Record<string, unknown>;
+  created_at: string;
+}
 export interface ProjectDetail extends Project {
   members: Member[];
   docs: ProjectDoc[];
@@ -466,6 +478,9 @@ export interface Task {
   owner_id: string | null;
   agent_id: string | null;
   order_idx: number;
+  description?: string | null;
+  source_conversation_id?: string | null;
+  source_message_id?: string | null;
   created_at: string;
 }
 
@@ -496,6 +511,7 @@ export interface Feedback {
   reply: string | null;
   replied_by: string | null;
   replied_at: string | null;
+  images: string[];
   created_at: string;
   updated_at: string;
 }

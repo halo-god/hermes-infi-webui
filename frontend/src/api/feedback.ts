@@ -5,7 +5,7 @@ export const feedbackApi = {
   async list(params?: { status?: string; category?: string; limit?: number }): Promise<Feedback[]> {
     return (await http.get<Feedback[]>("/feedback", { params })).data;
   },
-  async create(payload: { title: string; content: string; category?: string }): Promise<Feedback> {
+  async create(payload: { title: string; content: string; category?: string; images?: string[] }): Promise<Feedback> {
     return (await http.post<Feedback>("/feedback", payload)).data;
   },
   async get(id: number): Promise<Feedback> {

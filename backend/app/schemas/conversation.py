@@ -74,6 +74,7 @@ class MessageOut(BaseModel):
     created_at: datetime
     reply_to_id: uuid.UUID | None = None
     reply_to: ReplyRef | None = None  # 路由内手工组装，避免懒加载
+    task_id: uuid.UUID | None = None
     edited_at: datetime | None = None
     deleted_at: datetime | None = None
     reactions: dict = Field(default_factory=dict)  # {emoji: [user_id_str, ...]}
@@ -140,6 +141,7 @@ class SendMessageRequest(BaseModel):
     mentions: list[str] = Field(default_factory=list)
     profile_id: str | None = None  # override conversation's default profile
     reply_to_id: uuid.UUID | None = None
+    task_id: uuid.UUID | None = None  # "针对某任务讨论" — link this message to a ProjectTask
 
 
 class MarkReadResponse(BaseModel):

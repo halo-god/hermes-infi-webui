@@ -95,6 +95,9 @@ class ProjectTask(UUIDPrimaryKey, Timestamps, Base):
     )
     agent_id: Mapped[str | None] = mapped_column(String(64))
     order_idx: Mapped[int] = mapped_column(Integer, default=0)
+    description: Mapped[str | None] = mapped_column(Text)
+    source_conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    source_message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 
     project: Mapped["Project"] = relationship(back_populates="tasks")
 
@@ -111,6 +114,8 @@ class TeamKnowledge(UUIDPrimaryKey, Timestamps, Base):
     content: Mapped[str | None] = mapped_column(Text)
     uploaded_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     uploaded_by_name: Mapped[str | None] = mapped_column(String(120))
+    source_conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    source_message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 
 
 class ProjectDoc(UUIDPrimaryKey, Timestamps, Base):
@@ -122,4 +127,29 @@ class ProjectDoc(UUIDPrimaryKey, Timestamps, Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     kind: Mapped[str] = mapped_column(String(16), default="doc")
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    content: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     created_by_name: Mapped[str | None] = mapped_column(String(120))
+    source_conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    source_message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+
+
+class ProjectActivity(UUIDPrimaryKey, Timestamps, Base):
+    __tablename__ = "project_activity"
+    __table_args__ = (
+        Index("ix_project_activity_project", "project_id"),
+        Index("ix_project_activity_team_created", "team_id", "created_at"),
+    )
+
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE")
+    )
+    team_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE")
+    )
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    actor_name: Mapped[str | None] = mapped_column(String(120))
+    # task.created|task.moved|task.done|doc.created|knowledge.created|task.derived
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    meta: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -47,19 +48,13 @@ async def list_conversations(
     if pinned_only:
         stmt = stmt.where(Conversation.pinned.is_(True))
     if q:
-        # Use PostgreSQL full-text search for better performance on large datasets
-        # Falls back to LIKE for simple prefix matching
-        if len(q) >= 2:
-            # Full-text search with tsvector
-            tsquery = func.plainto_tsquery("simple", q)
-            stmt = stmt.where(
-                func.to_tsvector("simple", func.coalesce(Conversation.title, "")).match(
-                    tsquery, postgresql_regconfig="simple"
-                )
-            )
-        else:
-            # Short queries: use case-insensitive prefix match
-            stmt = stmt.where(Conversation.title.ilike(f"{q}%"))
+        # Case-insensitive substring match on title. Postgres full-text search
+        # (to_tsvector/plainto_tsquery with the 'simple' config) can't do
+        # substring matching and has no CJK word segmentation, so a query like
+        # "关键词" never matches a title "唯一关键词". ILIKE '%q%' gives correct
+        # substring semantics across languages; title is short so it's cheap.
+        like = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        stmt = stmt.where(Conversation.title.ilike(f"%{like}%"))
     stmt = stmt.order_by(Conversation.pinned.desc(), Conversation.updated_at.desc())
     # Bound the query — a user with thousands of conversations must not pull
     # them all in one request. Callers page with limit/offset.
@@ -299,6 +294,7 @@ async def send_user_only(
     text: str,
     attached_file_ids: list[str] | None = None,
     owner_id: uuid.UUID | None = None,
+    task_id: uuid.UUID | None = None,
 ) -> tuple[Message, None]:
     """Save a user message without triggering agent (for channel mention mode)."""
     user_msg = Message(
@@ -307,6 +303,7 @@ async def send_user_only(
         role="user",
         content={"text": text},
         status="complete",
+        task_id=task_id,
     )
     db.add(user_msg)
     if convo.title == "新会话":
@@ -357,6 +354,7 @@ async def send_message(
     existing_user_msg: Message | None = None,
     profile_dir: str | None = None,
     agent_id_override: str | None = None,
+    task_id: uuid.UUID | None = None,
 ) -> tuple[Message, Message]:
     """Persist the user turn + an empty streaming agent turn, then enqueue ACP work.
 
@@ -387,6 +385,7 @@ async def send_message(
             role="user",
             content=user_content,
             status="complete",
+            task_id=task_id,
         )
         db.add(user_msg)
     else:
@@ -468,6 +467,7 @@ async def send_roundtable(
     mentions: list[str] | None = None,
     profile_dir: str | None = None,
     existing_user_msg: Message | None = None,
+    task_id: uuid.UUID | None = None,
 ) -> tuple[Message, Message]:
     """Multi-agent turn: one roundtable message holding per-agent replies + a
     synthesized merge. The runner streams each reply in parallel, then merges.
@@ -484,7 +484,7 @@ async def send_roundtable(
                 for f in attached
             ]
         user_msg = Message(
-            conversation_id=convo.id, owner_id=owner_id, role="user", content=user_content, mentions=mentions or [], status="complete"
+            conversation_id=convo.id, owner_id=owner_id, role="user", content=user_content, mentions=mentions or [], status="complete", task_id=task_id
         )
     else:
         user_msg = existing_user_msg
@@ -555,6 +555,47 @@ async def _build_memory_prompt(db: AsyncSession, owner_id: uuid.UUID | None) -> 
     )
 
 
+_KNOWLEDGE_PER_ITEM = 2000   # chars per bound knowledge entry
+_KNOWLEDGE_TOTAL = 8000      # chars across all entries
+
+
+async def _build_knowledge_prompt(db: AsyncSession, profile: Profile | None) -> str | None:
+    """Inject the content of a Profile's bound knowledge entries into the prompt.
+
+    Full-text concatenation (truncated) of the linked team_knowledge / project_docs,
+    so the assistant can reuse knowledge consolidated from prior conversations.
+    """
+    if not profile or not getattr(profile, "knowledge_ids", None):
+        return None
+    from app.db.models.team import ProjectDoc, TeamKnowledge
+
+    parts: list[str] = []
+    used = 0
+    for kid in profile.knowledge_ids:
+        try:
+            kuid = uuid.UUID(str(kid))
+        except (ValueError, TypeError):
+            continue
+        entry = await db.get(TeamKnowledge, kuid) or await db.get(ProjectDoc, kuid)
+        if entry is None or not getattr(entry, "content", None):
+            continue
+        body = entry.content[:_KNOWLEDGE_PER_ITEM]
+        if used + len(body) > _KNOWLEDGE_TOTAL:
+            body = body[: max(0, _KNOWLEDGE_TOTAL - used)]
+        if not body:
+            break
+        parts.append(f"[{entry.name}]\n{body}")
+        used += len(body)
+        if used >= _KNOWLEDGE_TOTAL:
+            break
+    if not parts:
+        return None
+    return (
+        "【团队知识库】请在回答时参考以下资料，不要向用户复述这段说明：\n"
+        + "\n\n".join(parts)
+    )
+
+
 async def dispatch(
     db: AsyncSession,
     convo: Conversation,
@@ -563,11 +604,14 @@ async def dispatch(
     owner_id: uuid.UUID | None = None,
     skip_agent: bool = False,
     profile_id_override: str | None = None,
+    task_id: uuid.UUID | None = None,
 ) -> tuple[Message, Message | None]:
     """Route to single or roundtable based on the conversation's active agents."""
     agents = list(convo.active_agent_ids or [convo.primary_agent_id])
     if skip_agent:
-        return await send_user_only(db, convo, text, attached_file_ids=attached_file_ids, owner_id=owner_id)
+        return await send_user_only(
+            db, convo, text, attached_file_ids=attached_file_ids, owner_id=owner_id, task_id=task_id
+        )
 
     # Load profile system_prompt — request-level override wins over conversation default
     system_prompt: str | None = None
@@ -578,6 +622,12 @@ async def dispatch(
         if profile:
             system_prompt = profile.system_prompt or None
             profile_dir = _profile_dir(profile)
+            # Inject the Profile's bound knowledge-base content (reuse loop)
+            knowledge_prompt = await _build_knowledge_prompt(db, profile)
+            if knowledge_prompt:
+                system_prompt = (
+                    f"{system_prompt}\n\n{knowledge_prompt}" if system_prompt else knowledge_prompt
+                )
 
     # Inject the user's long-term agent memory into system_prompt
     memory_prompt = await _build_memory_prompt(db, owner_id)
@@ -593,12 +643,12 @@ async def dispatch(
         return await send_roundtable(
             db, convo, text, agents,
             attached_file_ids=attached_file_ids, owner_id=owner_id,
-            system_prompt=system_prompt, profile_dir=profile_dir,
+            system_prompt=system_prompt, profile_dir=profile_dir, task_id=task_id,
         )
     return await send_message(
         db, convo, text,
         attached_file_ids=attached_file_ids, owner_id=owner_id,
-        system_prompt=system_prompt, profile_dir=profile_dir,
+        system_prompt=system_prompt, profile_dir=profile_dir, task_id=task_id,
     )
 
 
@@ -1035,6 +1085,7 @@ async def message_to_event_dict(db: AsyncSession, msg: Message) -> dict:
         "created_at": msg.created_at.isoformat() if msg.created_at else None,
         "reply_to_id": str(msg.reply_to_id) if msg.reply_to_id else None,
         "reply_to": await _build_reply_ref(db, msg.reply_to_id),
+        "task_id": str(msg.task_id) if msg.task_id else None,
         "edited_at": msg.edited_at.isoformat() if msg.edited_at else None,
         "deleted_at": msg.deleted_at.isoformat() if msg.deleted_at else None,
         "reactions": msg.reactions or {},
@@ -1083,6 +1134,7 @@ async def _persist_group_user_msg(
     *,
     attached_file_ids: list[str] | None = None,
     reply_to_id: uuid.UUID | None = None,
+    task_id: uuid.UUID | None = None,
 ) -> Message:
     """持久化群聊用户消息（统一入口，附带文件 + 回复引用）。"""
     attached = await _resolve_attached_files(db, attached_file_ids or [], conversation_id=str(convo.id))
@@ -1097,6 +1149,7 @@ async def _persist_group_user_msg(
         mentions=mentions or [],
         reply_to_id=reply_to_id,
         status="complete",
+        task_id=task_id,
     )
     db.add(user_msg)
     if convo.title == "新会话":
@@ -1116,6 +1169,7 @@ async def dispatch_group(
     skip_agent: bool = False,
     profile_id_override: str | None = None,
     reply_to_id: uuid.UUID | None = None,
+    task_id: uuid.UUID | None = None,
 ) -> tuple[Message, Message | None]:
     """群聊消息路由：按 channel_mode + mentions 决定走人→人 / 人→机 / 圆桌。
 
@@ -1137,7 +1191,7 @@ async def dispatch_group(
     # 始终先落库 + 广播人类消息
     user_msg = await _persist_group_user_msg(
         db, convo, text, mentions, owner_id,
-        attached_file_ids=attached_file_ids, reply_to_id=reply_to_id,
+        attached_file_ids=attached_file_ids, reply_to_id=reply_to_id, task_id=task_id,
     )
     await _publish_user_message(db, convo, user_msg, resolved)
 
@@ -1506,3 +1560,122 @@ async def get_or_create_project_group(
 
     await sync_group_membership(db, convo, human_user_ids=human_ids, agent_ids=agents)
     return convo
+
+
+# ── closed-loop: consolidate conversation output → knowledge / tasks ──
+_TASK_LINE_RE = re.compile(r"^\s*(?:\d+[\.\)、]|\*|-|·|•)\s+(.+)$")
+
+
+def _parse_task_lines(text: str) -> list[str]:
+    """Extract bullet/numbered list items as candidate task titles (deduped, capped).
+
+    Shared by the extract-items endpoint and auto_create_tasks_from_message.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in (text or "").splitlines():
+        m = _TASK_LINE_RE.match(line.strip())
+        if not m:
+            continue
+        title = m.group(1).strip()
+        title = title.strip("*` ").rstrip(":：")
+        if not (3 <= len(title) <= 120):
+            continue
+        key = title[:50].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(title)
+        if len(out) >= 20:
+            break
+    return out
+
+
+async def get_message(db: AsyncSession, message_id: uuid.UUID) -> Message | None:
+    return await db.get(Message, message_id)
+
+
+async def consolidate_message(
+    db: AsyncSession,
+    *,
+    message: Message,
+    target: str,
+    name: str,
+    actor,
+    project=None,
+    team=None,
+):
+    """Archive a message's text into a ProjectDoc or TeamKnowledge with source tracing."""
+    from app.schemas.team import DocCreate, KnowledgeCreate
+    from app.services import team_service
+
+    text = (message.content or {}).get("text", "") or ""
+    size = len(text.encode("utf-8"))
+
+    if target == "project_doc":
+        if project is None:
+            raise ValueError("project required for project_doc target")
+        payload = DocCreate(name=name, kind="doc", size_bytes=size, content=text)
+        payload.source_conversation_id = message.conversation_id
+        payload.source_message_id = message.id
+        doc = await team_service.add_doc(db, project.id, payload, actor)
+        await team_service.log_activity(
+            db, project=project, actor=actor, kind="doc.created",
+            summary=f"沉淀了会话产出为文档「{name}」",
+            meta={"doc_id": str(doc.id), "source_message_id": str(message.id)},
+        )
+        await team_service.notify_project_members(
+            db, project, title=project.name, snippet=f"新文档：{name}",
+            actor_id=actor.id if actor else None,
+        )
+        return doc
+
+    if target == "team_knowledge":
+        if team is None:
+            raise ValueError("team required for team_knowledge target")
+        payload = KnowledgeCreate(name=name, kind="doc", size_bytes=size, content=text)
+        k = await team_service.add_knowledge(db, team.id, payload, actor)
+        k.source_conversation_id = message.conversation_id
+        k.source_message_id = message.id
+        await db.commit()
+        await db.refresh(k)
+        if project is not None:
+            await team_service.log_activity(
+                db, project=project, actor=actor, kind="knowledge.created",
+                summary=f"沉淀了会话产出为团队知识「{name}」",
+                meta={"knowledge_id": str(k.id), "source_message_id": str(message.id)},
+            )
+        return k
+
+    raise ValueError(f"unknown consolidate target: {target}")
+
+
+async def auto_create_tasks_from_message(
+    db: AsyncSession, *, message: Message, project, actor
+) -> list:
+    """Parse a message's bullet list into ProjectTasks (source-traced) + log activity."""
+    from app.schemas.team import TaskCreate
+    from app.services import team_service
+
+    text = (message.content or {}).get("text", "") or ""
+    titles = _parse_task_lines(text)
+    created = []
+    for title in titles:
+        payload = TaskCreate(title=title)
+        payload.source_conversation_id = message.conversation_id
+        payload.source_message_id = message.id
+        task = await team_service.create_task(db, project.id, payload)
+        created.append(task)
+    if created:
+        await team_service.recompute_progress(db, project)
+        await db.commit()
+        await team_service.log_activity(
+            db, project=project, actor=actor, kind="task.derived",
+            summary=f"从会话生成了 {len(created)} 个任务",
+            meta={"count": len(created), "source_message_id": str(message.id)},
+        )
+        await team_service.notify_project_members(
+            db, project, title=project.name,
+            snippet=f"新增 {len(created)} 个任务", actor_id=actor.id if actor else None,
+        )
+    return created
