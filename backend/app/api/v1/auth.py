@@ -228,12 +228,32 @@ async def wecom_silent(org: str = "", db: AsyncSession = Depends(get_db)):
     """
     from app.auth_providers.wecom import build_silent_authorize_url, get_org
 
+    from app.auth_providers.wecom import normalize_orgs
+
     provider = await db.get(IdentityProvider, "wecom")
     if provider is None or not provider.enabled:
         return Response(
             content="<html><body><h3>企业微信登录未启用</h3><p>请联系管理员。</p></body></html>",
             media_type="text/html; charset=utf-8",
             status_code=403,
+        )
+
+    orgs = normalize_orgs(provider.config)
+    # Multi-org safety: do NOT auto-fallback to the first org when org param is
+    # missing — that causes a Huizhou user to be authenticated against Shenzhen
+    # corp_id, which returns openid instead of UserId.
+    if not org and len(orgs) > 1:
+        return Response(
+            content=(
+                "<html><body><h3>企业微信多组织配置错误</h3>"
+                "<p>当前存在多个企业微信组织配置，但应用主页 URL 缺少 <code>?org=ORG_ID</code> 参数。</p>"
+                "<p>请管理员在企业微信后台 → 应用管理 → 应用主页 中修改为带组织 ID 的地址，例如：</p>"
+                "<ul>"
+                + "".join(f'<li><code>https://hermes.infiled.com/api/v1/auth/wecom/silent?org={o["id"]}</code> （{o["name"]}）</li>' for o in orgs)
+                + "</ul></body></html>"
+            ),
+            media_type="text/html; charset=utf-8",
+            status_code=400,
         )
 
     org_cfg = get_org(provider.config, org)
