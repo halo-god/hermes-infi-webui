@@ -8,7 +8,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -51,5 +51,7 @@ class WorkspaceFileVersion(UUIDPrimaryKey, Base):
     version_num: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[str | None] = mapped_column(Text)
     size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
-    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
     author: Mapped[str | None] = mapped_column(String(64))

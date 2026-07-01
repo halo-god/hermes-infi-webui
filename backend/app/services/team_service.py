@@ -17,9 +17,11 @@ from app.db.models.team import (
     Project,
     ProjectActivity,
     ProjectDoc,
+    ProjectDocVersion,
     ProjectTask,
     Team,
     TeamKnowledge,
+    TeamKnowledgeVersion,
     TeamMember,
 )
 from app.db.models.user import User
@@ -367,17 +369,69 @@ async def delete_knowledge(db: AsyncSession, team_id: uuid.UUID, kid: uuid.UUID)
         await db.commit()
 
 
+_KB_VERSION_CAP = 10  # keep only the latest N historical versions
+
+
 async def update_knowledge(
-    db: AsyncSession, team_id: uuid.UUID, kid: uuid.UUID, data
+    db: AsyncSession, team_id: uuid.UUID, kid: uuid.UUID, data, author: str | None = None
 ) -> TeamKnowledge | None:
     k = await db.get(TeamKnowledge, kid)
     if k is None or k.team_id != team_id:
         return None
-    for f, v in data.model_dump(exclude_unset=True).items():
+    fields = data.model_dump(exclude_unset=True)
+    if "content" in fields and fields["content"] != k.content and k.content:
+        ver = TeamKnowledgeVersion(
+            team_knowledge_id=k.id, version_num=k.current_version,
+            content=k.content, size_bytes=k.size_bytes, author=author,
+        )
+        db.add(ver)
+        old = (await db.execute(
+            select(TeamKnowledgeVersion)
+            .where(TeamKnowledgeVersion.team_knowledge_id == k.id)
+            .order_by(TeamKnowledgeVersion.version_num.desc())
+            .offset(_KB_VERSION_CAP)
+        )).scalars().all()
+        for o in old:
+            await db.delete(o)
+        k.current_version += 1
+    for f, v in fields.items():
         setattr(k, f, v)
     await db.commit()
     await db.refresh(k)
     return k
+
+
+async def list_knowledge_versions(
+    db: AsyncSession, kid: uuid.UUID
+) -> list[TeamKnowledgeVersion]:
+    res = await db.execute(
+        select(TeamKnowledgeVersion)
+        .where(TeamKnowledgeVersion.team_knowledge_id == kid)
+        .order_by(TeamKnowledgeVersion.version_num.desc())
+    )
+    return list(res.scalars().all())
+
+
+async def restore_knowledge_version(
+    db: AsyncSession, team_id: uuid.UUID, kid: uuid.UUID, version_num: int,
+    author: str | None = None,
+) -> TeamKnowledge | None:
+    k = await db.get(TeamKnowledge, kid)
+    if k is None or k.team_id != team_id:
+        return None
+    res = await db.execute(
+        select(TeamKnowledgeVersion).where(
+            TeamKnowledgeVersion.team_knowledge_id == kid,
+            TeamKnowledgeVersion.version_num == version_num,
+        )
+    )
+    ver = res.scalar_one_or_none()
+    if ver is None:
+        return k
+    from app.schemas.team import KnowledgeUpdate
+    return await update_knowledge(
+        db, team_id, kid, KnowledgeUpdate(content=ver.content or ""), author=author
+    )
 
 
 # ── team enrichment (stats / activity / pinned) ──
@@ -474,6 +528,63 @@ async def add_doc(db: AsyncSession, project_id: uuid.UUID, data, user: User) -> 
 
 async def get_doc(db: AsyncSession, did: uuid.UUID) -> ProjectDoc | None:
     return await db.get(ProjectDoc, did)
+
+
+async def update_doc_content(
+    db: AsyncSession, project_id: uuid.UUID, did: uuid.UUID, content: str,
+    author: str | None = None,
+) -> ProjectDoc | None:
+    d = await db.get(ProjectDoc, did)
+    if d is None or d.project_id != project_id:
+        return None
+    if d.content and content != d.content:
+        ver = ProjectDocVersion(
+            project_doc_id=d.id, version_num=d.current_version,
+            content=d.content, size_bytes=d.size_bytes, author=author,
+        )
+        db.add(ver)
+        old = (await db.execute(
+            select(ProjectDocVersion)
+            .where(ProjectDocVersion.project_doc_id == d.id)
+            .order_by(ProjectDocVersion.version_num.desc())
+            .offset(_KB_VERSION_CAP)
+        )).scalars().all()
+        for o in old:
+            await db.delete(o)
+        d.current_version += 1
+    d.content = content
+    d.size_bytes = len(content.encode("utf-8"))
+    await db.commit()
+    await db.refresh(d)
+    return d
+
+
+async def list_doc_versions(db: AsyncSession, did: uuid.UUID) -> list[ProjectDocVersion]:
+    res = await db.execute(
+        select(ProjectDocVersion)
+        .where(ProjectDocVersion.project_doc_id == did)
+        .order_by(ProjectDocVersion.version_num.desc())
+    )
+    return list(res.scalars().all())
+
+
+async def restore_doc_version(
+    db: AsyncSession, project_id: uuid.UUID, did: uuid.UUID, version_num: int,
+    author: str | None = None,
+) -> ProjectDoc | None:
+    d = await db.get(ProjectDoc, did)
+    if d is None or d.project_id != project_id:
+        return None
+    res = await db.execute(
+        select(ProjectDocVersion).where(
+            ProjectDocVersion.project_doc_id == did,
+            ProjectDocVersion.version_num == version_num,
+        )
+    )
+    ver = res.scalar_one_or_none()
+    if ver is None:
+        return d
+    return await update_doc_content(db, project_id, did, ver.content or "", author=author)
 
 
 async def set_profile_knowledge(db: AsyncSession, profile, knowledge_ids: list[str]):

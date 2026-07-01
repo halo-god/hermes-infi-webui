@@ -73,11 +73,24 @@ class KnowledgeOut(BaseModel):
     folder_id: uuid.UUID | None = None
     is_folder: bool = False
     sort_order: int = 0
+    current_version: int = 1
     created_at: datetime
 
 
 class KnowledgeDetail(KnowledgeOut):
     content: str | None = None
+
+
+class KnowledgeVersionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    team_knowledge_id: uuid.UUID
+    version_num: int
+    content: str | None = None
+    size_bytes: int
+    created_at: datetime
+    author: str | None = None
 
 
 class KnowledgeCreate(BaseModel):
@@ -190,7 +203,24 @@ class DocOut(BaseModel):
     kind: str
     size_bytes: int
     created_by_name: str | None = None
+    current_version: int = 1
     created_at: datetime
+
+
+class DocVersionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    project_doc_id: uuid.UUID
+    version_num: int
+    content: str | None = None
+    size_bytes: int
+    created_at: datetime
+    author: str | None = None
+
+
+class DocContentUpdate(BaseModel):
+    content: str
 
 
 class DocCreate(BaseModel):

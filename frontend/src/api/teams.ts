@@ -1,5 +1,5 @@
 import { http, mediaTicket } from "./client";
-import type { Knowledge, Member, Team, TeamDetail, TeamPolicy } from "@/types";
+import type { Knowledge, Member, Team, TeamDetail, TeamPolicy, WorkspaceFileVersion } from "@/types";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api/v1";
 
@@ -70,6 +70,13 @@ export const teamsApi = {
   },
   async updateKnowledgeContent(id: string, kid: string, content: string): Promise<string> {
     const r = await http.patch<{ content: string | null }>(`/teams/${id}/knowledge/${kid}`, { content });
+    return r.data.content || "";
+  },
+  async knowledgeVersions(id: string, kid: string): Promise<WorkspaceFileVersion[]> {
+    return (await http.get(`/teams/${id}/knowledge/${kid}/versions`)).data;
+  },
+  async restoreKnowledgeVersion(id: string, kid: string, versionNum: number): Promise<string> {
+    const r = await http.post<{ content: string | null }>(`/teams/${id}/knowledge/${kid}/restore/${versionNum}`);
     return r.data.content || "";
   },
   async uploadKnowledge(id: string, file: File): Promise<void> {

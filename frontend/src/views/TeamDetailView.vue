@@ -113,6 +113,8 @@ const kbAdapter = computed<WsAdapter>(() => ({
   getContent: (fid) => teamsApi.knowledgeContent(teamId.value, fid),
   getRawUrl: (fid) => teamsApi.knowledgeRawUrl(teamId.value, fid),
   patchContent: (fid, content) => teamsApi.updateKnowledgeContent(teamId.value, fid, content),
+  getVersions: (fid) => teamsApi.knowledgeVersions(teamId.value, fid),
+  restoreVersion: (fid, v) => teamsApi.restoreKnowledgeVersion(teamId.value, fid, v),
   upload: async (file) => {
     await teamsApi.uploadKnowledge(teamId.value, file);
     await load();

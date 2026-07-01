@@ -823,6 +823,19 @@ async def fork_conversation(
 async def update_file_content(
     db: AsyncSession, f: WorkspaceFile, content: str, author: str | None = None
 ) -> WorkspaceFile:
+    # Re-fetch with a row lock to serialize concurrent writers (e.g. a
+    # roundtable agent writing the same file while a user saves an edit).
+    # populate_existing is required: callers already hold `f` loaded from an
+    # earlier db.get() in the same session, so without it SQLAlchemy would
+    # keep serving the stale, already-identity-mapped attributes instead of
+    # the fresh (lock-acquired) row — silently defeating the lock.
+    res = await db.execute(
+        select(WorkspaceFile)
+        .where(WorkspaceFile.id == f.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    f = res.scalar_one()
     # Save current version before overwriting.
     # For MinIO storage, f.content may be None — read from object storage
     old_content = f.content

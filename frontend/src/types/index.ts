@@ -281,6 +281,10 @@ export interface FileItem {
   size_bytes: number;
   current_version?: number;
   updated_at?: string;
+  // Distinguishes AI-authored files (that happen to be named e.g. "*.docx")
+  // from genuinely uploaded binary Office documents — only meaningful for
+  // conversation workspace files; undefined for knowledge/project docs.
+  created_by_agent?: string | null;
 }
 
 export interface WsAdapter {

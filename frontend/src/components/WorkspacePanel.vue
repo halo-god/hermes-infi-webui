@@ -129,7 +129,13 @@ function fileExt(f: FileItem): string {
 function fileMode(f: FileItem | null): string {
   if (!f) return "unknown";
   const e = fileExt(f);
-  if (e === "md" || e === "docx") return "md";
+  if (e === "md") return "md";
+  // AI-written files are markdown text saved with a .docx label (a UX
+  // workaround, not a real binary document) — keep rendering those as
+  // markdown. A genuinely uploaded .docx has no created_by_agent and gets
+  // the formatted office preview instead.
+  if (e === "docx") return f.created_by_agent ? "md" : "office";
+  if (e === "xlsx" || e === "pptx") return "office";
   if (e === "json") return "json";
   if (e === "csv") return "csv";
   if (e === "html" || e === "htm") return "html";
@@ -151,6 +157,12 @@ const mdHtml = computed(() => {
     // Fallback: escaped plain text so the panel still shows content
     return `<pre style="white-space:pre-wrap;color:var(--ink-mute)">${src.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}</pre>`;
   }
+});
+const officeHtml = computed(() => {
+  // Backend already returns sanitized, pre-rendered HTML for office docs
+  // (see extract_docx_html/extract_xlsx_html/extract_pptx_html) — render
+  // directly, no client-side parsing needed.
+  return previewVersion.value?.content ?? content.value ?? "";
 });
 const jsonPretty = computed(() => {
   const src = previewVersion.value?.content ?? content.value;
@@ -352,7 +364,9 @@ async function handleUpload(e: Event) {
 function download() {
   if (!activeFile.value) return;
   const mode = fileMode(activeFile.value);
-  if (mode === "image" || mode === "pdf") {
+  if (mode === "image" || mode === "pdf" || mode === "office") {
+    // "office" content holds the extracted preview HTML, not the original
+    // file — must fetch the true original from the raw-download route.
     window.open(rawUrl.value, "_blank");
     return;
   }
@@ -557,6 +571,12 @@ function fmtDate(s: string) {
               v-if="fileMode(activeFile) === 'md'"
               class="md-preview"
               v-html="mdHtml"
+            />
+            <!-- Office document (docx/xlsx/pptx) — backend already rendered HTML -->
+            <div
+              v-else-if="fileMode(activeFile) === 'office'"
+              class="md-preview office-preview"
+              v-html="officeHtml"
             />
             <!-- JSON -->
             <pre v-else-if="fileMode(activeFile) === 'json'" class="json-preview">{{ jsonPretty }}</pre>
@@ -844,6 +864,8 @@ function fmtDate(s: string) {
 .md-preview :deep(h3) { font-size: 15px; margin: 14px 0 6px; }
 .md-preview :deep(ul), .md-preview :deep(ol) { padding-left: 20px; }
 .md-preview :deep(li) { margin-bottom: 4px; }
+.md-preview :deep(li > p) { margin: 0; }
+.md-preview :deep(li > p + p) { margin-top: 8px; }
 .md-preview :deep(blockquote) { border-left: 3px solid var(--accent); padding-left: 12px; color: var(--ink-mute); font-style: italic; margin: 0 0 12px; }
 .md-preview :deep(table) { width: 100%; border-collapse: collapse; font-size: 12.5px; margin: 8px 0; }
 .md-preview :deep(th) { text-align: left; padding: 7px 10px; border-bottom: 2px solid var(--ink); font-size: 11px; text-transform: uppercase; color: var(--ink-mute); }
@@ -851,6 +873,21 @@ function fmtDate(s: string) {
 .md-preview :deep(code) { font-family: var(--font-mono); font-size: 0.88em; background: rgba(29,26,20,0.07); padding: 1.5px 5px; border-radius: 5px; color: var(--accent-deep); }
 .md-preview :deep(pre) { background: #1d1a14; color: #f0ebde; border-radius: var(--r-sm); padding: 13px 15px; overflow-x: auto; }
 .md-preview :deep(pre code) { background: none; color: inherit; padding: 0; }
+
+/* Office document preview (pptx slide dividers) */
+.office-preview :deep(.slide) {
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--r-sm);
+  padding: 12px 16px;
+  margin: 0 0 14px;
+}
+.office-preview :deep(.slide h4) {
+  margin: 0 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-mute);
+}
 
 /* Code highlight */
 .code-preview {

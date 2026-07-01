@@ -23,11 +23,161 @@ def extract_pdf_text(data: bytes) -> str | None:
         return None
 
 
+def extract_docx_html(raw: bytes) -> str | None:
+    """Convert a .docx file's paragraphs/tables to sanitized preview HTML.
+
+    Every text node is escaped before being wrapped in a tag — document
+    content can never inject raw HTML/scripts into what's ultimately
+    rendered via v-html, matching markdown-it's html:false posture.
+    """
+    try:
+        import io
+        from html import escape
+
+        from docx import Document
+
+        doc = Document(io.BytesIO(raw))
+        parts: list[str] = []
+        list_buf: list[str] = []
+        list_tag: str | None = None
+
+        def flush_list() -> None:
+            nonlocal list_buf, list_tag
+            if list_buf:
+                parts.append(f"<{list_tag}>" + "".join(list_buf) + f"</{list_tag}>")
+                list_buf = []
+                list_tag = None
+
+        heading_map = {f"Heading {i}": f"h{min(i, 6)}" for i in range(1, 7)}
+
+        for para in doc.paragraphs:
+            style_name = (para.style.name if para.style else "") or ""
+            text_runs = []
+            for run in para.runs:
+                t = escape(run.text or "")
+                if not t:
+                    continue
+                if run.bold:
+                    t = f"<strong>{t}</strong>"
+                if run.italic:
+                    t = f"<em>{t}</em>"
+                if run.underline:
+                    t = f"<u>{t}</u>"
+                text_runs.append(t)
+            text = "".join(text_runs) or escape(para.text or "")
+            if not text.strip():
+                continue
+
+            if style_name in heading_map:
+                flush_list()
+                tag = heading_map[style_name]
+                parts.append(f"<{tag}>{text}</{tag}>")
+            elif style_name.startswith("List Bullet"):
+                if list_tag != "ul":
+                    flush_list()
+                    list_tag = "ul"
+                list_buf.append(f"<li>{text}</li>")
+            elif style_name.startswith("List Number"):
+                if list_tag != "ol":
+                    flush_list()
+                    list_tag = "ol"
+                list_buf.append(f"<li>{text}</li>")
+            else:
+                flush_list()
+                parts.append(f"<p>{text}</p>")
+        flush_list()
+
+        for table in doc.tables:
+            rows_html = []
+            for i, row in enumerate(table.rows):
+                cell_tag = "th" if i == 0 else "td"
+                cells = "".join(f"<{cell_tag}>{escape(c.text)}</{cell_tag}>" for c in row.cells)
+                rows_html.append(f"<tr>{cells}</tr>")
+            parts.append("<table>" + "".join(rows_html) + "</table>")
+
+        return "\n".join(parts) if parts else "<p><em>(空文档)</em></p>"
+    except Exception:
+        return None
+
+
+_XLSX_MAX_ROWS = 500
+_XLSX_MAX_COLS = 50
+
+
+def extract_xlsx_html(raw: bytes) -> str | None:
+    """Convert an .xlsx workbook to sanitized per-sheet preview HTML tables."""
+    try:
+        import io
+        from html import escape
+
+        from openpyxl import load_workbook
+
+        wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        parts: list[str] = []
+        for ws in wb.worksheets:
+            parts.append(f"<h3>{escape(ws.title)}</h3>")
+            rows_html = []
+            truncated_cols = False
+            row_count = 0
+            for row in ws.iter_rows():
+                if row_count >= _XLSX_MAX_ROWS:
+                    parts.append(f"<p><em>(仅显示前 {_XLSX_MAX_ROWS} 行，已截断)</em></p>")
+                    break
+                cells = row[:_XLSX_MAX_COLS]
+                if len(row) > _XLSX_MAX_COLS:
+                    truncated_cols = True
+                cell_html = "".join(
+                    f"<td>{escape(str(c.value)) if c.value is not None else ''}</td>" for c in cells
+                )
+                rows_html.append(f"<tr>{cell_html}</tr>")
+                row_count += 1
+            parts.append("<table>" + "".join(rows_html) + "</table>")
+            if truncated_cols:
+                parts.append(f"<p><em>(仅显示前 {_XLSX_MAX_COLS} 列，已截断)</em></p>")
+        wb.close()
+        return "\n".join(parts) if parts else "<p><em>(空工作簿)</em></p>"
+    except Exception:
+        return None
+
+
+def extract_pptx_html(raw: bytes) -> str | None:
+    """Convert a .pptx presentation's slide text to sanitized preview HTML."""
+    try:
+        import io
+        from html import escape
+
+        from pptx import Presentation
+
+        prs = Presentation(io.BytesIO(raw))
+        parts: list[str] = []
+        for i, slide in enumerate(prs.slides, start=1):
+            parts.append(f'<div class="slide"><h4>Slide {i}</h4>')
+            for shape in slide.shapes:
+                if not shape.has_text_frame:
+                    continue
+                for para in shape.text_frame.paragraphs:
+                    text = "".join(escape(run.text or "") for run in para.runs) or escape(para.text or "")
+                    if text.strip():
+                        parts.append(f"<p>{text}</p>")
+            parts.append("</div>")
+        return "\n".join(parts) if parts else "<p><em>(空演示文稿)</em></p>"
+    except Exception:
+        return None
+
+
+OFFICE_EXTRACTORS = {
+    "docx": extract_docx_html,
+    "xlsx": extract_xlsx_html,
+    "pptx": extract_pptx_html,
+}
+
+
 def is_text_extractable(kind: str) -> bool:
     """Return True for file kinds we can extract human-readable text from."""
     return kind.lower() in {
         "md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
         "yaml", "yml", "toml", "sh", "bash", "log", "xml", "css", "diff", "patch", "pdf",
+        "docx", "xlsx", "pptx",
     }
 
 

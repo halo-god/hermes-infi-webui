@@ -15,9 +15,11 @@ from app.db.models.team import (  # noqa: F401
     Project,
     ProjectActivity,
     ProjectDoc,
+    ProjectDocVersion,
     ProjectTask,
     Team,
     TeamKnowledge,
+    TeamKnowledgeVersion,
     TeamMember,
 )
 from app.db.models.user import User  # noqa: F401

@@ -203,9 +203,45 @@ function collapseNewlines(text: string): string {
   return text.replace(/\n{3,}/g, "\n\n");
 }
 
+// ── Pre-processing: tighten loose lists ──
+// LLMs habitually put a blank line between list items. CommonMark then treats
+// the list as "loose" and wraps each item's text in its own <p>, which reads
+// as far too much vertical gap for what's meant to be a tight list. Collapse
+// a blank line ONLY when it sits between two list-marker lines at the same
+// indentation depth and marker family (bullet vs ordered) — this leaves
+// blank lines that separate a list from surrounding prose, blank lines
+// inside a multi-paragraph list item (next line isn't a marker), and nested
+// sublists (indentation differs) untouched.
+const LIST_MARKER_RE = /^(\s*)([-*+]|\d+[.)])\s+/;
+
+function tightenLooseLists(text: string): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim() === "" && out.length > 0 && i + 1 < lines.length) {
+      const prev = out[out.length - 1].match(LIST_MARKER_RE);
+      const next = lines[i + 1].match(LIST_MARKER_RE);
+      if (
+        prev && next &&
+        prev[1].length === next[1].length &&
+        (/^[-*+]$/.test(prev[2]) === /^[-*+]$/.test(next[2]))
+      ) {
+        continue; // drop this blank line
+      }
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
+function preprocess(src: string): string {
+  return tightenLooseLists(collapseNewlines(src || ""));
+}
+
 // ── Main export ──
 export function renderMarkdown(src: string): string {
-  const collapsed = collapseNewlines(src || "");
+  const collapsed = preprocess(src);
   let html = md.render(collapsed);
   html = postProcessBlockquotes(html);
   html = postProcessKnowledgeRefs(html);
@@ -217,7 +253,7 @@ export function renderMarkdown(src: string): string {
  * Use this in components that need diagrams.
  */
 export async function renderMarkdownAsync(src: string): Promise<string> {
-  const collapsed = collapseNewlines(src || "");
+  const collapsed = preprocess(src);
   let html = md.render(collapsed);
   html = postProcessBlockquotes(html);
   html = postProcessKnowledgeRefs(html);

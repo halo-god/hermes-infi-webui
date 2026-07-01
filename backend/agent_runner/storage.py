@@ -75,11 +75,15 @@ async def save_file(
         inline = None  # offloaded
 
     async with async_session_maker() as db:
+        # Lock the row for the duration of this transaction — roundtable mode
+        # runs multiple agents concurrently, and they can write the same file
+        # path at the same time; without this, concurrent read-modify-write
+        # calls can read the same current_version and lose an update.
         res = await db.execute(
             select(WorkspaceFile).where(
                 WorkspaceFile.conversation_id == conversation_id,
                 WorkspaceFile.name == name,
-            )
+            ).with_for_update().execution_options(populate_existing=True)
         )
         f = res.scalar_one_or_none()
         if f is None:

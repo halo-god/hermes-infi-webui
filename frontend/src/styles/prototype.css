@@ -1514,6 +1514,8 @@
   }
   .md-preview ul { padding-left: 20px; }
   .md-preview li { margin-bottom: 4px; }
+  .md-preview li > p { margin: 0; }
+  .md-preview li > p + p { margin-top: 8px; }
   .md-preview li.todo { list-style: none; margin-left: -20px; }
   .md-preview li.todo::before {
     content: ''; display: inline-block;
@@ -3383,6 +3385,11 @@ body[data-atmos="cinnabar"] {
   .md-body > :first-child { margin-top: 0; }
   .md-body > :last-child { margin-bottom: 0; }
   .md-body p { margin: 0 0 6px; }
+  /* Loose lists (blank line between items — common in LLM output) wrap each
+     item's text in its own <p>; without this, that stacks with the <li>
+     margin below and reads as far too much gap between items. */
+  .md-body li > p { margin: 0; }
+  .md-body li > p + p { margin-top: 6px; }
   .md-body h1, .md-body h2, .md-body h3, .md-body h4, .md-body h5, .md-body h6 {
     font-weight: 600; color: var(--ink); line-height: 1.25;
   }

@@ -24,7 +24,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core import metrics, ratelimit
 from app.core import redis as redis_core
-from app.core.files import read_upload_capped, extract_pdf_text, is_text_extractable
+from app.core.files import (
+    read_upload_capped,
+    extract_pdf_text,
+    is_text_extractable,
+    OFFICE_EXTRACTORS,
+)
 from app.core import object_storage
 from app.db.base import async_session_maker, get_db
 from app.db.models.user import User
@@ -829,8 +834,25 @@ async def upload_file(
     content: str | None = None
     storage_key: str | None = None
 
+    # Office docs (docx/xlsx/pptx): `content` holds extracted preview HTML,
+    # not the raw bytes — so the ORIGINAL file must always live in object
+    # storage (regardless of size) for the raw-download route to serve the
+    # true original rather than base64 of HTML text. If object storage is
+    # unreachable, fail loudly rather than silently serving the wrong bytes.
+    if ext in OFFICE_EXTRACTORS:
+        storage_key = f"conversations/{convo.id}/{uuid.uuid4().hex}/{name}"
+        try:
+            await asyncio.to_thread(
+                object_storage.put,
+                storage_key,
+                raw,
+                file.content_type or "application/octet-stream",
+            )
+        except Exception:
+            raise HTTPException(status_code=503, detail="文件预览服务不可用，请检查对象存储配置")
+        content = OFFICE_EXTRACTORS[ext](raw) or "<p><em>(无法解析文档内容)</em></p>"
     # 1. If large OR backend is minio → offload binary to object storage
-    if len(raw) > OFFLOAD_THRESHOLD or settings.storage_backend == "minio":
+    elif len(raw) > OFFLOAD_THRESHOLD or settings.storage_backend == "minio":
         storage_key = f"conversations/{convo.id}/{uuid.uuid4().hex}/{name}"
         await asyncio.to_thread(
             object_storage.put,

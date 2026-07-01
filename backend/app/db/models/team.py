@@ -119,6 +119,22 @@ class TeamKnowledge(UUIDPrimaryKey, Timestamps, Base):
     folder_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     is_folder: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    current_version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class TeamKnowledgeVersion(UUIDPrimaryKey, Base):
+    __tablename__ = "team_knowledge_versions"
+
+    team_knowledge_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("team_knowledge.id", ondelete="CASCADE"), index=True
+    )
+    version_num: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str | None] = mapped_column(Text)
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    author: Mapped[str | None] = mapped_column(String(120))
 
 
 class ProjectDoc(UUIDPrimaryKey, Timestamps, Base):
@@ -137,6 +153,22 @@ class ProjectDoc(UUIDPrimaryKey, Timestamps, Base):
     source_message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     folder_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     is_folder: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    current_version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class ProjectDocVersion(UUIDPrimaryKey, Base):
+    __tablename__ = "project_doc_versions"
+
+    project_doc_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("project_docs.id", ondelete="CASCADE"), index=True
+    )
+    version_num: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str | None] = mapped_column(Text)
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    author: Mapped[str | None] = mapped_column(String(120))
 
 
 class ProjectActivity(UUIDPrimaryKey, Timestamps, Base):

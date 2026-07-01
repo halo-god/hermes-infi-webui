@@ -26,14 +26,17 @@ from app.schemas.team import (
     ActivityOut,
     AddMemberRequest,
     ConversationBrief,
+    DocContentUpdate,
     DocCreate,
     DocOut,
+    DocVersionOut,
     TaskFromConversation,
     TaskStatusUpdate,
     KnowledgeCreate,
     KnowledgeDetail,
     KnowledgeUpdate,
     KnowledgeOut,
+    KnowledgeVersionOut,
     MemberOut,
     PolicyOut,
     PolicyUpdate,
@@ -434,10 +437,38 @@ async def update_knowledge(
     user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
 ):
     await svc.require_permission(db, team_id, user.id, "knowledge.upload")
-    k = await svc.update_knowledge(db, team_id, kid, payload)
+    k = await svc.update_knowledge(db, team_id, kid, payload, author=user.name or str(user.id))
     if k is None:
         raise HTTPException(status_code=404, detail="知识条目不存在")
     return k
+
+
+@router.get("/teams/{team_id}/knowledge/{kid}/versions", response_model=list[KnowledgeVersionOut])
+async def list_knowledge_versions(
+    team_id: uuid.UUID, kid: uuid.UUID,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    from app.db.models.team import TeamKnowledge
+    await svc.require_membership(db, team_id, user.id)
+    k = await db.get(TeamKnowledge, kid)
+    if k is None or k.team_id != team_id:
+        raise HTTPException(status_code=404, detail="知识条目不存在")
+    versions = await svc.list_knowledge_versions(db, kid)
+    return [KnowledgeVersionOut.model_validate(v) for v in versions]
+
+
+@router.post("/teams/{team_id}/knowledge/{kid}/restore/{version_num}", response_model=KnowledgeDetail)
+async def restore_knowledge_version(
+    team_id: uuid.UUID, kid: uuid.UUID, version_num: int,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    await svc.require_permission(db, team_id, user.id, "knowledge.upload")
+    k = await svc.restore_knowledge_version(
+        db, team_id, kid, version_num, author=user.name or str(user.id)
+    )
+    if k is None:
+        raise HTTPException(status_code=404, detail="知识条目不存在")
+    return KnowledgeDetail(**KnowledgeOut.model_validate(k).model_dump(), content=k.content)
 
 
 @router.get("/teams/{team_id}/knowledge/{kid}", response_model=KnowledgeDetail)
@@ -657,6 +688,57 @@ async def delete_doc(
         raise HTTPException(status_code=404, detail="文件不存在")
     await _project_with_perm(db, d.project_id, user, "project.edit")
     await svc.delete_doc(db, doc_id)
+
+
+@router.patch("/projects/docs/{doc_id}", response_model=DocOut)
+async def update_doc(
+    doc_id: uuid.UUID, payload: DocContentUpdate,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    from app.db.models.team import ProjectDoc
+
+    d = await db.get(ProjectDoc, doc_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    await _project_with_perm(db, d.project_id, user, "project.edit")
+    updated = await svc.update_doc_content(
+        db, d.project_id, doc_id, payload.content, author=user.name or str(user.id)
+    )
+    return updated
+
+
+@router.get("/projects/docs/{doc_id}/versions", response_model=list[DocVersionOut])
+async def list_doc_versions(
+    doc_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    from app.db.models.team import ProjectDoc
+
+    d = await db.get(ProjectDoc, doc_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    proj = await svc.get_project(db, d.project_id)
+    if proj is None:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    await svc.require_membership(db, proj.team_id, user.id)
+    versions = await svc.list_doc_versions(db, doc_id)
+    return [DocVersionOut.model_validate(v) for v in versions]
+
+
+@router.post("/projects/docs/{doc_id}/restore/{version_num}", response_model=DocOut)
+async def restore_doc_version(
+    doc_id: uuid.UUID, version_num: int,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    from app.db.models.team import ProjectDoc
+
+    d = await db.get(ProjectDoc, doc_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    await _project_with_perm(db, d.project_id, user, "project.edit")
+    updated = await svc.restore_doc_version(
+        db, d.project_id, doc_id, version_num, author=user.name or str(user.id)
+    )
+    return updated
 
 
 @router.get("/projects/{project_id}", response_model=ProjectDetail)
