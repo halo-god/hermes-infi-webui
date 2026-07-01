@@ -877,7 +877,7 @@ async def create_group(
 
     # If team_id, auto-populate members + agents from team
     channel_mode = "mention"
-    profile_pairs: list[tuple[str, str]] = []  # (profile_id, agent_id)
+    profile_pairs: list[tuple[str | None, str]] = []  # (profile_id, agent_id)
     if team_id:
         team = await db.get(Team, team_id)
         if team:
@@ -894,14 +894,14 @@ async def create_group(
 
     # Fallback: if no profiles resolved and no explicit agents, use default.
     if not profile_pairs and not member_agent_ids:
-        profile_pairs = [(str(uuid.uuid4()), "hermes")]
+        profile_pairs = [(None, "hermes")]
 
     # If explicit agent_ids were passed (no profiles), convert to pairs.
     if not profile_pairs and member_agent_ids:
-        profile_pairs = [(str(uuid.uuid4()), aid) for aid in member_agent_ids]
+        profile_pairs = [(None, aid) for aid in member_agent_ids]
 
     agent_ids = [aid for _pid, aid in profile_pairs]
-    profile_ids = [pid for pid, _aid in profile_pairs]
+    profile_ids = [pid for pid, _aid in profile_pairs if pid]
 
     convo = Conversation(
         title=title,
@@ -935,18 +935,15 @@ async def create_group(
                 role="member",
             ))
 
-    # Add agent members (with profile_id when available)
+    # Add agent members (with profile_id when a real Profile was resolved)
     for pid, aid in profile_pairs:
         gm = GroupMember(
             conversation_id=convo.id,
             agent_id=aid,
             role="member",
         )
-        # Only set profile_id if it's a real UUID (not the synthetic placeholder)
-        try:
+        if pid:
             gm.profile_id = uuid.UUID(pid)
-        except (ValueError, TypeError):
-            pass
         db.add(gm)
 
     await db.commit()
@@ -1496,13 +1493,14 @@ async def _team_member_ids(db: AsyncSession, team_id: uuid.UUID) -> list[uuid.UU
     return [row[0] for row in res.all()]
 
 
-async def _resolve_team_profiles(db: AsyncSession, team) -> list[tuple[str, str]]:
+async def _resolve_team_profiles(db: AsyncSession, team) -> list[tuple[str | None, str]]:
     """Resolve shared Profile ids → (profile_id, agent_id) pairs for team dispatch.
 
     Does NOT deduplicate by agent_id — each shared Profile is kept independently
     so that multiple profiles with the same default_agent_id are all included
     (they may have different system_prompt/model/icon/color).
-    Falls back to [(None, "hermes")] when no profiles are shared.
+    Falls back to [(None, "hermes")] when no profiles are shared — profile_id is
+    None (not a fake id) since group_members.profile_id has a FK to profiles.id.
     """
     pids_raw = [pid for pid in (team.shared_profile_ids or []) if pid]
     valid_uuids = []
@@ -1512,13 +1510,13 @@ async def _resolve_team_profiles(db: AsyncSession, team) -> list[tuple[str, str]
         except (ValueError, TypeError):
             continue
     if not valid_uuids:
-        return [(str(uuid.uuid4()), "hermes")]  # synthetic placeholder for default
+        return [(None, "hermes")]
     result = await db.execute(select(Profile).where(Profile.id.in_(valid_uuids)))
-    pairs: list[tuple[str, str]] = []
+    pairs: list[tuple[str | None, str]] = []
     for p in result.scalars().all():
         if p.default_agent_id:
             pairs.append((str(p.id), p.default_agent_id))
-    return pairs or [(str(uuid.uuid4()), "hermes")]
+    return pairs or [(None, "hermes")]
 
 
 # Backward-compatible alias for callers that only need agent_ids.
@@ -1533,48 +1531,53 @@ async def sync_group_membership(
     *,
     human_user_ids: list[uuid.UUID],
     agent_ids: list[str],
-    profile_pairs: list[tuple[str, str]] | None = None,
+    profile_pairs: list[tuple[str | None, str]] | None = None,
 ) -> None:
     """把群成员与团队/项目成员集做差量增删；admin 成员保留。
 
     When profile_pairs is provided, agent members are synced by profile_id
-    (allows multiple profiles with the same agent_id).
+    (allows multiple profiles with the same agent_id). A pair's profile_id may
+    be None when no real Profile is resolved (default-agent fallback) — those
+    members are tracked/deduped by agent_id instead, and never get a profile_id
+    written to the DB (group_members.profile_id has a FK to profiles.id).
     """
     members = await get_group_members(db, convo.id)
     existing_users = {m.user_id for m in members if m.user_id}
     existing_profile_ids = {m.profile_id for m in members if m.profile_id}
+    existing_bare_agent_ids = {m.agent_id for m in members if m.agent_id and not m.profile_id}
     desired_users = set(human_user_ids)
     changed = False
 
-    # Desired profile set (from pairs)
+    # Desired profile/bare-agent sets (from pairs)
     desired_profile_set: set[uuid.UUID] = set()
+    desired_bare_agent_set: set[str] = set()
     if profile_pairs:
-        for pid, _aid in profile_pairs:
-            try:
+        for pid, aid in profile_pairs:
+            if pid:
                 desired_profile_set.add(uuid.UUID(pid))
-            except (ValueError, TypeError):
-                pass
+            else:
+                desired_bare_agent_set.add(aid)
 
     for uid in desired_users - existing_users:
         db.add(GroupMember(conversation_id=convo.id, user_id=uid, role="member"))
         changed = True
 
-    # Add agent members — deduplicate by profile_id (not agent_id)
+    # Add agent members — deduplicate by profile_id when real, else by agent_id
     if profile_pairs:
         for pid, aid in profile_pairs:
-            try:
+            if pid:
                 puid = uuid.UUID(pid)
-            except (ValueError, TypeError):
-                continue  # skip synthetic placeholders in sync
-            if puid not in existing_profile_ids and puid not in desired_profile_set:
-                # Already added in this loop? No — desired_profile_set has it.
-                pass
-            if puid in existing_profile_ids:
-                continue
-            gm = GroupMember(conversation_id=convo.id, agent_id=aid, role="member")
-            gm.profile_id = puid
-            db.add(gm)
-            changed = True
+                if puid in existing_profile_ids:
+                    continue
+                gm = GroupMember(conversation_id=convo.id, agent_id=aid, role="member")
+                gm.profile_id = puid
+                db.add(gm)
+                changed = True
+            else:
+                if aid in existing_bare_agent_ids:
+                    continue
+                db.add(GroupMember(conversation_id=convo.id, agent_id=aid, role="member"))
+                changed = True
     else:
         existing_agent_keys = {m.agent_id for m in members if m.agent_id}
         desired_agent_keys = set(agent_ids)
@@ -1589,12 +1592,17 @@ async def sync_group_membership(
             await db.delete(m)
             changed = True
         elif m.agent_id:
-            # If we have profile_pairs, remove by profile_id; else by agent_id
-            if profile_pairs and m.profile_id:
-                if m.profile_id not in desired_profile_set:
+            # If we have profile_pairs, remove by profile_id (or agent_id for
+            # bare/no-profile members); else by agent_id.
+            if profile_pairs:
+                if m.profile_id:
+                    if m.profile_id not in desired_profile_set:
+                        await db.delete(m)
+                        changed = True
+                elif m.agent_id not in desired_bare_agent_set:
                     await db.delete(m)
                     changed = True
-            elif not profile_pairs:
+            else:
                 if m.agent_id not in desired_agent_set:
                     await db.delete(m)
                     changed = True
@@ -1603,7 +1611,7 @@ async def sync_group_membership(
         if agent_ids:
             convo.active_agent_ids = agent_ids
         if profile_pairs:
-            convo.active_profile_ids = [pid for pid, _aid in profile_pairs]
+            convo.active_profile_ids = [pid for pid, _aid in profile_pairs if pid]
         await db.commit()
         await redis_core.publish_event(str(convo.id), {"type": "members_changed"})
 
@@ -1634,7 +1642,7 @@ async def get_or_create_team_group(
         human_ids.append(owner_id)
     pairs = await _resolve_team_profiles(db, team)
     agents = [aid for _pid, aid in pairs]
-    profile_ids = [pid for pid, _aid in pairs]
+    profile_ids = [pid for pid, _aid in pairs if pid]
 
     if convo is None:
         convo = Conversation(
@@ -1656,6 +1664,7 @@ async def get_or_create_team_group(
         await db.refresh(convo)
 
     await sync_group_membership(db, convo, human_user_ids=human_ids, agent_ids=agents, profile_pairs=pairs)
+    await db.refresh(convo)
     return convo
 
 
@@ -1680,7 +1689,7 @@ async def get_or_create_project_group(
     if owner_id not in human_ids:
         human_ids.append(owner_id)
     # Resolve pinned Profile ids → (profile_id, agent_id) pairs for project dispatch.
-    pairs: list[tuple[str, str]] = []
+    pairs: list[tuple[str | None, str]] = []
     for pid in (project.pinned_profile_ids or []):
         try:
             p = await db.get(Profile, uuid.UUID(pid))
@@ -1689,9 +1698,9 @@ async def get_or_create_project_group(
         if p and p.default_agent_id:
             pairs.append((str(p.id), p.default_agent_id))
     if not pairs:
-        pairs = [(str(uuid.uuid4()), "hermes")]
+        pairs = [(None, "hermes")]
     agents = [aid for _pid, aid in pairs]
-    profile_ids = [pid for pid, _aid in pairs]
+    profile_ids = [pid for pid, _aid in pairs if pid]
 
     if convo is None:
         convo = Conversation(
@@ -1713,6 +1722,7 @@ async def get_or_create_project_group(
         await db.refresh(convo)
 
     await sync_group_membership(db, convo, human_user_ids=human_ids, agent_ids=agents, profile_pairs=pairs)
+    await db.refresh(convo)
     return convo
 
 
