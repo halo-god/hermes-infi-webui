@@ -47,6 +47,28 @@
 * {
   box-sizing: border-box;
 }
+
+/* Unified scrollbar — same look everywhere (sidebar, chat lists, thread body,
+   knowledge base, etc.), with more thumb/track contrast than the browser default. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ink-faint) transparent;
+}
+*::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--ink-faint);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-mute);
+}
+
 html,
 body {
   margin: 0;

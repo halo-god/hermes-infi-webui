@@ -1787,7 +1787,8 @@ async def consolidate_message(
     if target == "team_knowledge":
         if team is None:
             raise ValueError("team required for team_knowledge target")
-        payload = KnowledgeCreate(name=name, kind="doc", size_bytes=size, content=text)
+        doc_name = name if name.lower().endswith(".md") else f"{name}.md"
+        payload = KnowledgeCreate(name=doc_name, kind="md", size_bytes=size, content=text)
         k = await team_service.add_knowledge(db, team.id, payload, actor)
         k.source_conversation_id = message.conversation_id
         k.source_message_id = message.id
@@ -1796,7 +1797,7 @@ async def consolidate_message(
         if project is not None:
             await team_service.log_activity(
                 db, project=project, actor=actor, kind="knowledge.created",
-                summary=f"沉淀了会话产出为团队知识「{name}」",
+                summary=f"沉淀了会话产出为团队知识「{doc_name}」",
                 meta={"knowledge_id": str(k.id), "source_message_id": str(message.id)},
             )
         return k
