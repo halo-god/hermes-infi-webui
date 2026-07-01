@@ -72,6 +72,7 @@ class MessageOut(BaseModel):
     owner_id: uuid.UUID | None = None
     role: str
     agent_id: str | None
+    profile_id: uuid.UUID | None = None
     content: dict
     status: str
     mentions: list[str] | None = None

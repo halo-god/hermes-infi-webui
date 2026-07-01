@@ -354,6 +354,7 @@ async def send_message(
     existing_user_msg: Message | None = None,
     profile_dir: str | None = None,
     agent_id_override: str | None = None,
+    profile_id: str | None = None,
     task_id: uuid.UUID | None = None,
 ) -> tuple[Message, Message]:
     """Persist the user turn + an empty streaming agent turn, then enqueue ACP work.
@@ -363,6 +364,8 @@ async def send_message(
     when the caller already persisted the user turn (group dispatch) to avoid
     a duplicate user row. Pass agent_id_override to attribute the reply to a
     specific @-mentioned agent without mutating the conversation's default.
+    Pass profile_id to record exactly which Profile answered (disambiguates
+    when multiple Profiles share one agent_id).
     """
     # NOTE: read acp_session_id before any commit expires the instance —
     # _clarify_directives needs it to detect first-turn vs follow-up.
@@ -390,10 +393,17 @@ async def send_message(
         db.add(user_msg)
     else:
         user_msg = existing_user_msg
+    parsed_profile_id: uuid.UUID | None = None
+    if profile_id:
+        try:
+            parsed_profile_id = uuid.UUID(profile_id)
+        except (ValueError, TypeError):
+            parsed_profile_id = None
     agent_msg = Message(
         conversation_id=convo.id,
         role="agent",
         agent_id=reply_agent_id,
+        profile_id=parsed_profile_id,
         content={"text": ""},
         status="streaming",
     )
@@ -460,17 +470,22 @@ async def send_roundtable(
     db: AsyncSession,
     convo: Conversation,
     text: str,
-    agents: list[str],
+    targets: list[dict],
     attached_file_ids: list[str] | None = None,
     owner_id: uuid.UUID | None = None,
-    system_prompt: str | None = None,
     mentions: list[str] | None = None,
-    profile_dir: str | None = None,
     existing_user_msg: Message | None = None,
     task_id: uuid.UUID | None = None,
 ) -> tuple[Message, Message]:
     """Multi-agent turn: one roundtable message holding per-agent replies + a
-    synthesized merge. The runner streams each reply in parallel, then merges.
+    synthesized merge. The runner streams each reply in parallel — each with
+    its own resolved persona — then merges.
+
+    `targets` is a list of {"agent_id", "profile_id", "system_prompt",
+    "profile_dir"} dicts, one per distinct AI participant. Profiles sharing
+    an agent_id are NOT deduped here — each keeps its own persona/env so the
+    roundtable actually differs per participant instead of collapsing to one
+    shared identity.
 
     Pass existing_user_msg when the caller already persisted the user turn
     (group dispatch) to avoid a duplicate user row.
@@ -491,10 +506,16 @@ async def send_roundtable(
     rt_msg = Message(
         conversation_id=convo.id,
         role="roundtable",
-        agent_id=agents[0],
+        agent_id=targets[0]["agent_id"],
         content={
             "replies": [
-                {"agent_id": a, "text": "", "status": "streaming"} for a in agents
+                {
+                    "agent_id": t["agent_id"],
+                    "profile_id": t.get("profile_id"),
+                    "text": "",
+                    "status": "streaming",
+                }
+                for t in targets
             ],
             "merged": {"text": "", "status": "pending"},
         },
@@ -513,7 +534,9 @@ async def send_roundtable(
     prompt_text = _build_attached_prompt(text, attached)
 
     # File-write instructions for roundtable agents; clarify is explicitly
-    # disallowed here because nobody can answer a modal mid-roundtable.
+    # disallowed here because nobody can answer a modal mid-roundtable. The
+    # runner also hard-rejects any clarify call as a backstop (see
+    # runner_roundtable.py) — this preamble alone is advisory, not enforced.
     prompt_text = f"{_FILE_WRITE_PREAMBLE}{_NO_CLARIFY_ROUNDTABLE}\n\n{prompt_text}"
 
     await redis_core.clear_cancel(str(convo.id))
@@ -522,10 +545,8 @@ async def send_roundtable(
             "type": "roundtable",
             "conversation_id": str(convo.id),
             "message_id": str(rt_msg.id),
-            "agents": agents,
+            "targets": targets,
             "text": prompt_text,
-            "system_prompt": system_prompt,
-            "profile_dir": profile_dir,
         }
     )
     return user_msg, rt_msg
@@ -716,15 +737,22 @@ async def dispatch(
         system_prompt = f"{system_prompt}\n\n{_ANTI_CLARIFY}" if system_prompt else _ANTI_CLARIFY
 
     if len(agents) > 1:
+        # Personal multi-agent compare: same persona/profile broadcast to every
+        # underlying CLI agent (unlike group-chat roundtable, there's no
+        # per-member Profile here — active_agent_ids are bare agent ids).
+        targets = [
+            {"agent_id": aid, "profile_id": None, "system_prompt": system_prompt, "profile_dir": profile_dir}
+            for aid in agents
+        ]
         return await send_roundtable(
-            db, convo, text, agents,
-            attached_file_ids=attached_file_ids, owner_id=owner_id,
-            system_prompt=system_prompt, profile_dir=profile_dir, task_id=task_id,
+            db, convo, text, targets,
+            attached_file_ids=attached_file_ids, owner_id=owner_id, task_id=task_id,
         )
     return await send_message(
         db, convo, text,
         attached_file_ids=attached_file_ids, owner_id=owner_id,
         system_prompt=system_prompt, profile_dir=profile_dir, task_id=task_id,
+        profile_id=effective_profile_id,
     )
 
 
@@ -877,7 +905,9 @@ async def create_group(
 
     # If team_id, auto-populate members + agents from team
     channel_mode = "mention"
-    profile_pairs: list[tuple[str, str]] = []  # (profile_id, agent_id)
+    # (profile_id, agent_id) — profile_id is None when there's no backing
+    # Profile row (e.g. no shared profiles configured for the team yet).
+    profile_pairs: list[tuple[str | None, str]] = []
     if team_id:
         team = await db.get(Team, team_id)
         if team:
@@ -894,14 +924,14 @@ async def create_group(
 
     # Fallback: if no profiles resolved and no explicit agents, use default.
     if not profile_pairs and not member_agent_ids:
-        profile_pairs = [(str(uuid.uuid4()), "hermes")]
+        profile_pairs = [(None, "hermes")]
 
     # If explicit agent_ids were passed (no profiles), convert to pairs.
     if not profile_pairs and member_agent_ids:
-        profile_pairs = [(str(uuid.uuid4()), aid) for aid in member_agent_ids]
+        profile_pairs = [(None, aid) for aid in member_agent_ids]
 
     agent_ids = [aid for _pid, aid in profile_pairs]
-    profile_ids = [pid for pid, _aid in profile_pairs]
+    profile_ids = [pid for pid, _aid in profile_pairs if pid]
 
     convo = Conversation(
         title=title,
@@ -935,18 +965,15 @@ async def create_group(
                 role="member",
             ))
 
-    # Add agent members (with profile_id when available)
+    # Add agent members (with profile_id when a real Profile backs this agent)
     for pid, aid in profile_pairs:
         gm = GroupMember(
             conversation_id=convo.id,
             agent_id=aid,
             role="member",
         )
-        # Only set profile_id if it's a real UUID (not the synthetic placeholder)
-        try:
+        if pid:
             gm.profile_id = uuid.UUID(pid)
-        except (ValueError, TypeError):
-            pass
         db.add(gm)
 
     await db.commit()
@@ -1091,8 +1118,16 @@ async def is_group_admin(
 
 @dataclass
 class ResolvedMentions:
-    """@提及解析结果：Agent 桶 + 人类桶 + 全体标记。"""
+    """@提及解析结果：Agent 桶 + 人类桶 + 全体标记。
+
+    `agent_ids` is a deduped, bare-agent-id view kept for backward
+    compatibility (tests, simple display). `agent_targets` is the real
+    routing list — one (profile_id, agent_id) pair per distinct GroupMember,
+    NEVER deduped by agent_id, since multiple Profiles can share one
+    underlying CLI agent (e.g. two personas both built on "claude").
+    """
     agent_ids: list[str] = field(default_factory=list)
+    agent_targets: list[tuple[str | None, str]] = field(default_factory=list)
     user_ids: list[uuid.UUID] = field(default_factory=list)
     all_humans: bool = False
     all_agents: bool = False
@@ -1106,22 +1141,31 @@ async def resolve_mentions(
     """把前端发来的稳定 ID 解析成结构化结果。
 
     前端已发送稳定标识，无需再做名称模糊匹配：
-    - "__all_agents__" → 群内全部 Agent
+    - "__all_agents__" → 群内全部 Agent（每个 Profile 独立一份，即使共用 agent_id）
     - "__all_humans__" → all_humans 标记（仅通知，不触发 AI）
     - "user:{uuid}"    → 人类成员（校验确为成员）
-    - 裸 agent id       → Agent（校验确在群内）
+    - "profile:{uuid}" → 精确指定某个 Profile 成员
+    - 裸 agent id       → Agent（校验确在群内；命中该 agent_id 下的全部 Profile）
     """
     out = ResolvedMentions()
     if not mentions:
         return out
 
     members = await get_group_members(db, conversation_id)
-    group_agents = [m.agent_id for m in members if m.agent_id]
+    ai_members = [m for m in members if m.agent_id]
+    group_agents = [m.agent_id for m in ai_members]
     group_user_ids = {str(m.user_id) for m in members if m.user_id}
+
+    def _add_member(m) -> None:
+        key = (str(m.profile_id) if m.profile_id else None, m.agent_id)
+        if key not in out.agent_targets:
+            out.agent_targets.append(key)
 
     if "__all_agents__" in mentions:
         out.all_agents = True
         out.agent_ids = list(dict.fromkeys(group_agents))
+        for m in ai_members:
+            _add_member(m)
     if "__all_humans__" in mentions:
         out.all_humans = True
 
@@ -1138,9 +1182,26 @@ async def resolve_mentions(
                 if uid not in out.user_ids:
                     out.user_ids.append(uid)
             continue
-        # Bare agent id — trust it only if it is actually a group agent
-        if mention in group_agents and mention not in out.agent_ids:
-            out.agent_ids.append(mention)
+        if mention.startswith("profile:"):
+            pid_str = mention.split(":", 1)[1]
+            member = next(
+                (m for m in ai_members if m.profile_id and str(m.profile_id) == pid_str), None
+            )
+            if member:
+                _add_member(member)
+                if member.agent_id not in out.agent_ids:
+                    out.agent_ids.append(member.agent_id)
+            continue
+        # Bare agent id — trust it only if it is actually a group agent. All
+        # Profiles sharing this agent_id are targeted (no way to disambiguate
+        # a single one from a bare id, so address them all rather than an
+        # arbitrary pick).
+        if mention in group_agents:
+            if mention not in out.agent_ids:
+                out.agent_ids.append(mention)
+            for m in ai_members:
+                if m.agent_id == mention:
+                    _add_member(m)
 
     return out
 
@@ -1173,6 +1234,7 @@ async def message_to_event_dict(db: AsyncSession, msg: Message) -> dict:
         "owner_id": str(msg.owner_id) if msg.owner_id else None,
         "role": msg.role,
         "agent_id": msg.agent_id,
+        "profile_id": str(msg.profile_id) if msg.profile_id else None,
         "content": msg.content or {},
         "status": msg.status,
         "mentions": msg.mentions or [],
@@ -1272,11 +1334,15 @@ async def dispatch_group(
     resolved = await resolve_mentions(db, convo.id, mentions)
     mode = getattr(convo, "channel_mode", "mention") or "mention"
 
-    # 计算 Agent 目标
-    agent_targets = list(resolved.agent_ids)
+    # 计算 Agent 目标：(profile_id, agent_id) 二元组，绝不按 agent_id 去重——
+    # 多个 Profile 可能共用同一个底层 agent_id（例如两个基于同一 CLI 的人设）。
+    agent_targets: list[tuple[str | None, str]] = list(resolved.agent_targets)
     if mode == "always" and not agent_targets and not resolved.all_humans and not skip_agent:
         members = await get_group_members(db, convo.id)
-        agent_targets = [m.agent_id for m in members if m.agent_id]
+        agent_targets = [
+            (str(m.profile_id) if m.profile_id else None, m.agent_id)
+            for m in members if m.agent_id
+        ]
 
     save_only = (
         mode == "off" or skip_agent or resolved.all_humans or not agent_targets
@@ -1294,14 +1360,16 @@ async def dispatch_group(
 
     if len(agent_targets) == 1:
         # 人→机模式：单 Agent
+        target_profile_id, target_agent_id = agent_targets[0]
         system_prompt = None
         profile_dir = None
-        # 优先级：显式 profile_id_override > 被@Agent 的 profile > 会话默认
-        effective_profile_id = profile_id_override or convo.profile_id
-        if not profile_id_override:
+        # 优先级：显式 profile_id_override > 该成员绑定的 Profile > 会话默认
+        effective_profile_id = profile_id_override or target_profile_id or convo.profile_id
+        if not profile_id_override and not target_profile_id:
+            # 该成员没有绑定具体 Profile（历史数据）：退化为按 agent_id 尽力匹配
             res_p = await db.execute(
                 select(Profile).where(
-                    Profile.default_agent_id == agent_targets[0],
+                    Profile.default_agent_id == target_agent_id,
                     Profile.is_active.is_(True),
                 ).limit(1)
             )
@@ -1320,8 +1388,8 @@ async def dispatch_group(
         if convo.acp_session_id:
             system_prompt = f"{system_prompt}\n\n{_ANTI_CLARIFY}" if system_prompt else _ANTI_CLARIFY
 
-        # Attribute the reply to the @-mentioned agent without mutating the
-        # conversation's stable primary_agent_id default.
+        # Attribute the reply to the @-mentioned agent/profile without mutating
+        # the conversation's stable primary_agent_id default.
         _, agent_msg = await send_message(
             db, convo, text,
             attached_file_ids=attached_file_ids,
@@ -1329,31 +1397,38 @@ async def dispatch_group(
             system_prompt=system_prompt,
             existing_user_msg=user_msg,
             profile_dir=profile_dir,
-            agent_id_override=agent_targets[0],
+            agent_id_override=target_agent_id,
+            profile_id=effective_profile_id,
         )
         return user_msg, agent_msg
 
-    # 圆桌模式：多 Agent 并行
-    system_prompt = None
-    profile_dir = None
-    effective_profile_id = profile_id_override or convo.profile_id
-    if effective_profile_id:
-        profile = await db.get(Profile, effective_profile_id)
-        if profile:
-            system_prompt = profile.system_prompt or None
-            profile_dir = _profile_dir(profile)
-
+    # 圆桌模式：多 Agent 并行 — 每个目标独立解析自己绑定的 Profile 人设/工作目录，
+    # 不再用单一会话级 Profile 覆盖全部参与者（这正是此前"圆桌形同虚设"的根因）。
     memory_prompt = await _build_memory_prompt(db, owner_id)
-    if memory_prompt:
-        system_prompt = f"{system_prompt}\n\n{memory_prompt}" if system_prompt else memory_prompt
+    targets: list[dict] = []
+    for target_profile_id, target_agent_id in agent_targets:
+        t_system_prompt = None
+        t_profile_dir = None
+        eff_pid = target_profile_id or convo.profile_id
+        if eff_pid:
+            profile = await db.get(Profile, eff_pid)
+            if profile:
+                t_system_prompt = profile.system_prompt or None
+                t_profile_dir = _profile_dir(profile)
+        if memory_prompt:
+            t_system_prompt = f"{t_system_prompt}\n\n{memory_prompt}" if t_system_prompt else memory_prompt
+        targets.append({
+            "agent_id": target_agent_id,
+            "profile_id": target_profile_id,
+            "system_prompt": t_system_prompt,
+            "profile_dir": t_profile_dir,
+        })
 
     return await send_roundtable(
-        db, convo, text, agent_targets,
+        db, convo, text, targets,
         attached_file_ids=attached_file_ids,
         owner_id=owner_id,
-        system_prompt=system_prompt,
         mentions=mentions,
-        profile_dir=profile_dir,
         existing_user_msg=user_msg,
     )
 
@@ -1496,13 +1571,16 @@ async def _team_member_ids(db: AsyncSession, team_id: uuid.UUID) -> list[uuid.UU
     return [row[0] for row in res.all()]
 
 
-async def _resolve_team_profiles(db: AsyncSession, team) -> list[tuple[str, str]]:
+async def _resolve_team_profiles(db: AsyncSession, team) -> list[tuple[str | None, str]]:
     """Resolve shared Profile ids → (profile_id, agent_id) pairs for team dispatch.
 
     Does NOT deduplicate by agent_id — each shared Profile is kept independently
     so that multiple profiles with the same default_agent_id are all included
     (they may have different system_prompt/model/icon/color).
-    Falls back to [(None, "hermes")] when no profiles are shared.
+    Falls back to [(None, "hermes")] when no profiles are shared — profile_id
+    is None (not a fake UUID) since there's no real Profile row to reference;
+    group_members.profile_id has an FK to profiles.id, so any non-null value
+    here must resolve to an existing row.
     """
     pids_raw = [pid for pid in (team.shared_profile_ids or []) if pid]
     valid_uuids = []
@@ -1512,13 +1590,13 @@ async def _resolve_team_profiles(db: AsyncSession, team) -> list[tuple[str, str]
         except (ValueError, TypeError):
             continue
     if not valid_uuids:
-        return [(str(uuid.uuid4()), "hermes")]  # synthetic placeholder for default
+        return [(None, "hermes")]
     result = await db.execute(select(Profile).where(Profile.id.in_(valid_uuids)))
-    pairs: list[tuple[str, str]] = []
+    pairs: list[tuple[str | None, str]] = []
     for p in result.scalars().all():
         if p.default_agent_id:
             pairs.append((str(p.id), p.default_agent_id))
-    return pairs or [(str(uuid.uuid4()), "hermes")]
+    return pairs or [(None, "hermes")]
 
 
 # Backward-compatible alias for callers that only need agent_ids.
@@ -1533,7 +1611,7 @@ async def sync_group_membership(
     *,
     human_user_ids: list[uuid.UUID],
     agent_ids: list[str],
-    profile_pairs: list[tuple[str, str]] | None = None,
+    profile_pairs: list[tuple[str | None, str]] | None = None,
 ) -> None:
     """把群成员与团队/项目成员集做差量增删；admin 成员保留。
 
@@ -1543,38 +1621,51 @@ async def sync_group_membership(
     members = await get_group_members(db, convo.id)
     existing_users = {m.user_id for m in members if m.user_id}
     existing_profile_ids = {m.profile_id for m in members if m.profile_id}
+    # Agent members with no backing Profile row (e.g. bare "hermes" default) —
+    # these can't be deduped by profile_id, so track/dedupe by agent_id instead.
+    existing_noprofile_agents = {m.agent_id for m in members if m.agent_id and not m.profile_id}
     desired_users = set(human_user_ids)
     changed = False
 
-    # Desired profile set (from pairs)
+    # Desired profile set (from pairs) + desired no-profile agent set
     desired_profile_set: set[uuid.UUID] = set()
+    desired_noprofile_agents: set[str] = set()
     if profile_pairs:
-        for pid, _aid in profile_pairs:
-            try:
-                desired_profile_set.add(uuid.UUID(pid))
-            except (ValueError, TypeError):
-                pass
+        for pid, aid in profile_pairs:
+            if pid:
+                try:
+                    desired_profile_set.add(uuid.UUID(pid))
+                    continue
+                except (ValueError, TypeError):
+                    pass
+            desired_noprofile_agents.add(aid)
 
     for uid in desired_users - existing_users:
         db.add(GroupMember(conversation_id=convo.id, user_id=uid, role="member"))
         changed = True
 
-    # Add agent members — deduplicate by profile_id (not agent_id)
+    # Add agent members — dedupe by profile_id when one is bound, else by agent_id
     if profile_pairs:
         for pid, aid in profile_pairs:
-            try:
-                puid = uuid.UUID(pid)
-            except (ValueError, TypeError):
-                continue  # skip synthetic placeholders in sync
-            if puid not in existing_profile_ids and puid not in desired_profile_set:
-                # Already added in this loop? No — desired_profile_set has it.
-                pass
-            if puid in existing_profile_ids:
-                continue
-            gm = GroupMember(conversation_id=convo.id, agent_id=aid, role="member")
-            gm.profile_id = puid
-            db.add(gm)
-            changed = True
+            puid: uuid.UUID | None = None
+            if pid:
+                try:
+                    puid = uuid.UUID(pid)
+                except (ValueError, TypeError):
+                    puid = None
+            if puid is not None:
+                if puid in existing_profile_ids:
+                    continue
+                gm = GroupMember(conversation_id=convo.id, agent_id=aid, role="member")
+                gm.profile_id = puid
+                db.add(gm)
+                changed = True
+            else:
+                if aid in existing_noprofile_agents:
+                    continue
+                db.add(GroupMember(conversation_id=convo.id, agent_id=aid, role="member"))
+                existing_noprofile_agents.add(aid)  # avoid re-adding within this same pass
+                changed = True
     else:
         existing_agent_keys = {m.agent_id for m in members if m.agent_id}
         desired_agent_keys = set(agent_ids)
@@ -1589,21 +1680,23 @@ async def sync_group_membership(
             await db.delete(m)
             changed = True
         elif m.agent_id:
-            # If we have profile_pairs, remove by profile_id; else by agent_id
-            if profile_pairs and m.profile_id:
-                if m.profile_id not in desired_profile_set:
+            if profile_pairs:
+                if m.profile_id:
+                    if m.profile_id not in desired_profile_set:
+                        await db.delete(m)
+                        changed = True
+                elif m.agent_id not in desired_noprofile_agents:
                     await db.delete(m)
                     changed = True
-            elif not profile_pairs:
-                if m.agent_id not in desired_agent_set:
-                    await db.delete(m)
-                    changed = True
+            elif m.agent_id not in desired_agent_set:
+                await db.delete(m)
+                changed = True
 
     if changed:
         if agent_ids:
             convo.active_agent_ids = agent_ids
         if profile_pairs:
-            convo.active_profile_ids = [pid for pid, _aid in profile_pairs]
+            convo.active_profile_ids = [pid for pid, _aid in profile_pairs if pid]
         await db.commit()
         await redis_core.publish_event(str(convo.id), {"type": "members_changed"})
 
@@ -1634,7 +1727,7 @@ async def get_or_create_team_group(
         human_ids.append(owner_id)
     pairs = await _resolve_team_profiles(db, team)
     agents = [aid for _pid, aid in pairs]
-    profile_ids = [pid for pid, _aid in pairs]
+    profile_ids = [pid for pid, _aid in pairs if pid]
 
     if convo is None:
         convo = Conversation(
@@ -1680,7 +1773,7 @@ async def get_or_create_project_group(
     if owner_id not in human_ids:
         human_ids.append(owner_id)
     # Resolve pinned Profile ids → (profile_id, agent_id) pairs for project dispatch.
-    pairs: list[tuple[str, str]] = []
+    pairs: list[tuple[str | None, str]] = []
     for pid in (project.pinned_profile_ids or []):
         try:
             p = await db.get(Profile, uuid.UUID(pid))
@@ -1689,9 +1782,9 @@ async def get_or_create_project_group(
         if p and p.default_agent_id:
             pairs.append((str(p.id), p.default_agent_id))
     if not pairs:
-        pairs = [(str(uuid.uuid4()), "hermes")]
+        pairs = [(None, "hermes")]
     agents = [aid for _pid, aid in pairs]
-    profile_ids = [pid for pid, _aid in pairs]
+    profile_ids = [pid for pid, _aid in pairs if pid]
 
     if convo is None:
         convo = Conversation(

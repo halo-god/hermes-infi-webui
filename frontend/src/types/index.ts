@@ -180,6 +180,7 @@ export interface PlanEntry {
 
 export interface RoundtableReply {
   agent_id: string;
+  profile_id?: string | null;
   text: string;
   status: "streaming" | "complete" | "error" | "timeout";
 }
@@ -203,6 +204,7 @@ export interface Message {
   owner_id: string | null;
   role: "user" | "agent" | "roundtable" | "system";
   agent_id: string | null;
+  profile_id?: string | null;
   content: MessageContent & Partial<RoundtableContent>;
   status: "streaming" | "complete" | "cancelled" | "error";
   mentions?: string[] | null;
@@ -333,6 +335,7 @@ export interface ClarifyEntry {
 
 export interface RtAgentMeta {
   agent_id: string;
+  profile_id?: string | null;
   slot: number;
   label: string;
   color: string;

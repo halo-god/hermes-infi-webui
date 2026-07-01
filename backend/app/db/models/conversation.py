@@ -91,6 +91,10 @@ class Message(UUIDPrimaryKey, Timestamps, Base):
     )
     role: Mapped[str] = mapped_column(String(16), nullable=False)  # user | agent | roundtable | system
     agent_id: Mapped[str | None] = mapped_column(String(64))
+    profile_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("profiles.id", ondelete="SET NULL"), nullable=True
+    )
+    # 群聊/圆桌场景下 agent_id 可能被多个 Profile 共用；profile_id 精确标识具体作答的助手
     # {text, markdown?, tool_calls?, merged?, replies?}
     content: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     status: Mapped[str] = mapped_column(String(16), default="complete", nullable=False)

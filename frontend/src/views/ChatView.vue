@@ -147,6 +147,7 @@ const groupAgents = computed(() => {
       const p = chat.profiles.find((pp) => pp.id === pid);
       return {
         agent_id: p?.default_agent_id || "hermes",
+        profile_id: pid,
         name: p?.name || "助手",
         color: p?.color || branding.accent,
         icon: p?.icon || "sparkle",
@@ -158,6 +159,7 @@ const groupAgents = computed(() => {
     const p = chat.profiles.find((pp) => pp.default_agent_id === aid);
     return {
       agent_id: aid,
+      profile_id: p?.id || null,
       name: p?.name || aid,
       color: p?.color || branding.accent,
       icon: p?.icon || "sparkle",
@@ -225,6 +227,18 @@ function profileByAgentId(agentId: string): Profile | undefined {
     if (p) return p;
   }
   return chat.profiles.find((p) => p.default_agent_id === agentId);
+}
+
+// Group/roundtable messages carry their own profile_id (set server-side) —
+// use it first. Falling back to agent_id alone is ambiguous whenever two
+// Profiles share the same underlying agent_id (e.g. two personas on one CLI),
+// which is exactly what caused roundtable replies to look identical.
+function profileForEntity(agentId: string | null | undefined, profileId?: string | null): Profile | undefined {
+  if (profileId) {
+    const p = chat.profiles.find((pp) => pp.id === profileId);
+    if (p) return p;
+  }
+  return chat.profiles.find((p) => p.default_agent_id === agentId) || profileByAgentId(agentId || "hermes");
 }
 
 // Display info from profile
@@ -563,9 +577,9 @@ function toggleChosen(msgId: string, slot: number) {
 function isChosen(msgId: string, slot: number): boolean {
   return !!chosenMap.value[`${msgId}:${slot}`];
 }
-function followUp(agentId: string) {
-  // Find profile by agent ID and set as landing
-  const profile = profileByAgentId(agentId);
+function followUp(agentId: string, profileId?: string | null) {
+  // Find the exact profile that answered (falls back to agent-id lookup)
+  const profile = profileForEntity(agentId, profileId);
   if (profile) landingProfileId.value = profile.id;
   (document.querySelector(".dock .composer-input") as HTMLTextAreaElement)?.focus();
 }
@@ -1022,9 +1036,9 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
               <div class="roundtable-label">圆桌 · {{ chat.messages[row.index].content.replies?.length || 0 }} 位助手并行作答</div>
               <div v-for="(r, idx) in chat.messages[row.index].content.replies" :key="idx" class="rt-card">
                 <div class="rt-card-head">
-                  <span class="rt-avatar" :style="{ background: profileDisplay(profileByAgentId(r.agent_id)).color }"><Icon :name="profileDisplay(profileByAgentId(r.agent_id)).icon" :size="11" /></span>
-                  <span class="rt-name">{{ profileDisplay(profileByAgentId(r.agent_id)).label }}</span>
-                  <span class="rt-stance">— {{ profileDisplay(profileByAgentId(r.agent_id)).description }}</span>
+                  <span class="rt-avatar" :style="{ background: profileDisplay(profileForEntity(r.agent_id, r.profile_id)).color }"><Icon :name="profileDisplay(profileForEntity(r.agent_id, r.profile_id)).icon" :size="11" /></span>
+                  <span class="rt-name">{{ profileDisplay(profileForEntity(r.agent_id, r.profile_id)).label }}</span>
+                  <span class="rt-stance">— {{ profileDisplay(profileForEntity(r.agent_id, r.profile_id)).description }}</span>
                   <span class="rt-status" :class="r.status">{{ r.status === 'streaming' ? '生成中' : r.status === 'error' ? '作答失败' : r.status === 'timeout' ? '超时' : '完成' }}</span>
                 </div>
                 <div v-if="chat.messages[row.index].status === 'streaming'" class="rt-progress-wrap">
@@ -1039,7 +1053,7 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                   <button :class="{ chosen: isChosen(chat.messages[row.index].id, idx) }" @click="toggleChosen(chat.messages[row.index].id, idx)">
                     <Icon name="check" :size="10" /> 采纳
                   </button>
-                  <button @click="followUp(r.agent_id)">
+                  <button @click="followUp(r.agent_id, r.profile_id)">
                     <Icon name="chat" :size="10" /> 追问
                   </button>
                   <button @click="copyMessage(r.text)">
@@ -1062,15 +1076,15 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
               </div>
             </div>
             <div v-else class="msg" :class="chat.messages[row.index].role">
-              <div v-if="chat.messages[row.index].role === 'agent'" class="msg-avatar" :style="{ background: profileDisplay(profileByAgentId(chat.messages[row.index].agent_id || 'hermes')).color }">
-                <Icon :name="profileDisplay(profileByAgentId(chat.messages[row.index].agent_id || 'hermes')).icon" :size="14" />
+              <div v-if="chat.messages[row.index].role === 'agent'" class="msg-avatar" :style="{ background: profileDisplay(profileForEntity(chat.messages[row.index].agent_id || 'hermes', chat.messages[row.index].profile_id)).color }">
+                <Icon :name="profileDisplay(profileForEntity(chat.messages[row.index].agent_id || 'hermes', chat.messages[row.index].profile_id)).icon" :size="14" />
               </div>
               <div v-else-if="isGroup && chat.messages[row.index].role === 'user'" class="msg-avatar user-avatar-group" :style="{ background: getUserDisplay(chat.messages[row.index]).color }">
                 <span class="avatar-initials">{{ getUserDisplay(chat.messages[row.index]).initials }}</span>
               </div>
               <div class="msg-body">
                 <div v-if="chat.messages[row.index].role === 'agent'" class="msg-name">
-                  {{ profileDisplay(profileByAgentId(chat.messages[row.index].agent_id || 'hermes')).label }}
+                  {{ profileDisplay(profileForEntity(chat.messages[row.index].agent_id || 'hermes', chat.messages[row.index].profile_id)).label }}
                 </div>
                 <div v-else-if="isGroup && chat.messages[row.index].role === 'user'" class="msg-name user-name">
                   {{ getUserDisplay(chat.messages[row.index]).name }}

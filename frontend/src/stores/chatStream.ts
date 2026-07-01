@@ -147,7 +147,7 @@ export function registerStreamHandlers(
     if (!find(ev.message_id)) {
       const replies = [...ev.agents]
         .sort((a, b) => a.slot - b.slot)
-        .map((a) => ({ agent_id: a.agent_id, text: "", status: "streaming" as const }));
+        .map((a) => ({ agent_id: a.agent_id, profile_id: a.profile_id ?? null, text: "", status: "streaming" as const }));
       messages.value.push({
         id: ev.message_id,
         conversation_id: activeId.value || "",

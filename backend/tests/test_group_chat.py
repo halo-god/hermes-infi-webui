@@ -26,7 +26,7 @@ async def _mk_user(db, email: str) -> User:
 
 
 async def _mk_team_with_members(db, owner: User, others: list[User]) -> Team:
-    team = Team(id=uuid.uuid4(), name="Squad", shared_agents=["hermes"], channel_mode="mention")
+    team = Team(id=uuid.uuid4(), name="Squad", channel_mode="mention")
     db.add(team)
     await db.flush()
     db.add(TeamMember(team_id=team.id, user_id=owner.id, role="owner"))
@@ -150,6 +150,63 @@ async def test_single_agent_mention_attribution(db):
     # reply attributed to the @-mentioned agent, primary_agent_id unchanged
     assert agent_msg.agent_id == "coder"
     assert group.primary_agent_id == "hermes"
+
+
+@pytest.mark.asyncio
+async def test_roundtable_keeps_distinct_profiles_sharing_agent_id(db):
+    """Regression test: two Profiles wrapping the same underlying agent_id
+    (e.g. two personas both built on "claude") must NOT collapse into a
+    single roundtable target — each keeps its own identity/persona instead of
+    the group silently falling back to one arbitrary "default" assistant.
+    """
+    import json as _json
+
+    from app.config import settings
+    from app.db.models.agent import Profile
+
+    owner = await _mk_user(db, "o7@h.io")
+    team = await _mk_team_with_members(db, owner, [])
+
+    p1 = Profile(
+        id=uuid.uuid4(), name="客服助手", handle="p1-support",
+        default_agent_id="claude", system_prompt="你是客服助手", is_active=True,
+    )
+    p2 = Profile(
+        id=uuid.uuid4(), name="代码助手", handle="p2-coder",
+        default_agent_id="claude", system_prompt="你是代码助手", is_active=True,
+    )
+    db.add_all([p1, p2])
+    await db.flush()
+    team.shared_profile_ids = [str(p1.id), str(p2.id)]
+    await db.flush()
+
+    group = await svc.get_or_create_team_group(db, team, owner.id)
+    members = await svc.get_group_members(db, group.id)
+    ai_members = [m for m in members if m.agent_id]
+    assert len(ai_members) == 2  # not collapsed to 1 despite sharing agent_id
+    assert {m.profile_id for m in ai_members} == {p1.id, p2.id}
+
+    # __all_agents__ must resolve to both distinct profiles, not a deduped
+    # single "claude" bucket.
+    resolved = await svc.resolve_mentions(db, group.id, ["__all_agents__"])
+    assert len(resolved.agent_targets) == 2
+    assert {pid for pid, _aid in resolved.agent_targets} == {str(p1.id), str(p2.id)}
+
+    _, rt_msg = await svc.dispatch_group(
+        db, group, "大家怎么看？", ["__all_agents__"], owner_id=owner.id,
+    )
+    assert rt_msg.role == "roundtable"
+    replies = rt_msg.content["replies"]
+    assert len(replies) == 2  # real roundtable, not a single collapsed reply
+    assert {r["profile_id"] for r in replies} == {str(p1.id), str(p2.id)}
+
+    # The enqueued runner task carries each profile's own system_prompt/persona
+    # instead of one shared prompt applied to both participants.
+    entries = await redis_core.get_redis().xrange(settings.acp_stream, "-", "+")
+    task = _json.loads(entries[-1][1]["data"])
+    assert task["type"] == "roundtable"
+    prompts = {t["system_prompt"] for t in task["targets"]}
+    assert prompts == {"你是客服助手", "你是代码助手"}
 
 
 @pytest.mark.asyncio

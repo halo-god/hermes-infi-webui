@@ -23,7 +23,7 @@ const props = defineProps<{
   profileLocked?: boolean;
   knowledgeItems?: { id: string; name: string }[];
   isGroup?: boolean;
-  groupAgents?: { agent_id: string; name: string; color: string; icon: string }[];
+  groupAgents?: { agent_id: string; profile_id?: string | null; name: string; color: string; icon: string }[];
   groupMembers?: { id: string; user_id: string | null; user_name?: string; agent_id: string | null }[];
   replyTo?: { id: string; label: string; snippet: string } | null;
 }>();
@@ -281,7 +281,7 @@ function doSend() {
   emit("send", { profileId: selected.value?.id, stagedFiles: files, knowledgeIds: kIds, attachedFileIds: fIds, mentions, replyToId: props.replyTo?.id });
 }
 
-function selectMention(agent: { agent_id: string; name: string }) {
+function selectMention(agent: { agent_id: string; name: string; profile_id?: string | null }) {
   // Replace the @query in the text with @name
   const taEl = ta.value;
   if (!taEl) return;
@@ -295,13 +295,16 @@ function selectMention(agent: { agent_id: string; name: string }) {
   showMentionPicker.value = false;
   mentionQuery.value = "";
 
-  // Track the mention
+  // Track the mention. Prefer profile:{id} over the bare agent_id — two
+  // Profiles can share one underlying agent_id, and only the profile id
+  // disambiguates which one is actually being addressed.
+  const mentionKey = agent.profile_id ? `profile:${agent.profile_id}` : agent.agent_id;
   if (agent.agent_id === "__all_agents__") {
     mentionMentions.value = ["__all_agents__"];
   } else if (agent.agent_id === "__all_humans__") {
     mentionMentions.value = ["__all_humans__"];
-  } else if (!mentionMentions.value.includes(agent.agent_id)) {
-    mentionMentions.value.push(agent.agent_id);
+  } else if (!mentionMentions.value.includes(mentionKey)) {
+    mentionMentions.value.push(mentionKey);
   }
 
   // Restore focus
