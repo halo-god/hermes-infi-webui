@@ -137,8 +137,14 @@ async def authenticate(config: dict, code: str) -> IdentityInfo:
             # errcode 42003 = code expired; 40029 = invalid code
             raise ProviderError(f"获取用户信息失败: {data.get('errmsg', f'errcode={errcode}')}")
         # WeCom returns "UserId" (capital U) in getuserinfo; "openid" for external contacts.
-        userid = data.get("UserId") or data.get("userid") or data.get("openid")
+        userid = data.get("UserId") or data.get("userid")
+        openid = data.get("openid")
         if not userid:
+            if openid:
+                raise ProviderError(
+                    "企业微信未返回用户 ID（仅返回 openid），该用户可能不在应用的可见范围内。"
+                    "请管理员在企业微信后台 → 应用管理 → 该应用 → 可见范围 中添加此用户。"
+                )
             raise ProviderError(f"企业微信未返回用户 ID，可能用户未授权。原始响应: {data}")
 
         # Step 3: Get user detail
