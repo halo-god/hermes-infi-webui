@@ -138,3 +138,50 @@ All pages MUST follow these layout conventions for visual consistency:
 11. **Sidebar scroll areas**: Lists that can grow (teams, group chats) MUST have `max-height` + `overflow-y: auto` + `flex-shrink: 0` to prevent pushing other sections off-screen. The conversation list (`.convo-list`) uses `flex: 1; min-height: 0` to fill remaining space.
 12. **Status tags/pills**: `<span class="fb-cat-pill">` / `<span class="fb-st-pill">` — colored border + text, `font-size: 10px; padding: 1px 6px; border-radius: 4px`.
 13. **Transitions**: Dropdown panels use `<Transition name="panel-drop">` (opacity + translateY 8px over 150ms).
+
+---
+
+## AI 提示词工程实践（Prompt Engineering）
+
+在解决复杂问题、修 BUG、设计架构时，以下两种提示词技巧经实战验证可显著提升 AI 输出质量。
+
+### 一、第一性原理（"从第一性原理出发"）
+
+**本质**：在提示词末尾加一句"从第一性原理出发"，强制 AI 放弃"类比推理 / 参考现有方案"，回到问题最底层的事实重新推导。
+
+**为什么有效**：
+- AI 默认倾向用类比推理（"这个问题像 XXX，所以照搬那个方案"），容易治标不治本
+- "从第一性原理出发"迫使 AI 拆解到不可再分的基本事实，从零开始推导解决方案
+- 类比：马斯克用第一性原理把火箭发射成本砍了 90%（不从"现有火箭多少钱"出发，而从"原材料成本是多少"重新算起）
+
+**实战案例**：
+- AIHOT 飞书推送出现 OpenAI 信源抓取失败
+  - 不加提示词：AI 判断"某个国产模型改坏了表层配置" → 修表层 → 治标
+  - 加"从第一性原理出发"：AI 发现是底层流量路由机制存在根本性缺陷，追溯到 4 个月前的代码，重构后治本
+
+**适用场景**：解决问题、修 BUG、设计架构时，在提示词末尾追加这一句即可，无需安装额外工具。
+
+### 二、对抗式审查
+
+**本质**：让 AI 以"如果我是恶意用户，我要怎么搞崩这个系统"的角色，对代码/方案进行攻击性审查。
+
+**为什么有效**：
+- 常规 code review 容易陷入"功能是否正常"的正面思维，忽略边界条件和恶意输入
+- 对抗式审查强制 AI 站在攻击者视角，主动寻找可被利用的漏洞
+- 可并发开启多个 Agent 同时审查不同模块，提升覆盖面
+
+**实战案例**（AIHOT 项目全局审查，开启约 40 个 Agent 并发）：
+- **OOM 死循环**：大任务导致内存溢出 → 进程被杀 → 自动重试 → 又溢出……无限循环（根因：50MB~100MB 的 HTML 信源未做大小校验就全量加载）
+- **未来时间污染**：信源发布时间因时区错误变成"明天"，导致文章排到信息流最前面，被误推送给用户
+- **性能炸弹**：HTML 清洗模块、翻译模块的隐藏性能隐患（正则回溯爆炸、同步阻塞等）
+- **缓存穿透假阳性**：部署探活机制误判缓存状态，导致穿透防护失效
+
+**适用场景**：项目上线前安全审查、大规模重构后验证、怀疑存在隐藏 bug 时。提示词示例：
+
+```
+你是一个恶意攻击者，目标是搞崩这个系统。请审查以下代码，找出所有可被利用的漏洞：
+- 能否通过构造输入导致 OOM、死循环、CPU 爆炸？
+- 能否绕过权限校验访问他人数据？
+- 能否通过时间/时区 manipulation 污染数据？
+- 有无缓存穿透/雪崩风险？
+```
