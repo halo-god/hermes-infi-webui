@@ -1,143 +1,143 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+本文件为 Claude Code（claude.ai/code）在本仓库中工作时提供指导。
 
-## Commands
+## 命令
 
-### Full stack (Docker, recommended)
+### 全栈（Docker，推荐）
 ```bash
-make up        # build + start all services (Postgres · Redis · MinIO · API · Web)
-make down      # stop
-make fresh     # stop + wipe volumes
-make logs      # tail API logs
-make migrate   # alembic upgrade head inside running api container
-make seed      # re-seed super-admin inside running api container
+make up        # 构建 + 启动所有服务（Postgres · Redis · MinIO · API · Web）
+make down      # 停止
+make fresh     # 停止 + 清空数据卷
+make logs      # 查看 API 日志
+make migrate   # 在运行中的 api 容器内执行 alembic upgrade head
+make seed      # 在运行中的 api 容器内重新初始化超级管理员
 ```
-Default login: `admin@hermes.io` / `Hermes@2026` — Web: http://localhost:8080 · API docs: http://localhost:8000/api/docs
+默认登录：`admin@hermes.io` / `Hermes@2026` — Web: http://localhost:8080 · API 文档: http://localhost:8000/api/docs
 
-### Backend (bare-metal)
+### 后端（裸机）
 ```bash
 cd backend
 pip install -e ".[dev]"
 alembic upgrade head
 python -m app.seed
-uvicorn app.main:app --reload          # API on :8000
-python -m agent_runner.runner          # agent runner (separate terminal)
+uvicorn app.main:app --reload          # API 端口 :8000
+python -m agent_runner.runner          # agent runner（另开终端）
 ```
 
-### Frontend
+### 前端
 ```bash
 cd frontend
 npm install
-npm run dev          # :5173, /api proxied to :8000 (including WebSocket)
-npm run type-check   # vue-tsc --noEmit only
-npm run build        # type-check + vite build (CI gate)
+npm run dev          # 端口 :5173，/api 代理到 :8000（含 WebSocket）
+npm run type-check   # 仅 vue-tsc --noEmit
+npm run build        # type-check + vite build（CI 门禁）
 ```
 
-### Linting / tests
+### 代码检查 / 测试
 ```bash
 cd backend
-ruff check .                            # lint (line-length=100)
-pytest tests/test_foo.py -k test_name  # single test
-pytest                                  # all tests (asyncio_mode=auto)
+ruff check .                            # lint（line-length=100）
+pytest tests/test_foo.py -k test_name  # 单个测试
+pytest                                  # 全部测试（asyncio_mode=auto）
 ```
 
 ---
 
-## Architecture
+## 架构
 
-### Backend — 4-layer, strictly one-way
+### 后端 — 4 层架构，严格单向调用
 
 ```
-HTTP/WS  →  app/api/v1/*.py        Routes: parse input, auth deps, call service, serialize (thin)
-            app/services/*.py      Business logic: orchestration, transactions, domain rules (thick)
-            app/db/models/*.py     SQLAlchemy 2.0 async ORM
+HTTP/WS  →  app/api/v1/*.py        路由层：解析输入、鉴权依赖、调用服务、序列化（薄）
+            app/services/*.py      业务逻辑：编排、事务、领域规则（厚）
+            app/db/models/*.py     SQLAlchemy 2.0 异步 ORM
             PostgreSQL / Redis
 ```
 
-Cross-cutting utilities live in `app/core/`: `security` (argon2id passwords, JWT), `rbac` (platform roles), `governance` (team content-permission matrix), `redis` (connection + Stream/PubSub/rate-limit keys), `metrics`, `object_storage`.
+横切工具位于 `app/core/`：`security`（argon2id 密码、JWT）、`rbac`（平台角色）、`governance`（团队内容权限矩阵）、`redis`（连接 + Stream/PubSub/限流键）、`metrics`、`object_storage`。
 
-All ORM models inherit `UUIDPrimaryKey` and `Timestamps` from `app/db/models/mixins.py`. Migrations are **hand-written** in `backend/alembic/versions/000N_*.py`; generate a blank with `alembic revision -m "..."` then fill in `upgrade`/`downgrade`.
+所有 ORM 模型继承 `UUIDPrimaryKey` 和 `Timestamps`（来自 `app/db/models/mixins.py`）。迁移**手写**在 `backend/alembic/versions/000N_*.py`；用 `alembic revision -m "..."` 生成空白文件后填写 `upgrade`/`downgrade`。
 
-Configuration is entirely in `app/config.py` (`pydantic-settings`); add a field with a default, consume via `from app.config import settings`.
+配置全部在 `app/config.py`（`pydantic-settings`）；加一个带默认值的字段，通过 `from app.config import settings` 使用。
 
-Auth: `Depends(get_current_user)` in `app/deps.py`. Admin routes use `_require_admin(user)`. Team permission gates call `team_service.require_permission(db, team_id, user_id, "perm.key")`.
+鉴权：`Depends(get_current_user)` 在 `app/deps.py`。Admin 路由用 `_require_admin(user)`。团队权限网关调用 `team_service.require_permission(db, team_id, user_id, "perm.key")`。
 
-### Agent Runner — separate process
+### Agent Runner — 独立进程
 
-`agent_runner/runner.py` consumes Redis Stream `acp:prompt`, drives ACP (JSON-RPC over stdio) sessions via `acp_client.py`, writes results to DB, and appends streaming events to the capped per-conversation Redis Stream `evt:conv:{id}`. The API layer XREADs and forwards to clients via SSE (single-agent, `Last-Event-ID`/`since` replay on reconnect) or WebSocket (roundtable). Falls back to `mock_agent.py` if no agent CLI is on PATH.
+`agent_runner/runner.py` 消费 Redis Stream `acp:prompt`，通过 `acp_client.py` 驱动 ACP（JSON-RPC over stdio）会话，将结果写入 DB，并把流式事件追加到按会话限流的 Redis Stream `evt:conv:{id}`。API 层通过 XREAD 转发给客户端（单 agent 用 SSE，支持 `Last-Event-ID`/`since` 重连续传；圆桌用 WebSocket）。无 agent CLI 时回退到 `mock_agent.py`。
 
-### Redis key conventions
-| Key | Purpose |
+### Redis 键约定
+| 键 | 用途 |
 |-----|---------|
-| `acp:prompt` | Stream: API → runner (prompt tasks) |
-| `evt:conv:{id}` | Stream: runner/API → clients (streaming + group events; capped, replayable). Group adds `message` (human peer msg), `message_update` (edit/recall/reaction), `typing` (ephemeral), `members_changed` |
-| `evt:user:{id}` | Stream: API → one per-user `/me/stream` (cross-conversation `notify` for unread/@-mention badges; capped, replayable) |
-| `presence:{user}` | User online presence (SET ex=60; heartbeat every ~30s) |
-| `hermes:clarify:req:{sid}` | List: agent → runner clarify requests (RPUSH / LPOP) |
-| `hermes:clarify:resp:{sid}:{cid}` | List: runner → agent clarify answer (RPUSH / BLPOP) |
-| `rl:msg:{user}` | Rate-limit counter |
-| `acp:cancel:{conv}` | Cancellation signal |
-| `jwt:blacklist:{jti}` | Logout token invalidation |
-| `mem:consolidate:status:{user}` | Memory-consolidation status + run lock (SET NX) |
-| `mem:consolidate:cooldown:{user}` | Non-admin consolidation cooldown (TTL) |
+| `acp:prompt` | Stream：API → runner（prompt 任务） |
+| `evt:conv:{id}` | Stream：runner/API → 客户端（流式 + 群聊事件；限流、可重传）。群聊新增 `message`（人类消息）、`message_update`（编辑/撤回/表情）、`typing`（临时）、`members_changed` |
+| `evt:user:{id}` | Stream：API → 每用户 `/me/stream`（跨会话 `notify` 用于未读/@提及徽章；限流、可重传） |
+| `presence:{user}` | 用户在线状态（SET ex=60；约 30s 心跳） |
+| `hermes:clarify:req:{sid}` | List：agent → runner 澄清请求（RPUSH / LPOP） |
+| `hermes:clarify:resp:{sid}:{cid}` | List：runner → agent 澄清回复（RPUSH / BLPOP） |
+| `rl:msg:{user}` | 限流计数器 |
+| `acp:cancel:{conv}` | 取消信号 |
+| `jwt:blacklist:{jti}` | 登出 token 失效 |
+| `mem:consolidate:status:{user}` | 记忆整理状态 + 运行锁（SET NX） |
+| `mem:consolidate:cooldown:{user}` | 非管理员整理冷却（TTL） |
 
-### Frontend — Vue 3 + Pinia
+### 前端 — Vue 3 + Pinia
 
 ```
 src/
-├── api/         client.ts (axios + Bearer inject + auto-refresh on 401)
+├── api/         client.ts（axios + Bearer 注入 + 401 自动刷新）
 │                auth / agents / conversations / teams / admin / projects .ts
-├── stores/      auth.ts (session, route guard)  ·  chat.ts (conversations, SSE, roundtable WS)
-├── router/      index.ts — meta.requiresAdmin for admin-only routes
+├── stores/      auth.ts（会话、路由守卫）  ·  chat.ts（会话、SSE、圆桌 WS）
+├── router/      index.ts — meta.requiresAdmin 用于仅管理员路由
 ├── views/       ChatView · AdminView · TeamDetailView · ProjectView …
-├── components/  WorkspacePanel.vue (multi-tab file preview/edit, adapter-pattern)
-├── types/       index.ts — single source of all TS interfaces
-└── utils/       markdown.ts (zero-dep renderer)
+├── components/  WorkspacePanel.vue（多标签文件预览/编辑，适配器模式）
+├── types/       index.ts — 所有 TS 接口的唯一来源
+└── utils/       markdown.ts（零依赖渲染器）
 ```
 
-**Auth flow**: `client.ts` injects `Authorization: Bearer` on every request; a 401 triggers a single-flight refresh; refresh failure dispatches `hermes:logout` → router redirects to login.
+**鉴权流程**：`client.ts` 在每个请求注入 `Authorization: Bearer`；401 触发单飞刷新；刷新失败派发 `hermes:logout` → 路由跳转登录页。
 
-**Streaming**: single-agent uses SSE (`EventSource`, token in query param); roundtable uses WebSocket. Both handled in `stores/chat.ts`.
+**流式传输**：单 agent 用 SSE（`EventSource`，token 在 query 参数中）；圆桌用 WebSocket。均在 `stores/chat.ts` 处理。
 
-**WorkspacePanel** uses an adapter pattern — callers pass `files: FileItem[]` + `adapter: WsAdapter` so the same panel works for both conversation workspace files and team knowledge files.
+**WorkspacePanel** 使用适配器模式 — 调用方传入 `files: FileItem[]` + `adapter: WsAdapter`，使同一面板同时适用于会话工作区文件和团队知识库文件。
 
-**Profiles ("assistants")**: stored in the `profiles` table. `GET /profiles` returns all active profiles. `POST /profiles/scan` auto-creates profiles for any registered agent that doesn't have one. Admins manage profiles in AdminView → "助手管理" tab.
+**Profiles（"助手"）**：存储在 `profiles` 表。`GET /profiles` 返回所有活跃 profile。`POST /profiles/scan` 为未注册的 agent 自动创建 profile。管理员在 AdminView → "助手管理" tab 管理。
 
-### Key SQLAlchemy async pitfalls
-- **Never trigger lazy-loaded relationships during response serialization** — causes `MissingGreenlet`. Explicitly query and hand-assemble DTOs (see `conversations.py` for the pattern).
-- Tests must reset the engine/redis per-case to avoid `attached to a different loop` errors — see `tests/conftest.py`.
-- Seeding JSONB in migrations: use `CAST(:d AS jsonb)` + `json.dumps(...)`, never pass an already-serialised string with `type_=JSONB`.
+### SQLAlchemy 异步关键陷阱
+- **响应序列化期间绝不触发懒加载关系** — 会导致 `MissingGreenlet`。需显式查询并手工组装 DTO（参见 `conversations.py` 的模式）。
+- 测试必须在每个用例重置 engine/redis，避免 `attached to a different loop` 错误 — 参见 `tests/conftest.py`。
+- 迁移中初始化 JSONB：用 `CAST(:d AS jsonb)` + `json.dumps(...)`，切勿传入已序列化的字符串并加 `type_=JSONB`。
 
-### Adding common things
+### 常见新增操作
 
-**New REST endpoint**: schema in `app/schemas/<domain>.py` → logic in `app/services/<domain>_service.py` → route in `app/api/v1/<domain>.py` → register in `app/api/v1/__init__.py`.
+**新增 REST 端点**：schema 在 `app/schemas/<domain>.py` → 逻辑在 `app/services/<domain>_service.py` → 路由在 `app/api/v1/<domain>.py` → 在 `app/api/v1/__init__.py` 注册。
 
-**New DB table**: add ORM model inheriting `UUIDPrimaryKey + Timestamps`, import it in `app/db/models/__init__.py`, hand-write migration in `alembic/versions/`.
+**新增数据库表**：添加继承 `UUIDPrimaryKey + Timestamps` 的 ORM 模型，在 `app/db/models/__init__.py` 导入，在 `alembic/versions/` 手写迁移。
 
-**New team permission**: add to `app/core/governance.py` `PERMISSIONS` + `_DEFAULTS`, guard routes with `team_service.require_permission(...)`.
+**新增团队权限**：添加到 `app/core/governance.py` 的 `PERMISSIONS` + `_DEFAULTS`，用 `team_service.require_permission(...)` 守卫路由。
 
-**New frontend page**: API method in `src/api/<domain>.ts`, types in `src/types/index.ts`, view in `src/views/XxxView.vue`, route in `src/router/index.ts`.
+**新增前端页面**：API 方法在 `src/api/<domain>.ts`，类型在 `src/types/index.ts`，视图在 `src/views/XxxView.vue`，路由在 `src/router/index.ts`。
 
-**TS build is strict** (`noUnusedLocals`): clean up all unused imports/variables before `npm run build`.
+**TS 构建是严格的**（`noUnusedLocals`）：`npm run build` 前清理所有未使用的导入/变量。
 
-### Frontend UI/UX layout conventions
+### 前端 UI/UX 布局规范
 
-All pages MUST follow these layout conventions for visual consistency:
+所有页面必须遵循以下布局规范以保持视觉一致性：
 
-1. **Page structure**: Every view uses `<div class="stage">` as the root (scroll container, `flex: 1; overflow-y: auto`).
-2. **Hero header**: Admin/tool pages use `<div class="admin-hero">` with `<div class="admin-hero-row">` (badge + meta), `<h1 class="admin-title">` (with `<em>` for emphasis), and `<div class="admin-sub">` (subtitle).
-3. **Centered body**: Content goes in `<div class="admin-body">` — `max-width: 1400px; margin: 0 auto; padding: 24px 40px 60px`.
-4. **Cards**: Use `<div class="section-card">` with `<div class="section-head"><div class="section-title">…</div></div>` + padding body.
-5. **Stat cards**: `<div class="stat-grid">` with `<div class="stat"><div class="stat-label">…</div><div class="stat-value">…</div></div>`.
-6. **Two-column layout**: `<div class="col-grid">` (CSS grid, `gap: 16px`).
-7. **Forms**: Use `class="cfg-input"` for inputs/selects/textareas. Buttons use `class="btn"` or `class="btn primary"`.
-8. **Filter toolbars**: Use `<div class="users-toolbar">` with `<div class="filter-input">` (search) and `<button class="filter-select">` (dropdowns).
-9. **Tables**: CSS grid rows — `<div class="audit-table">` with `<div class="au-row head">` (header) and `<div class="au-row">` (body rows).
-10. **Topbar buttons**: Use `class="icon-btn"` with `<Icon name="…" />`. For dropdown panels, anchor with `position: relative` wrapper + `position: absolute` panel with `z-index: 800`. **If a dropdown risks overflow, prefer a direct route link instead** (`router.push('/path')`).
-11. **Sidebar scroll areas**: Lists that can grow (teams, group chats) MUST have `max-height` + `overflow-y: auto` + `flex-shrink: 0` to prevent pushing other sections off-screen. The conversation list (`.convo-list`) uses `flex: 1; min-height: 0` to fill remaining space.
-12. **Status tags/pills**: `<span class="fb-cat-pill">` / `<span class="fb-st-pill">` — colored border + text, `font-size: 10px; padding: 1px 6px; border-radius: 4px`.
-13. **Transitions**: Dropdown panels use `<Transition name="panel-drop">` (opacity + translateY 8px over 150ms).
+1. **页面结构**：每个视图使用 `<div class="stage">` 作为根容器（滚动容器，`flex: 1; overflow-y: auto`）。
+2. **Hero 头部**：管理/工具页使用 `<div class="admin-hero">` + `<div class="admin-hero-row">`（徽章 + 元信息）+ `<h1 class="admin-title">`（用 `<em>` 强调）+ `<div class="admin-sub">`（副标题）。
+3. **居中内容区**：内容放在 `<div class="admin-body">` — `max-width: 1400px; margin: 0 auto; padding: 24px 40px 60px`。
+4. **卡片**：使用 `<div class="section-card">` + `<div class="section-head"><div class="section-title">…</div></div>` + padding 内容体。
+5. **统计卡片**：`<div class="stat-grid">` + `<div class="stat"><div class="stat-label">…</div><div class="stat-value">…</div></div>`。
+6. **双栏布局**：`<div class="col-grid">`（CSS grid，`gap: 16px`）。
+7. **表单**：输入框/下拉框/文本域用 `class="cfg-input"`。按钮用 `class="btn"` 或 `class="btn primary"`。
+8. **过滤工具栏**：使用 `<div class="users-toolbar">` + `<div class="filter-input">`（搜索）+ `<button class="filter-select">`（下拉）。
+9. **表格**：CSS grid 行 — `<div class="audit-table">` + `<div class="au-row head">`（表头）+ `<div class="au-row">`（数据行）。
+10. **顶栏按钮**：使用 `class="icon-btn"` + `<Icon name="…" />`。下拉面板用 `position: relative` 包裹 + `position: absolute` 面板 + `z-index: 800`。**如下拉有溢出风险，优先用直接路由跳转**（`router.push('/path')`）。
+11. **侧栏滚动区域**：可能增长的列表（团队、群聊）必须有 `max-height` + `overflow-y: auto` + `flex-shrink: 0`，防止挤压其他区域。会话列表（`.convo-list`）用 `flex: 1; min-height: 0` 填充剩余空间。
+12. **状态标签/pill**：`<span class="fb-cat-pill">` / `<span class="fb-st-pill">` — 彩色边框 + 文字，`font-size: 10px; padding: 1px 6px; border-radius: 4px`。
+13. **过渡动画**：下拉面板使用 `<Transition name="panel-drop">`（透明度 + translateY 8px，150ms）。
 
 ---
 
