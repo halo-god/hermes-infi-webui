@@ -488,10 +488,13 @@ const scanMsg = ref("");
 const hermesVersion = ref("");
 const showProfileForm = ref(false);
 const editingProfileId = ref<string | null>(null);
-const profileForm = reactive<ProfileCreate & { knowledge_ids: string[]; mcp_server_names: string[] }>({
+const profileForm = reactive<ProfileCreate & {
+  knowledge_ids: string[]; mcp_server_names: string[]; is_moa: boolean; moa_target_profile_ids: string[];
+}>({
   name: "", handle: "", scope: "global", color: "#b8852a",
   icon: "sparkle", desc: "", default_model: "hermes-4", team_id: null,
   system_prompt: null, skills: [], featured: false, knowledge_ids: [], mcp_server_names: [],
+  is_moa: false, moa_target_profile_ids: [],
 });
 // Selectable knowledge entries (team knowledge, labeled by team) for prompt injection.
 const knowledgeOptions = ref<{ id: string; label: string }[]>([]);
@@ -516,6 +519,12 @@ function toggleMcpServer(name: string) {
   const i = arr.indexOf(name);
   if (i >= 0) arr.splice(i, 1);
   else arr.push(name);
+}
+function toggleMoaTarget(id: string) {
+  const arr = profileForm.moa_target_profile_ids;
+  const i = arr.indexOf(id);
+  if (i >= 0) arr.splice(i, 1);
+  else arr.push(id);
 }
 const skillInput = ref("");
 const profileSaving = ref(false);
@@ -574,6 +583,7 @@ function openCreateProfile() {
     name: "", handle: "", scope: "global", color: "#b8852a",
     icon: "sparkle", desc: "", default_model: "hermes-4", team_id: null,
     system_prompt: null, skills: [], featured: false, knowledge_ids: [], mcp_server_names: [],
+    is_moa: false, moa_target_profile_ids: [],
   });
   skillInput.value = "";
   profileError.value = "";
@@ -588,6 +598,7 @@ function openEditProfile(p: Profile) {
     icon: p.icon, desc: p.desc, default_model: p.default_model, team_id: p.team_id,
     system_prompt: p.system_prompt ?? null, skills: [...(p.skills || [])], featured: p.featured ?? false,
     knowledge_ids: [...(p.knowledge_ids || [])], mcp_server_names: [...(p.mcp_server_names || [])],
+    is_moa: p.is_moa ?? false, moa_target_profile_ids: [...(p.moa_target_profile_ids || [])],
   });
   skillInput.value = "";
   profileError.value = "";
@@ -617,6 +628,7 @@ async function saveProfile() {
         skills: profileForm.skills, featured: profileForm.featured,
         knowledge_ids: profileForm.knowledge_ids,
         mcp_server_names: profileForm.mcp_server_names,
+        is_moa: profileForm.is_moa, moa_target_profile_ids: profileForm.moa_target_profile_ids,
       });
     } else {
       await profilesApi.create({ ...profileForm });
@@ -1379,6 +1391,21 @@ async function confirmImport() {
               <label v-for="s in mcpServers" :key="s.name" style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;color:var(--ink)">
                 <input type="checkbox" :checked="profileForm.mcp_server_names.includes(s.name)" @change="toggleMcpServer(s.name)" style="width:13px;height:13px;cursor:pointer" />
                 {{ s.name }}
+              </label>
+            </div>
+          </label>
+          <!-- MoA: fan this profile's messages out to reference profiles + synthesize -->
+          <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:12.5px;color:var(--ink-mute);cursor:pointer">
+            <input type="checkbox" v-model="profileForm.is_moa" style="width:14px;height:14px;cursor:pointer" />
+            MoA 混合模型（选中该助手时，向下方参考助手并行提问并综合作答）
+          </label>
+          <label v-if="profileForm.is_moa" class="text-mute-sm" style="display:block;margin-top:8px">
+            参考助手（至少选择 2 个以获得有意义的综合结果）
+            <div v-if="profiles.filter((p) => p.id !== editingProfileId).length === 0" style="margin-top:6px;font-size:12px;color:var(--ink-mute)">暂无其他可选助手。</div>
+            <div v-else style="margin-top:6px;max-height:160px;overflow-y:auto;border:1px solid var(--rule);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:4px">
+              <label v-for="p in profiles.filter((p) => p.id !== editingProfileId)" :key="p.id" style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;color:var(--ink)">
+                <input type="checkbox" :checked="profileForm.moa_target_profile_ids.includes(p.id)" @change="toggleMoaTarget(p.id)" style="width:13px;height:13px;cursor:pointer" />
+                {{ p.name }}
               </label>
             </div>
           </label>

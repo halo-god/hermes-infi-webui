@@ -365,6 +365,35 @@ async def _resolve_mcp_servers(db: AsyncSession, profile: Profile | None) -> lis
     return [e for e in entries if e]
 
 
+async def _build_moa_targets(
+    db: AsyncSession, target_profile_ids: list[str], memory_prompt: str | None,
+) -> list[dict]:
+    """Resolve an MoA Profile's reference profiles into roundtable `targets`,
+    each with its own persona/env/tools — same shape send_roundtable already
+    expects from multi-agent compare and group roundtable dispatch."""
+    targets: list[dict] = []
+    for target_pid in target_profile_ids:
+        target_profile = await db.get(Profile, target_pid)
+        if not target_profile or not target_profile.is_active:
+            continue
+        t_system_prompt = target_profile.system_prompt or None
+        t_knowledge_prompt = await _build_knowledge_prompt(db, target_profile)
+        if t_knowledge_prompt:
+            t_system_prompt = (
+                f"{t_system_prompt}\n\n{t_knowledge_prompt}" if t_system_prompt else t_knowledge_prompt
+            )
+        if memory_prompt:
+            t_system_prompt = f"{t_system_prompt}\n\n{memory_prompt}" if t_system_prompt else memory_prompt
+        targets.append({
+            "agent_id": target_profile.default_agent_id,
+            "profile_id": str(target_profile.id),
+            "system_prompt": t_system_prompt,
+            "profile_dir": _profile_dir(target_profile),
+            "mcp_servers": await _resolve_mcp_servers(db, target_profile),
+        })
+    return targets
+
+
 def _build_attached_prompt(text: str, attached: list[dict]) -> str:
     """Inject file references into the prompt text so the agent knows about attachments.
 
@@ -522,6 +551,7 @@ async def send_roundtable(
     mentions: list[str] | None = None,
     existing_user_msg: Message | None = None,
     task_id: uuid.UUID | None = None,
+    moa: bool = False,
 ) -> tuple[Message, Message]:
     """Multi-agent turn: one roundtable message holding per-agent replies + a
     synthesized merge. The runner streams each reply in parallel — each with
@@ -534,7 +564,10 @@ async def send_roundtable(
     shared identity.
 
     Pass existing_user_msg when the caller already persisted the user turn
-    (group dispatch) to avoid a duplicate user row.
+    (group dispatch) to avoid a duplicate user row. Pass moa=True when this
+    fan-out was triggered by selecting an is_moa Profile rather than an
+    explicit multi-agent/group roundtable, so the frontend can render it as a
+    single synthesized answer instead of a side-by-side compare.
     """
     attached = await _resolve_attached_files(db, attached_file_ids or [], conversation_id=str(convo.id))
     if existing_user_msg is None:
@@ -564,6 +597,7 @@ async def send_roundtable(
                 for t in targets
             ],
             "merged": {"text": "", "status": "pending"},
+            "moa": moa,
         },
         status="streaming",
     )
@@ -593,6 +627,7 @@ async def send_roundtable(
             "message_id": str(rt_msg.id),
             "targets": targets,
             "text": prompt_text,
+            "moa": moa,
         }
     )
     return user_msg, rt_msg
@@ -760,6 +795,7 @@ async def dispatch(
     system_prompt: str | None = None
     profile_dir: str | None = None
     mcp_servers: list[dict] = []
+    profile: Profile | None = None
     effective_profile_id = profile_id_override or convo.profile_id
     if effective_profile_id:
         profile = await db.get(Profile, effective_profile_id)
@@ -778,6 +814,18 @@ async def dispatch(
     memory_prompt = await _build_memory_prompt(db, owner_id)
     if memory_prompt:
         system_prompt = f"{system_prompt}\n\n{memory_prompt}" if system_prompt else memory_prompt
+
+    # MoA ("mixture of agents"): the selected Profile fans the message out to
+    # its bound reference profiles via the same roundtable executor used for
+    # multi-agent compare/group roundtable, then synthesizes one reply — no
+    # new merge logic, just a different way of building `targets`.
+    if profile is not None and profile.is_moa and profile.moa_target_profile_ids:
+        moa_targets = await _build_moa_targets(db, profile.moa_target_profile_ids, memory_prompt)
+        if moa_targets:
+            return await send_roundtable(
+                db, convo, text, moa_targets,
+                attached_file_ids=attached_file_ids, owner_id=owner_id, task_id=task_id, moa=True,
+            )
 
     # Anti-clarify guidance only on follow-up turns — the first turn carries the
     # clarify preamble, and sending both contradicted each other.

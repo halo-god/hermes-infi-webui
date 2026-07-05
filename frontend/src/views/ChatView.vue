@@ -1033,7 +1033,7 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
               <template v-if="chat.messages[row.index]">
                 <!-- roundtable -->
                 <div v-if="chat.messages[row.index].role === 'roundtable'" class="roundtable">
-              <div class="roundtable-label">圆桌 · {{ chat.messages[row.index].content.replies?.length || 0 }} 位助手并行作答</div>
+              <div class="roundtable-label">{{ chat.messages[row.index].content.moa ? "MoA 混合模型" : "圆桌" }} · {{ chat.messages[row.index].content.replies?.length || 0 }} 位助手并行作答</div>
               <div v-for="(r, idx) in chat.messages[row.index].content.replies" :key="idx" class="rt-card">
                 <div class="rt-card-head">
                   <span class="rt-avatar" :style="{ background: profileDisplay(profileForEntity(r.agent_id, r.profile_id)).color }"><Icon :name="profileDisplay(profileForEntity(r.agent_id, r.profile_id)).icon" :size="11" /></span>
