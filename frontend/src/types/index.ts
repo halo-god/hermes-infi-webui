@@ -373,6 +373,7 @@ export type StreamEvent = (
   | { type: "typing"; user_id: string; name?: string }
   | { type: "members_changed" }
   | { type: "notify"; title?: string; snippet?: string; mention?: boolean; unread?: number }
+  | { type: "subagent_nudge"; subagent_id: string; status: string }
 ) & { conversation_id?: string };
 
 // ── Teams / projects / tasks (P3 backend; frontend added here) ──

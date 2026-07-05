@@ -432,7 +432,12 @@ export const useChatStore = defineStore("chat", () => {
     } else {
       // Personal conversation: existing logic
       const passOpts = { profileId: opts?.profileId, fileIds, taskId: opts?.taskId };
-      if (activeAgents.value.length > 1) await sendRoundtable(id, text, passOpts);
+      // An MoA profile fans out to its reference profiles via the roundtable
+      // executor server-side (dispatch() decides this), so it needs the same
+      // WS transport as a real multi-agent roundtable — the SSE transport
+      // only understands single-agent stream events.
+      const selectedProfile = opts?.profileId ? profiles.value.find((p) => p.id === opts.profileId) : null;
+      if (activeAgents.value.length > 1 || selectedProfile?.is_moa) await sendRoundtable(id, text, passOpts);
       else await sendSingle(id, text, passOpts);
     }
   }

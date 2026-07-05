@@ -119,6 +119,38 @@ class Settings(BaseSettings):
     memory_consolidate_status_ttl: int = 3600  # done/error status visibility window
     # running-lock TTL; must exceed acp_prompt_timeout so a slow run can't double-start
     memory_consolidate_lock_ttl: int = 1200
+    # Retrieval-time injection of episodic memory + skills — kill switch in
+    # case pg_trgm relevance misbehaves in production; the flat
+    # user_profile/soul/notes injection is unaffected either way.
+    memory_episodic_injection_enabled: bool = True
+
+    # ── Background subagents (persistent, non-blocking ACP peer sessions) ──
+    subagent_idle_timeout_seconds: int = 900     # evict if no activity for 15 min
+    subagent_max_lifetime_seconds: int = 14400   # hard cap: 4 hours, regardless of activity
+    subagent_status_flush_interval_seconds: int = 5  # min gap between DB status writes
+
+    # ── Self-evolving skills: eval-dataset builder (backend/skill_evolution/) ──
+    skill_evolution_min_real_firings: int = 8       # below this, top up with synthetic examples
+    skill_evolution_max_firings_per_skill: int = 60  # newest-first cap per dataset build
+    skill_evolution_firing_excerpt_chars: int = 500  # per-example trigger-query truncation
+    skill_evolution_dataset_input_chars: int = 24000  # total budget across real examples
+    skill_evolution_synthetic_examples: int = 10     # how many to generate when topping up
+    # Gates a proposal must clear before it's written (still requires manual approval after).
+    skill_evolution_min_score_improvement: float = 0.05  # candidate must beat baseline by this much
+    skill_evolution_max_content_bytes: int = 15360       # 15KB — injected verbatim into every firing's prompt
+    skill_evolution_max_content_diff_ratio: float = 0.6  # 1 - SequenceMatcher.ratio(); too-large a rewrite is rejected
+    # run-lock TTL; must exceed the optimizer's own worst-case runtime
+    skill_evolution_lock_ttl: int = 1200
+    skill_evolution_status_ttl: int = 3600  # done/error status visibility window
+    # Real DSPy+GEPA optimizer — off by default; an admin must both flip this
+    # AND configure a key before any direct-LLM call is ever made (same kill-switch
+    # precedent as memory_episodic_injection_enabled). While off (or misconfigured),
+    # run_evolution() falls back to the free, LLM-free stub from Stage D1.
+    skill_evolution_enabled: bool = False
+    skill_evolution_llm_model: str = ""      # litellm-style model string, e.g. "openai/gpt-4o-mini"
+    skill_evolution_llm_api_key: str = ""    # treat as a secret: never logged, never in a response
+    skill_evolution_llm_api_base: str = ""   # optional self-hosted/proxy endpoint
+    skill_evolution_llm_max_calls_per_run: int = 60  # hard cap on judge-LM calls, on top of GEPA's own budget
 
     # ── Uploads ──
     max_upload_mb: int = 25  # reject uploads larger than this (per file)

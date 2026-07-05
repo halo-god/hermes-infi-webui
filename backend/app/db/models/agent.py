@@ -49,3 +49,11 @@ class Profile(UUIDPrimaryKey, Timestamps, Base):
     knowledge_ids: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     # Bound knowledge FOLDER ids — all items under these folders are injected.
     knowledge_folder_ids: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    # Names of admin-registered MCP servers (system_settings.mcp_servers) this
+    # profile's ACP sessions should be started with. Empty = no MCP tools.
+    mcp_server_names: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    # MoA ("mixture of agents"): selecting this profile fans a message out to
+    # moa_target_profile_ids via the existing roundtable executor and returns
+    # one synthesized reply, instead of answering with default_agent_id itself.
+    is_moa: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    moa_target_profile_ids: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)

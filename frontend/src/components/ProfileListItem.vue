@@ -28,6 +28,7 @@ defineEmits<{
       </div>
       <div class="profile-desc">{{ profile.desc }}</div>
     </div>
-    <span class="profile-tag">{{ profile.default_model }}</span>
+    <span v-if="profile.is_moa" class="profile-tag" title="MoA 混合模型">MoA</span>
+    <span v-else class="profile-tag">{{ profile.default_model }}</span>
   </button>
 </template>

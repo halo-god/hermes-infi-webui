@@ -42,6 +42,20 @@ export function useNotificationStream() {
       }
     });
 
+    // Background subagent finished/failed while the user is elsewhere —
+    // evt:conv:{parent_id} only reaches an open per-conversation stream, so
+    // this cross-conversation stream is the only way to notify once the
+    // user has navigated away from the parent conversation.
+    stream.on("subagent_nudge", (ev) => {
+      const failed = ev.status === "error" || ev.status === "timeout";
+      ns.push({
+        title: failed ? "后台任务失败" : "后台任务已完成",
+        body: failed ? "点击查看详情" : "有新的回复等待查看",
+        kind: failed ? "warn" : "success",
+        link: ev.conversation_id ? `/?c=${ev.conversation_id}` : undefined,
+      });
+    });
+
     try {
       await stream.openSSE(async () => {
         const ticket = await mediaTicket.ensure();

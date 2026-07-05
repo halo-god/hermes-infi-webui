@@ -1,16 +1,20 @@
-"""Agent memory endpoints — per-user notes, user_profile, soul + 做梦整理触发."""
+"""Agent memory endpoints — per-user notes, user_profile, soul + 做梦整理触发,
+plus read access to episodic memory and CRUD for the personal skills layer."""
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core import redis as redis_core
 from app.db.base import get_db
+from app.db.models.memory import MemoryEpisode
 from app.db.models.user import User
 from app.deps import get_current_user
 from app.services import memory_service
@@ -150,3 +154,116 @@ async def consolidate_status(user: User = Depends(get_current_user)) -> Consolid
         finished_at=data.get("finished_at"),
         cooldown_remaining=cooldown,
     )
+
+
+# ── Episodic memory (read-only — written by consolidation) ─────────────────
+
+class EpisodeOut(BaseModel):
+    id: uuid.UUID
+    conversation_id: uuid.UUID | None
+    title: str
+    summary: str
+    consolidated_at: datetime
+
+
+@router.get("/episodes", response_model=list[EpisodeOut])
+async def list_episodes(
+    q: str = "",
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[EpisodeOut]:
+    """List recent episodes, or (with `q`) the ones relevant to a query —
+    same retrieval path used at chat time, exposed for inspection/tuning."""
+    if q.strip():
+        episodes = await memory_service.search_episodes(db, user.id, q, limit=10)
+    else:
+        res = await db.execute(
+            select(MemoryEpisode)
+            .where(MemoryEpisode.user_id == user.id)
+            .order_by(MemoryEpisode.consolidated_at.desc())
+            .limit(20)
+        )
+        episodes = list(res.scalars().all())
+    return [EpisodeOut.model_validate(e, from_attributes=True) for e in episodes]
+
+
+# ── Skills (procedural memory — user-manageable, personal scope) ───────────
+
+class SkillOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    description: str
+    trigger_conditions: dict
+    content: str
+    enabled: bool
+    profile_id: uuid.UUID | None = None
+
+
+class SkillCreate(BaseModel):
+    name: str
+    description: str = ""
+    content: str
+    trigger_conditions: dict = {}
+    profile_id: uuid.UUID | None = None
+    enabled: bool = True
+
+
+class SkillUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    content: str | None = None
+    trigger_conditions: dict | None = None
+    profile_id: uuid.UUID | None = None
+    enabled: bool | None = None
+
+
+@router.get("/skills", response_model=list[SkillOut])
+async def list_skills(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[SkillOut]:
+    skills = await memory_service.list_skills(db, owner_id=user.id)
+    return [SkillOut.model_validate(s, from_attributes=True) for s in skills]
+
+
+@router.post("/skills", response_model=SkillOut, status_code=201)
+async def create_skill(
+    payload: SkillCreate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> SkillOut:
+    skill = await memory_service.create_skill(
+        db, name=payload.name, description=payload.description, content=payload.content,
+        trigger_conditions=payload.trigger_conditions, owner_id=user.id,
+        profile_id=payload.profile_id, enabled=payload.enabled,
+    )
+    return SkillOut.model_validate(skill, from_attributes=True)
+
+
+async def _get_own_skill(db: AsyncSession, user: User, skill_id: uuid.UUID):
+    skill = await memory_service.get_skill(db, skill_id)
+    if skill is None or skill.owner_id != user.id:
+        raise HTTPException(status_code=404, detail="技能不存在")
+    return skill
+
+
+@router.patch("/skills/{skill_id}", response_model=SkillOut)
+async def update_skill(
+    skill_id: uuid.UUID,
+    payload: SkillUpdate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> SkillOut:
+    skill = await _get_own_skill(db, user, skill_id)
+    skill = await memory_service.update_skill(db, skill, **payload.model_dump(exclude_unset=True))
+    return SkillOut.model_validate(skill, from_attributes=True)
+
+
+@router.delete("/skills/{skill_id}", status_code=204)
+async def delete_skill(
+    skill_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    skill = await _get_own_skill(db, user, skill_id)
+    await memory_service.delete_skill(db, skill)

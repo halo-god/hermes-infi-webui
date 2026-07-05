@@ -109,6 +109,19 @@ export function registerStreamHandlers(
     }));
   }, activeId));
 
+  stream.on("subagent_nudge", scoped((ev) => {
+    window.dispatchEvent(new CustomEvent("hermes:subagent-nudge", {
+      detail: { subagent_id: ev.subagent_id, status: ev.status },
+    }));
+    const failed = ev.status === "error" || ev.status === "timeout";
+    const ns = useNotificationStore();
+    ns.push({
+      title: failed ? "后台任务失败" : "后台任务已完成",
+      body: failed ? "点击查看详情" : "有新的回复等待查看",
+      kind: failed ? "warn" : "success",
+    });
+  }, activeId));
+
   stream.on("token", scoped((ev) => {
     const m = find(ev.message_id);
     if (m && m.status === "streaming") m.content = { ...m.content, text: (m.content.text || "") + ev.delta };

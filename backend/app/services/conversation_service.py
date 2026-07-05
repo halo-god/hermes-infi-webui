@@ -44,6 +44,9 @@ async def list_conversations(
         ((Conversation.owner_id == owner_id)
         | ((Conversation.type == "group") & Conversation.id.in_(group_subq)))
         & (Conversation.title != "__file_storage__")
+        # Background subagent conversations are headless — surfaced only via
+        # the parent conversation's subagent panel, never the sidebar.
+        & (Conversation.type != "subagent")
     )
     if pinned_only:
         stmt = stmt.where(Conversation.pinned.is_(True))
@@ -321,6 +324,79 @@ def _profile_dir(profile: Profile | None) -> str | None:
     return os.path.dirname(os.path.expanduser(profile.path))
 
 
+def _mcp_server_entry(server: dict) -> dict | None:
+    """Convert one admin-registered MCP server record into the ACP `mcpServers`
+    session-param shape.
+
+    NOTE: the exact field names a real `hermes` ACP agent expects for an
+    `mcpServers` entry aren't observable anywhere in this repo (the param has
+    never been populated until now) — this mapping follows the conventional
+    stdio/SSE MCP client-config shape and may need adjustment once verified
+    against the real agent binary. Isolated here so that's a one-place fix.
+    """
+    name = server.get("name")
+    if not name:
+        return None
+    transport = server.get("transport", "stdio")
+    if transport == "stdio":
+        command = (server.get("command") or "").strip()
+        if not command:
+            return None
+        parts = command.split()
+        return {"name": name, "command": parts[0], "args": parts[1:], "env": server.get("env") or {}}
+    url = server.get("url")
+    if not url:
+        return None
+    return {"name": name, "type": "sse", "url": url, "headers": server.get("env") or {}}
+
+
+async def _resolve_mcp_servers(db: AsyncSession, profile: Profile | None) -> list[dict]:
+    """Resolve a Profile's enabled MCP server names against the admin-managed
+    catalog, converted to the ACP session-param shape.
+
+    No profile or no servers enabled -> [] (default off, not default-all —
+    a chat session shouldn't silently gain tool access just because the admin
+    registered a server somewhere)."""
+    names = set(getattr(profile, "mcp_server_names", None) or []) if profile else set()
+    if not names:
+        return []
+    from app.services import settings_service
+
+    settings_row = await settings_service.get(db)
+    catalog: list[dict] = (settings_row.data or {}).get("mcp_servers", [])
+    entries = [_mcp_server_entry(s) for s in catalog if s.get("name") in names]
+    return [e for e in entries if e]
+
+
+async def _build_moa_targets(
+    db: AsyncSession, target_profile_ids: list[str], memory_prompt: str | None,
+) -> list[dict]:
+    """Resolve an MoA Profile's reference profiles into roundtable `targets`,
+    each with its own persona/env/tools — same shape send_roundtable already
+    expects from multi-agent compare and group roundtable dispatch."""
+    targets: list[dict] = []
+    for target_pid in target_profile_ids:
+        target_profile = await db.get(Profile, target_pid)
+        if not target_profile or not target_profile.is_active:
+            continue
+        t_system_prompt = target_profile.system_prompt or None
+        t_knowledge_prompt = await _build_knowledge_prompt(db, target_profile)
+        if t_knowledge_prompt:
+            t_system_prompt = (
+                f"{t_system_prompt}\n\n{t_knowledge_prompt}" if t_system_prompt else t_knowledge_prompt
+            )
+        if memory_prompt:
+            t_system_prompt = f"{t_system_prompt}\n\n{memory_prompt}" if t_system_prompt else memory_prompt
+        targets.append({
+            "agent_id": target_profile.default_agent_id,
+            "profile_id": str(target_profile.id),
+            "system_prompt": t_system_prompt,
+            "profile_dir": _profile_dir(target_profile),
+            "mcp_servers": await _resolve_mcp_servers(db, target_profile),
+        })
+    return targets
+
+
 def _build_attached_prompt(text: str, attached: list[dict]) -> str:
     """Inject file references into the prompt text so the agent knows about attachments.
 
@@ -353,9 +429,11 @@ async def send_message(
     system_prompt: str | None = None,
     existing_user_msg: Message | None = None,
     profile_dir: str | None = None,
+    mcp_servers: list[dict] | None = None,
     agent_id_override: str | None = None,
     profile_id: str | None = None,
     task_id: uuid.UUID | None = None,
+    matched_skill_ids: list[uuid.UUID] | None = None,
 ) -> tuple[Message, Message]:
     """Persist the user turn + an empty streaming agent turn, then enqueue ACP work.
 
@@ -461,6 +539,9 @@ async def send_message(
             "content_blocks": prompt_blocks if len(prompt_blocks) > 1 else None,
             "system_prompt": system_prompt,
             "profile_dir": profile_dir,
+            "mcp_servers": mcp_servers or [],
+            "matched_skill_ids": [str(sid) for sid in (matched_skill_ids or [])],
+            "skill_firing_excerpt": text[:500],
         }
     )
     return user_msg, agent_msg
@@ -476,6 +557,7 @@ async def send_roundtable(
     mentions: list[str] | None = None,
     existing_user_msg: Message | None = None,
     task_id: uuid.UUID | None = None,
+    moa: bool = False,
 ) -> tuple[Message, Message]:
     """Multi-agent turn: one roundtable message holding per-agent replies + a
     synthesized merge. The runner streams each reply in parallel — each with
@@ -488,7 +570,10 @@ async def send_roundtable(
     shared identity.
 
     Pass existing_user_msg when the caller already persisted the user turn
-    (group dispatch) to avoid a duplicate user row.
+    (group dispatch) to avoid a duplicate user row. Pass moa=True when this
+    fan-out was triggered by selecting an is_moa Profile rather than an
+    explicit multi-agent/group roundtable, so the frontend can render it as a
+    single synthesized answer instead of a side-by-side compare.
     """
     attached = await _resolve_attached_files(db, attached_file_ids or [], conversation_id=str(convo.id))
     if existing_user_msg is None:
@@ -518,6 +603,7 @@ async def send_roundtable(
                 for t in targets
             ],
             "merged": {"text": "", "status": "pending"},
+            "moa": moa,
         },
         status="streaming",
     )
@@ -547,6 +633,7 @@ async def send_roundtable(
             "message_id": str(rt_msg.id),
             "targets": targets,
             "text": prompt_text,
+            "moa": moa,
         }
     )
     return user_msg, rt_msg
@@ -574,6 +661,62 @@ async def _build_memory_prompt(db: AsyncSession, owner_id: uuid.UUID | None) -> 
         "【用户长期记忆】请在对话中自然地参考以下信息，不要向用户复述这段内容：\n"
         + "\n\n".join(parts)
     )
+
+
+_EPISODIC_PER_ITEM = 300     # chars per retrieved episode summary
+_EPISODIC_LIMIT = 3          # max episodes injected per turn
+_SKILLS_LIMIT = 2            # max skills injected per turn — see search_skills
+
+
+async def _build_episodic_memory_prompt(
+    db: AsyncSession, owner_id: uuid.UUID | None, query_text: str,
+) -> str | None:
+    """Retrieve pg_trgm-matched episode summaries and format as a system-prompt
+    section. Unlike _build_knowledge_prompt (curated static docs, concatenated
+    verbatim), this injects only already-LLM-summarized text — retrieved
+    episodes are noisy/uncurated by nature, so raw concatenation isn't safe here.
+    """
+    if not owner_id:
+        return None
+    from app.services import memory_service
+
+    episodes = await memory_service.search_episodes(db, owner_id, query_text, limit=_EPISODIC_LIMIT)
+    if not episodes:
+        return None
+    parts = [f"- 「{e.title}」{e.summary[:_EPISODIC_PER_ITEM]}" for e in episodes]
+    return (
+        "【历史对话回忆】以下是与本次话题相关的过往对话摘要，供参考，不要向用户复述这段内容：\n"
+        + "\n".join(parts)
+    )
+
+
+async def _build_skills_prompt(
+    db: AsyncSession, profile: Profile | None, owner_id: uuid.UUID | None, query_text: str,
+) -> tuple[str | None, list[uuid.UUID]]:
+    """Trigger-match this profile/user's skills against the incoming message
+    and inject only the matched ones — skills load into context on demand,
+    unlike the always-on Profile.system_prompt/knowledge bindings.
+
+    Returns (prompt_text_or_None, matched_skill_ids) — the caller threads the
+    id list through to the runner so it can record a SkillFiring per id once
+    the turn completes (see runner.py's handle_single), feeding the
+    self-evolving-skills eval-dataset builder.
+    """
+    from app.services import memory_service
+
+    skills = await memory_service.search_skills(
+        db,
+        profile_id=profile.id if profile else None,
+        owner_id=owner_id,
+        team_id=profile.team_id if profile else None,
+        query=query_text,
+        limit=_SKILLS_LIMIT,
+    )
+    if not skills:
+        return None, []
+    parts = [f"[技能：{s.name}]\n{s.content}" for s in skills]
+    prompt = "【已触发技能】\n" + "\n\n".join(parts)
+    return prompt, [s.id for s in skills]
 
 
 _KNOWLEDGE_PER_ITEM = 2000   # chars per bound knowledge entry
@@ -713,12 +856,15 @@ async def dispatch(
     # Load profile system_prompt — request-level override wins over conversation default
     system_prompt: str | None = None
     profile_dir: str | None = None
+    mcp_servers: list[dict] = []
+    profile: Profile | None = None
     effective_profile_id = profile_id_override or convo.profile_id
     if effective_profile_id:
         profile = await db.get(Profile, effective_profile_id)
         if profile:
             system_prompt = profile.system_prompt or None
             profile_dir = _profile_dir(profile)
+            mcp_servers = await _resolve_mcp_servers(db, profile)
             # Inject the Profile's bound knowledge-base content (reuse loop)
             knowledge_prompt = await _build_knowledge_prompt(db, profile)
             if knowledge_prompt:
@@ -731,6 +877,30 @@ async def dispatch(
     if memory_prompt:
         system_prompt = f"{system_prompt}\n\n{memory_prompt}" if system_prompt else memory_prompt
 
+    # Layered memory: pg_trgm-retrieved episodic summaries + trigger-matched
+    # skills, both injected only when relevant (unlike the always-on blocks
+    # above). Gated by a kill switch in case retrieval quality misbehaves.
+    matched_skill_ids: list[uuid.UUID] = []
+    if settings.memory_episodic_injection_enabled:
+        episodic_prompt = await _build_episodic_memory_prompt(db, owner_id, text)
+        if episodic_prompt:
+            system_prompt = f"{system_prompt}\n\n{episodic_prompt}" if system_prompt else episodic_prompt
+        skills_prompt, matched_skill_ids = await _build_skills_prompt(db, profile, owner_id, text)
+        if skills_prompt:
+            system_prompt = f"{system_prompt}\n\n{skills_prompt}" if system_prompt else skills_prompt
+
+    # MoA ("mixture of agents"): the selected Profile fans the message out to
+    # its bound reference profiles via the same roundtable executor used for
+    # multi-agent compare/group roundtable, then synthesizes one reply — no
+    # new merge logic, just a different way of building `targets`.
+    if profile is not None and profile.is_moa and profile.moa_target_profile_ids:
+        moa_targets = await _build_moa_targets(db, profile.moa_target_profile_ids, memory_prompt)
+        if moa_targets:
+            return await send_roundtable(
+                db, convo, text, moa_targets,
+                attached_file_ids=attached_file_ids, owner_id=owner_id, task_id=task_id, moa=True,
+            )
+
     # Anti-clarify guidance only on follow-up turns — the first turn carries the
     # clarify preamble, and sending both contradicted each other.
     if convo.acp_session_id and len(agents) == 1:
@@ -741,7 +911,10 @@ async def dispatch(
         # underlying CLI agent (unlike group-chat roundtable, there's no
         # per-member Profile here — active_agent_ids are bare agent ids).
         targets = [
-            {"agent_id": aid, "profile_id": None, "system_prompt": system_prompt, "profile_dir": profile_dir}
+            {
+                "agent_id": aid, "profile_id": None, "system_prompt": system_prompt,
+                "profile_dir": profile_dir, "mcp_servers": mcp_servers,
+            }
             for aid in agents
         ]
         return await send_roundtable(
@@ -751,8 +924,8 @@ async def dispatch(
     return await send_message(
         db, convo, text,
         attached_file_ids=attached_file_ids, owner_id=owner_id,
-        system_prompt=system_prompt, profile_dir=profile_dir, task_id=task_id,
-        profile_id=effective_profile_id,
+        system_prompt=system_prompt, profile_dir=profile_dir, mcp_servers=mcp_servers,
+        task_id=task_id, profile_id=effective_profile_id, matched_skill_ids=matched_skill_ids,
     )
 
 
@@ -1376,6 +1549,7 @@ async def dispatch_group(
         target_profile_id, target_agent_id = agent_targets[0]
         system_prompt = None
         profile_dir = None
+        mcp_servers: list[dict] = []
         # 优先级：显式 profile_id_override > 该成员绑定的 Profile > 会话默认
         effective_profile_id = profile_id_override or target_profile_id or convo.profile_id
         if not profile_id_override and not target_profile_id:
@@ -1394,6 +1568,7 @@ async def dispatch_group(
             if profile:
                 system_prompt = profile.system_prompt or None
                 profile_dir = _profile_dir(profile)
+                mcp_servers = await _resolve_mcp_servers(db, profile)
 
         memory_prompt = await _build_memory_prompt(db, owner_id)
         if memory_prompt:
@@ -1410,6 +1585,7 @@ async def dispatch_group(
             system_prompt=system_prompt,
             existing_user_msg=user_msg,
             profile_dir=profile_dir,
+            mcp_servers=mcp_servers,
             agent_id_override=target_agent_id,
             profile_id=effective_profile_id,
         )
@@ -1422,12 +1598,14 @@ async def dispatch_group(
     for target_profile_id, target_agent_id in agent_targets:
         t_system_prompt = None
         t_profile_dir = None
+        t_mcp_servers: list[dict] = []
         eff_pid = target_profile_id or convo.profile_id
         if eff_pid:
             profile = await db.get(Profile, eff_pid)
             if profile:
                 t_system_prompt = profile.system_prompt or None
                 t_profile_dir = _profile_dir(profile)
+                t_mcp_servers = await _resolve_mcp_servers(db, profile)
         if memory_prompt:
             t_system_prompt = f"{t_system_prompt}\n\n{memory_prompt}" if t_system_prompt else memory_prompt
         targets.append({
@@ -1435,6 +1613,7 @@ async def dispatch_group(
             "profile_id": target_profile_id,
             "system_prompt": t_system_prompt,
             "profile_dir": t_profile_dir,
+            "mcp_servers": t_mcp_servers,
         })
 
     return await send_roundtable(

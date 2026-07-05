@@ -63,8 +63,10 @@ from app.schemas.conversation import (
     WorkspaceFileVersionOut,
 )
 from app.db.models.conversation import ConversationFolder
+from app.schemas.subagent import SubagentOut, SubagentSend, SubagentSpawn
 from app.schemas.team import ConsolidateRequest
 from app.services import conversation_service as svc
+from app.services import subagent_service
 
 router = APIRouter()
 
@@ -1300,3 +1302,107 @@ async def toggle_reaction(
     msg = await _require_message(db, conversation_id, message_id, user)
     msg = await svc.toggle_reaction(db, msg, user.id, payload.emoji)
     return MessageOut.model_validate(msg)
+
+
+# ── Background subagents (persistent, non-blocking ACP peer sessions) ──────
+
+def _subagent_out(row, unread_count: int = 0) -> SubagentOut:
+    return SubagentOut(
+        id=row.id,
+        parent_conversation_id=row.parent_conversation_id,
+        subagent_conversation_id=row.subagent_conversation_id,
+        purpose=row.purpose,
+        agent_id=row.agent_id,
+        profile_id=row.profile_id,
+        status=row.status,
+        last_active_at=row.last_active_at,
+        error_detail=row.error_detail,
+        unread_count=unread_count,
+        created_at=row.created_at,
+    )
+
+
+async def _require_subagent(db, conversation_id: uuid.UUID, subagent_id: uuid.UUID, user: User):
+    row = await subagent_service.get_subagent(db, conversation_id, subagent_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="后台任务不存在")
+    return row
+
+
+@router.post("/{conversation_id}/subagents", response_model=SubagentOut, status_code=201)
+async def spawn_subagent(
+    conversation_id: uuid.UUID,
+    payload: SubagentSpawn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    convo = await _require_convo(db, conversation_id, user)
+    row = await subagent_service.spawn_subagent(
+        db, convo, user.id,
+        purpose=payload.purpose, initial_prompt=payload.initial_prompt,
+        agent_id=payload.agent_id, profile_id=payload.profile_id,
+    )
+    return _subagent_out(row)
+
+
+@router.get("/{conversation_id}/subagents", response_model=list[SubagentOut])
+async def list_subagents(
+    conversation_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await _require_convo(db, conversation_id, user)
+    pairs = await subagent_service.list_subagents(db, conversation_id)
+    return [_subagent_out(row, unread) for row, unread in pairs]
+
+
+@router.get("/{conversation_id}/subagents/{subagent_id}", response_model=SubagentOut)
+async def get_subagent(
+    conversation_id: uuid.UUID,
+    subagent_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await _require_convo(db, conversation_id, user)
+    row = await _require_subagent(db, conversation_id, subagent_id, user)
+    return _subagent_out(row)
+
+
+@router.post("/{conversation_id}/subagents/{subagent_id}/messages", status_code=202)
+async def send_subagent_message(
+    conversation_id: uuid.UUID,
+    subagent_id: uuid.UUID,
+    payload: SubagentSend,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await _require_convo(db, conversation_id, user)
+    row = await _require_subagent(db, conversation_id, subagent_id, user)
+    await subagent_service.send_to_subagent(row, payload.text)
+    return {"status": "queued"}
+
+
+@router.post("/{conversation_id}/subagents/{subagent_id}/read")
+async def mark_subagent_read(
+    conversation_id: uuid.UUID,
+    subagent_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await _require_convo(db, conversation_id, user)
+    row = await _require_subagent(db, conversation_id, subagent_id, user)
+    await subagent_service.mark_subagent_read(db, row)
+    return {"status": "ok"}
+
+
+@router.post("/{conversation_id}/subagents/{subagent_id}/stop")
+async def stop_subagent(
+    conversation_id: uuid.UUID,
+    subagent_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await _require_convo(db, conversation_id, user)
+    row = await _require_subagent(db, conversation_id, subagent_id, user)
+    await subagent_service.request_stop_subagent(row)
+    return {"status": "stopping"}

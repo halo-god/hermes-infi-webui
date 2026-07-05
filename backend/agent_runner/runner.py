@@ -38,6 +38,7 @@ from sqlalchemy import select
 from agent_runner import discovery, storage
 from agent_runner.acp_client import ACPTimeout
 from agent_runner.session_pool import SessionPool
+from agent_runner.subagent_pool import SubagentPool
 from agent_runner.metrics import (
     TASKS_ENQUEUED,
     TASKS_COMPLETED,
@@ -69,6 +70,7 @@ DLQ_STREAM = "acp:dlq"  # dead letter queue stream
 class Runner:
     def __init__(self) -> None:
         self.pool = SessionPool()
+        self.subagent_pool = SubagentPool()
         self.agents: dict[str, discovery.DiscoveredAgent] = {}
         self._shutdown = False
         self._lock_token: str | None = None
@@ -203,6 +205,13 @@ class Runner:
         except Exception:
             logger.debug("Reclaim check failed (non-fatal)", exc_info=True)
 
+    async def _sweep_subagents(self) -> None:
+        try:
+            from agent_runner.runner_subagent import sweep_expired_subagents
+            await sweep_expired_subagents(self.subagent_pool)
+        except Exception:
+            logger.debug("subagent sweep failed (non-fatal)", exc_info=True)
+
     # ── Heartbeat + reclaim loop ──
     async def _heartbeat_loop(self) -> None:
         """Background task: refresh lock + reclaim stale messages + evict idle sessions."""
@@ -219,6 +228,7 @@ class Runner:
             if evict_counter * HEARTBEAT_INTERVAL >= 300:  # every 5 minutes
                 evict_counter = 0
                 await self.pool.evict_idle()
+            await self._sweep_subagents()
 
     # ── ACP session control loop ──
     async def _control_loop(self) -> None:
@@ -277,8 +287,10 @@ class Runner:
                     import os
                     cwd = os.path.join(settings.workspace_root, new_conv_id)
                     os.makedirs(cwd, exist_ok=True)
+                    mcp_servers = self.pool._mcp_servers.get(conv_id)
                     new_sid = await asyncio.wait_for(
-                        client.fork_session(client._session_id, cwd), timeout=15,
+                        client.fork_session(client._session_id, cwd, mcp_servers=mcp_servers),
+                        timeout=15,
                     )
                     await redis.publish(response_channel, _json.dumps({"session_id": new_sid}))
                     logger.info("Forked ACP session %s -> %s", client._session_id[:8], new_sid[:8])
@@ -304,6 +316,12 @@ class Runner:
             else:
                 await redis.publish(response_channel, _json.dumps({"error": "no active session"}))
 
+        elif ctrl_type == "subagent_stop":
+            subagent_id = data.get("subagent_id", "")
+            if subagent_id:
+                from agent_runner.runner_subagent import stop_subagent
+                await stop_subagent(subagent_id, self.subagent_pool)
+
     # ── main loop ──
     async def run(self) -> None:
         configure_logging()
@@ -324,6 +342,11 @@ class Runner:
 
         await self.register_agents()
         await self.ensure_group()
+        try:
+            from agent_runner.runner_subagent import reconcile_background_subagents
+            await reconcile_background_subagents()
+        except Exception:
+            logger.exception("Failed to reconcile background subagents at startup")
         logger.info("Runner consuming %s as %s/%s (max_concurrent=%d)",
                     settings.acp_stream, settings.acp_group, settings.acp_consumer, MAX_CONCURRENT)
 
@@ -379,6 +402,7 @@ class Runner:
                 await asyncio.wait(self._active_tasks, timeout=60)
             if self._bg_tasks:
                 await asyncio.gather(*self._bg_tasks, return_exceptions=True)
+            await self.subagent_pool.close_all()
             await self._release_lock()
 
     # ── concurrency helpers ──
@@ -449,6 +473,22 @@ class Runner:
             from agent_runner.runner_task_execution import handle_task_execution
             await handle_task_execution(task, self.agents)
             return
+        if task.get("type") == "skill_evolution":
+            from agent_runner.runner_skill_evolution import handle_skill_evolution
+            await handle_skill_evolution(task, self.agents)
+            return
+        if task.get("type") in ("subagent_spawn", "subagent_send"):
+            # Fire-and-forget: a persistent subagent can run far longer than a
+            # normal chat turn, so it must not hold a MAX_CONCURRENT semaphore
+            # slot for its whole lifetime the way handle_single/handle_roundtable
+            # do. Detach it onto _bg_tasks and return immediately, freeing the
+            # slot; the subagent keeps running independently in the pool.
+            from agent_runner.runner_subagent import handle_subagent_send, handle_subagent_spawn
+            fn = handle_subagent_spawn if task["type"] == "subagent_spawn" else handle_subagent_send
+            t = asyncio.create_task(fn(task, self.agents, self.subagent_pool))
+            self._bg_tasks.add(t)
+            t.add_done_callback(self._bg_tasks.discard)
+            return
         await self.handle_single(task)
 
     # ── one prompt (single agent) ──
@@ -461,6 +501,9 @@ class Runner:
         text = task["text"]
         system_prompt: str | None = task.get("system_prompt") or None
         profile_dir: str | None = task.get("profile_dir") or None
+        mcp_servers: list | None = task.get("mcp_servers") or None
+        matched_skill_ids: list = task.get("matched_skill_ids") or []
+        skill_firing_excerpt: str = task.get("skill_firing_excerpt") or ""
 
         agent = self.agents.get(agent_id) or self.agents.get("hermes")
         if agent is None:
@@ -635,6 +678,7 @@ class Runner:
             client, new_session = await self.pool.get(
                 conversation_id, agent.command, cwd, on_update, on_fs_write,
                 acp_session_id=acp_session_id, profile_dir=profile_dir,
+                mcp_servers=mcp_servers,
             )
             logger.info(
                 "handle_single: conv=%s msg=%s client_pid=%s new_session=%s",
@@ -719,6 +763,10 @@ class Runner:
             acc.get("thinking") or "", acc.get("plan"), acc.get("files"),
             acc.get("clarifies"),
         )
+        if status == "complete" and matched_skill_ids:
+            await self._record_skill_firings(
+                conversation_id, acc["current_msg_id"], matched_skill_ids, skill_firing_excerpt,
+            )
         await R.clear_cancel(conversation_id)
         await R.publish_event(
             conversation_id,
@@ -873,6 +921,32 @@ class Runner:
                 if convo:
                     convo.updated_at = datetime.now(tz=timezone.utc)
                 await db.commit()
+
+    async def _record_skill_firings(
+        self, conversation_id: str, message_id: str, skill_ids: list[str], trigger_excerpt: str,
+    ) -> None:
+        """Feeds the self-evolving-skills eval-dataset builder. Only called
+        for turns that reached status=='complete' — a cancelled/failed turn
+        was never genuinely observed under the skill's influence and would
+        pollute the eval corpus."""
+        from app.db.models.skill_evolution import SkillFiring
+
+        async with async_session_maker() as db:
+            convo = await db.get(Conversation, uuid.UUID(conversation_id))
+            owner_id = convo.owner_id if convo else None
+            for sid in skill_ids:
+                try:
+                    skill_uuid = uuid.UUID(sid)
+                except (ValueError, TypeError):
+                    continue
+                db.add(SkillFiring(
+                    skill_id=skill_uuid,
+                    message_id=uuid.UUID(message_id),
+                    conversation_id=uuid.UUID(conversation_id),
+                    owner_id=owner_id,
+                    trigger_query_excerpt=trigger_excerpt,
+                ))
+            await db.commit()
 
     async def _set_session_id(self, conversation_id: str, session_id: str) -> None:
         async with async_session_maker() as db:

@@ -18,6 +18,7 @@ import { teamsApi } from "@/api/teams";
 import { projectsApi } from "@/api/projects";
 import { renderMarkdown, renderMarkdownAsync } from "@/utils/markdown";
 import { fmtNum } from "@/utils/format";
+import { colorDiff } from "@/utils/diff";
 import type { GroupMember, Knowledge, Message, RoundtableReply, WsAdapter } from "@/types";
 import type { SendOptions } from "@/components/Composer.vue";
 import type { Profile } from "@/api/agents";
@@ -26,6 +27,7 @@ import type { Profile } from "@/api/agents";
 const WorkspacePanel = defineAsyncComponent(() => import("@/components/WorkspacePanel.vue"));
 const ExtractItemsModal = defineAsyncComponent(() => import("@/components/ExtractItemsModal.vue"));
 const MemberPanel = defineAsyncComponent(() => import("@/components/MemberPanel.vue"));
+const SubagentPanel = defineAsyncComponent(() => import("@/components/SubagentPanel.vue"));
 
 const chat = useChatStore();
 const auth = useAuthStore();
@@ -46,6 +48,7 @@ const scroller = ref<HTMLElement | null>(null);
 const loadMoreSentinel = ref<HTMLElement | null>(null);
 const showWorkspace = ref(false);
 const showMemberPanel = ref(false);
+const showSubagentPanel = ref(false);
 const showExtractModal = ref(false);
 const landingProfileId = ref<string>("");
 const teamKnowledge = ref<Knowledge[]>([]);
@@ -298,7 +301,7 @@ function getUserDisplay(msg: Message): { name: string; initials: string; color: 
 
 // ── Group: reply / reactions / edit / recall / typing ──
 const replyTarget = ref<{ id: string; label: string; snippet: string } | null>(null);
-const REACTION_EMOJIS = ["👍", "❤️", "😄", "🎉", "👀", "🙏"];
+const REACTION_EMOJIS = ["👍", "👎", "❤️", "😄", "🎉", "👀", "🙏"];
 const openEmojiFor = ref<string | null>(null);
 function toggleEmojiPicker(msgId: string) {
   openEmojiFor.value = openEmojiFor.value === msgId ? null : msgId;
@@ -326,6 +329,14 @@ function reactionEntries(msg: Message): { emoji: string; count: number; mine: bo
   return Object.entries(r).map(([emoji, users]) => ({
     emoji, count: users.length, mine: users.includes(meId),
   }));
+}
+
+// Thumbs up/down on the always-visible msg-tools row — unlike the emoji
+// picker above, not gated by isGroup, so personal 1:1 chat gets a quality
+// signal too (feeds the self-evolving-skills eval dataset).
+function isReacted(msg: Message, emoji: string): boolean {
+  const meId = auth.user?.id || "";
+  return (msg.reactions?.[emoji] || []).includes(meId);
 }
 
 async function editMsg(msg: Message) {
@@ -708,16 +719,6 @@ async function forkFrom(msgId: string) {
   }
 }
 
-// ── File diff colorizer ──
-function colorDiff(text: string): string {
-  return text.split("\n").map((line) => {
-    const esc = escapeHtml(line);
-    if (line.startsWith("+") && !line.startsWith("+++")) return `<span class="diff-add">${esc}</span>`;
-    if (line.startsWith("-") && !line.startsWith("---")) return `<span class="diff-del">${esc}</span>`;
-    return `<span>${esc}</span>`;
-  }).join("\n");
-}
-
 // ── Smart follow-up suggestion chips ──
 function getFollowupChips(text: string): string[] {
   if (/```[\s\S]*```/.test(text))
@@ -955,6 +956,9 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
             <button class="thread-action text-mute-sm" v-if="chat.messages.length >= 2" @click="showExtractModal = true" style="flex-shrink:0;margin-top:2px" title="从对话内容自动创建项目与任务">
               <Icon name="sparkle" /> 智能创建
             </button>
+            <button class="thread-action text-mute-sm" v-if="chat.activeId" @click="showSubagentPanel = !showSubagentPanel" :style="{ flexShrink: '0', marginTop: '2px', color: showSubagentPanel ? 'var(--accent)' : undefined }" title="后台任务：让子代理在后台独立完成一项工作，不阻塞当前对话">
+              <Icon name="cube" /> 后台任务
+            </button>
             <!-- Fork session -->
             <button class="thread-action text-mute-sm" v-if="chat.activeId && activeConvo?.acp_session_id" @click="forkSession" :disabled="forking" style="flex-shrink:0;margin-top:2px" title="Fork ACP session (分支历史)">
               <Icon name="copy" /> {{ forking ? 'Forking…' : 'Fork' }}
@@ -1033,7 +1037,7 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
               <template v-if="chat.messages[row.index]">
                 <!-- roundtable -->
                 <div v-if="chat.messages[row.index].role === 'roundtable'" class="roundtable">
-              <div class="roundtable-label">圆桌 · {{ chat.messages[row.index].content.replies?.length || 0 }} 位助手并行作答</div>
+              <div class="roundtable-label">{{ chat.messages[row.index].content.moa ? "MoA 混合模型" : "圆桌" }} · {{ chat.messages[row.index].content.replies?.length || 0 }} 位助手并行作答</div>
               <div v-for="(r, idx) in chat.messages[row.index].content.replies" :key="idx" class="rt-card">
                 <div class="rt-card-head">
                   <span class="rt-avatar" :style="{ background: profileDisplay(profileForEntity(r.agent_id, r.profile_id)).color }"><Icon :name="profileDisplay(profileForEntity(r.agent_id, r.profile_id)).icon" :size="11" /></span>
@@ -1180,6 +1184,18 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                   </div>
                 </div>
                 <div v-if="chat.messages[row.index].role === 'agent' && chat.messages[row.index].status !== 'streaming'" class="msg-tools">
+                  <button
+                    title="有用"
+                    class="msg-thumb"
+                    :class="{ active: isReacted(chat.messages[row.index], '👍') }"
+                    @click="toggleReaction(chat.messages[row.index], '👍')"
+                  >👍</button>
+                  <button
+                    title="没用"
+                    class="msg-thumb"
+                    :class="{ active: isReacted(chat.messages[row.index], '👎') }"
+                    @click="toggleReaction(chat.messages[row.index], '👎')"
+                  >👎</button>
                   <button title="复制" @click="copyMessage(chat.messages[row.index].content.text)"><Icon name="copy" :size="12" /></button>
                   <button title="重新生成" @click="regenerate(chat.messages[row.index].id)"><Icon name="refresh" :size="12" /></button>
 
@@ -1251,6 +1267,12 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
         :channel-mode="activeConvo?.channel_mode || 'mention'"
         @close="showMemberPanel = false"
         @update:channel-mode="onChannelModeChange"
+      />
+
+      <SubagentPanel
+        v-if="showSubagentPanel && chat.activeId"
+        :conversation-id="chat.activeId"
+        @close="showSubagentPanel = false"
       />
     </div>
   </div>
