@@ -135,6 +135,13 @@ class Settings(BaseSettings):
     skill_evolution_firing_excerpt_chars: int = 500  # per-example trigger-query truncation
     skill_evolution_dataset_input_chars: int = 24000  # total budget across real examples
     skill_evolution_synthetic_examples: int = 10     # how many to generate when topping up
+    # Gates a proposal must clear before it's written (still requires manual approval after).
+    skill_evolution_min_score_improvement: float = 0.05  # candidate must beat baseline by this much
+    skill_evolution_max_content_bytes: int = 15360       # 15KB — injected verbatim into every firing's prompt
+    skill_evolution_max_content_diff_ratio: float = 0.6  # 1 - SequenceMatcher.ratio(); too-large a rewrite is rejected
+    # run-lock TTL; must exceed the optimizer's own worst-case runtime
+    skill_evolution_lock_ttl: int = 1200
+    skill_evolution_status_ttl: int = 3600  # done/error status visibility window
 
     # ── Uploads ──
     max_upload_mb: int = 25  # reject uploads larger than this (per file)

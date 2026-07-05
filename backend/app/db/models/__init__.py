@@ -27,4 +27,4 @@ from app.db.models.workspace import WorkspaceFile  # noqa: F401
 from app.db.models.memory import AgentMemory, AgentSkill, MemoryEpisode  # noqa: F401
 from app.db.models.scheduled import ScheduledTask  # noqa: F401
 from app.db.models.subagent import BackgroundSubagent  # noqa: F401
-from app.db.models.skill_evolution import SkillFiring  # noqa: F401
+from app.db.models.skill_evolution import SkillFiring, SkillProposal  # noqa: F401

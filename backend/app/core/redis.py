@@ -315,6 +315,15 @@ def mem_consolidate_cooldown_key(user_id: str) -> str:
     return f"mem:consolidate:cooldown:{user_id}"
 
 
+# ── Self-evolving skills (skill_evolution/) ──
+# Same "status key doubles as run lock" trick, scoped per-skill instead of
+# per-user since a skill's usage/evolution is a shared, not personal, thing.
+
+
+def skill_evolution_status_key(skill_id: str) -> str:
+    return f"skill_evolution:status:{skill_id}"
+
+
 # ── User presence (online/offline) ──
 _PRESENCE_PREFIX = "presence:"
 _PRESENCE_TTL = 60  # seconds; heartbeat every 30s keeps it alive

@@ -473,6 +473,10 @@ class Runner:
             from agent_runner.runner_task_execution import handle_task_execution
             await handle_task_execution(task, self.agents)
             return
+        if task.get("type") == "skill_evolution":
+            from agent_runner.runner_skill_evolution import handle_skill_evolution
+            await handle_skill_evolution(task, self.agents)
+            return
         if task.get("type") in ("subagent_spawn", "subagent_send"):
             # Fire-and-forget: a persistent subagent can run far longer than a
             # normal chat turn, so it must not hold a MAX_CONCURRENT semaphore
