@@ -129,6 +129,13 @@ class Settings(BaseSettings):
     subagent_max_lifetime_seconds: int = 14400   # hard cap: 4 hours, regardless of activity
     subagent_status_flush_interval_seconds: int = 5  # min gap between DB status writes
 
+    # ── Self-evolving skills: eval-dataset builder (backend/skill_evolution/) ──
+    skill_evolution_min_real_firings: int = 8       # below this, top up with synthetic examples
+    skill_evolution_max_firings_per_skill: int = 60  # newest-first cap per dataset build
+    skill_evolution_firing_excerpt_chars: int = 500  # per-example trigger-query truncation
+    skill_evolution_dataset_input_chars: int = 24000  # total budget across real examples
+    skill_evolution_synthetic_examples: int = 10     # how many to generate when topping up
+
     # ── Uploads ──
     max_upload_mb: int = 25  # reject uploads larger than this (per file)
 
