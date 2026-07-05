@@ -162,9 +162,10 @@ async def test_episodic_and_skills_prompts_injected_into_dispatch(db):
     # Message (it's only sent to the runner), so assert against the builder
     # functions directly with the same inputs dispatch() used.
     episodic = await svc._build_episodic_memory_prompt(db, owner.id, "Redis 限流应该怎么设计")
-    skills = await svc._build_skills_prompt(db, profile, owner.id, "Redis 限流应该怎么设计")
+    skills, matched_skill_ids = await svc._build_skills_prompt(db, profile, owner.id, "Redis 限流应该怎么设计")
     assert episodic and "Redis Stream" in episodic
     assert skills and "限流技能" in skills
+    assert matched_skill_ids
 
 
 async def test_episodic_injection_disabled_by_kill_switch(db, monkeypatch):

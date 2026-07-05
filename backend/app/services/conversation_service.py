@@ -433,6 +433,7 @@ async def send_message(
     agent_id_override: str | None = None,
     profile_id: str | None = None,
     task_id: uuid.UUID | None = None,
+    matched_skill_ids: list[uuid.UUID] | None = None,
 ) -> tuple[Message, Message]:
     """Persist the user turn + an empty streaming agent turn, then enqueue ACP work.
 
@@ -539,6 +540,8 @@ async def send_message(
             "system_prompt": system_prompt,
             "profile_dir": profile_dir,
             "mcp_servers": mcp_servers or [],
+            "matched_skill_ids": [str(sid) for sid in (matched_skill_ids or [])],
+            "skill_firing_excerpt": text[:500],
         }
     )
     return user_msg, agent_msg
@@ -689,10 +692,16 @@ async def _build_episodic_memory_prompt(
 
 async def _build_skills_prompt(
     db: AsyncSession, profile: Profile | None, owner_id: uuid.UUID | None, query_text: str,
-) -> str | None:
+) -> tuple[str | None, list[uuid.UUID]]:
     """Trigger-match this profile/user's skills against the incoming message
     and inject only the matched ones — skills load into context on demand,
-    unlike the always-on Profile.system_prompt/knowledge bindings."""
+    unlike the always-on Profile.system_prompt/knowledge bindings.
+
+    Returns (prompt_text_or_None, matched_skill_ids) — the caller threads the
+    id list through to the runner so it can record a SkillFiring per id once
+    the turn completes (see runner.py's handle_single), feeding the
+    self-evolving-skills eval-dataset builder.
+    """
     from app.services import memory_service
 
     skills = await memory_service.search_skills(
@@ -704,9 +713,10 @@ async def _build_skills_prompt(
         limit=_SKILLS_LIMIT,
     )
     if not skills:
-        return None
+        return None, []
     parts = [f"[技能：{s.name}]\n{s.content}" for s in skills]
-    return "【已触发技能】\n" + "\n\n".join(parts)
+    prompt = "【已触发技能】\n" + "\n\n".join(parts)
+    return prompt, [s.id for s in skills]
 
 
 _KNOWLEDGE_PER_ITEM = 2000   # chars per bound knowledge entry
@@ -870,11 +880,12 @@ async def dispatch(
     # Layered memory: pg_trgm-retrieved episodic summaries + trigger-matched
     # skills, both injected only when relevant (unlike the always-on blocks
     # above). Gated by a kill switch in case retrieval quality misbehaves.
+    matched_skill_ids: list[uuid.UUID] = []
     if settings.memory_episodic_injection_enabled:
         episodic_prompt = await _build_episodic_memory_prompt(db, owner_id, text)
         if episodic_prompt:
             system_prompt = f"{system_prompt}\n\n{episodic_prompt}" if system_prompt else episodic_prompt
-        skills_prompt = await _build_skills_prompt(db, profile, owner_id, text)
+        skills_prompt, matched_skill_ids = await _build_skills_prompt(db, profile, owner_id, text)
         if skills_prompt:
             system_prompt = f"{system_prompt}\n\n{skills_prompt}" if system_prompt else skills_prompt
 
@@ -914,7 +925,7 @@ async def dispatch(
         db, convo, text,
         attached_file_ids=attached_file_ids, owner_id=owner_id,
         system_prompt=system_prompt, profile_dir=profile_dir, mcp_servers=mcp_servers,
-        task_id=task_id, profile_id=effective_profile_id,
+        task_id=task_id, profile_id=effective_profile_id, matched_skill_ids=matched_skill_ids,
     )
 
 

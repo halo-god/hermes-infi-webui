@@ -498,6 +498,8 @@ class Runner:
         system_prompt: str | None = task.get("system_prompt") or None
         profile_dir: str | None = task.get("profile_dir") or None
         mcp_servers: list | None = task.get("mcp_servers") or None
+        matched_skill_ids: list = task.get("matched_skill_ids") or []
+        skill_firing_excerpt: str = task.get("skill_firing_excerpt") or ""
 
         agent = self.agents.get(agent_id) or self.agents.get("hermes")
         if agent is None:
@@ -757,6 +759,10 @@ class Runner:
             acc.get("thinking") or "", acc.get("plan"), acc.get("files"),
             acc.get("clarifies"),
         )
+        if status == "complete" and matched_skill_ids:
+            await self._record_skill_firings(
+                conversation_id, acc["current_msg_id"], matched_skill_ids, skill_firing_excerpt,
+            )
         await R.clear_cancel(conversation_id)
         await R.publish_event(
             conversation_id,
@@ -911,6 +917,32 @@ class Runner:
                 if convo:
                     convo.updated_at = datetime.now(tz=timezone.utc)
                 await db.commit()
+
+    async def _record_skill_firings(
+        self, conversation_id: str, message_id: str, skill_ids: list[str], trigger_excerpt: str,
+    ) -> None:
+        """Feeds the self-evolving-skills eval-dataset builder. Only called
+        for turns that reached status=='complete' — a cancelled/failed turn
+        was never genuinely observed under the skill's influence and would
+        pollute the eval corpus."""
+        from app.db.models.skill_evolution import SkillFiring
+
+        async with async_session_maker() as db:
+            convo = await db.get(Conversation, uuid.UUID(conversation_id))
+            owner_id = convo.owner_id if convo else None
+            for sid in skill_ids:
+                try:
+                    skill_uuid = uuid.UUID(sid)
+                except (ValueError, TypeError):
+                    continue
+                db.add(SkillFiring(
+                    skill_id=skill_uuid,
+                    message_id=uuid.UUID(message_id),
+                    conversation_id=uuid.UUID(conversation_id),
+                    owner_id=owner_id,
+                    trigger_query_excerpt=trigger_excerpt,
+                ))
+            await db.commit()
 
     async def _set_session_id(self, conversation_id: str, session_id: str) -> None:
         async with async_session_maker() as db:
