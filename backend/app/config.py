@@ -142,6 +142,15 @@ class Settings(BaseSettings):
     # run-lock TTL; must exceed the optimizer's own worst-case runtime
     skill_evolution_lock_ttl: int = 1200
     skill_evolution_status_ttl: int = 3600  # done/error status visibility window
+    # Real DSPy+GEPA optimizer — off by default; an admin must both flip this
+    # AND configure a key before any direct-LLM call is ever made (same kill-switch
+    # precedent as memory_episodic_injection_enabled). While off (or misconfigured),
+    # run_evolution() falls back to the free, LLM-free stub from Stage D1.
+    skill_evolution_enabled: bool = False
+    skill_evolution_llm_model: str = ""      # litellm-style model string, e.g. "openai/gpt-4o-mini"
+    skill_evolution_llm_api_key: str = ""    # treat as a secret: never logged, never in a response
+    skill_evolution_llm_api_base: str = ""   # optional self-hosted/proxy endpoint
+    skill_evolution_llm_max_calls_per_run: int = 60  # hard cap on judge-LM calls, on top of GEPA's own budget
 
     # ── Uploads ──
     max_upload_mb: int = 25  # reject uploads larger than this (per file)

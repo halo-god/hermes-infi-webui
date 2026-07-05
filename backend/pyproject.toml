@@ -30,6 +30,11 @@ dependencies = [
     "python-docx>=1.1",
     "openpyxl>=3.1",
     "python-pptx>=1.0",
+    # Self-evolving skills optimizer (backend/skill_evolution/) only — never
+    # imported by the FastAPI app or the ACP-serving runner paths. Note:
+    # PyPI's `dspy-ai` is now just a compatibility alias for this package;
+    # `dspy` is the real, current distribution.
+    "dspy>=3.2.1",
 ]
 
 [project.optional-dependencies]
