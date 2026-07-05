@@ -16,7 +16,7 @@ from app.core import redis as redis_core
 from app.core.guards import require_super_admin
 from app.db.base import get_db
 from app.db.models.user import User
-from app.services import memory_service
+from app.services import memory_service, skill_evolution_service
 from skill_evolution.dataset import build_dataset
 
 router = APIRouter(prefix="/skill-evolution", tags=["skill-evolution"])
@@ -117,3 +117,85 @@ async def evolve_status(
         detail=data.get("detail"),
         finished_at=data.get("finished_at"),
     )
+
+
+# ── Stage E: admin-wide skill listing + proposal review queue ──────────────
+
+class AdminSkillOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    description: str
+    content: str
+    owner_id: uuid.UUID | None
+    team_id: uuid.UUID | None
+    profile_id: uuid.UUID | None
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+@router.get("/skills", response_model=list[AdminSkillOut])
+async def list_all_skills(
+    user: User = Depends(require_super_admin()),
+    db: AsyncSession = Depends(get_db),
+) -> list[AdminSkillOut]:
+    """Admin-wide skill listing for the evolution review UI — memory_service's
+    own list_skills() is always owner/team/profile scoped, for the personal
+    skill-management page."""
+    skills = await memory_service.list_all_skills(db)
+    return [AdminSkillOut.model_validate(s, from_attributes=True) for s in skills]
+
+
+class SkillProposalOut(BaseModel):
+    id: uuid.UUID
+    skill_id: uuid.UUID
+    proposed_content: str
+    proposed_description: str | None
+    rationale: str | None
+    eval_score_before: float
+    eval_score_after: float
+    diff_ratio: float
+    dataset_summary: dict
+    status: str
+    reviewed_by: uuid.UUID | None
+    reviewed_at: datetime | None
+    review_note: str | None
+    created_at: datetime
+
+
+class SkillProposalReviewIn(BaseModel):
+    status: str  # approved | rejected
+    review_note: str | None = None
+
+
+@router.get("/proposals", response_model=list[SkillProposalOut])
+async def list_proposals(
+    status: str | None = None,
+    skill_id: uuid.UUID | None = None,
+    user: User = Depends(require_super_admin()),
+    db: AsyncSession = Depends(get_db),
+) -> list[SkillProposalOut]:
+    proposals = await skill_evolution_service.list_proposals(db, status=status, skill_id=skill_id)
+    return [SkillProposalOut.model_validate(p, from_attributes=True) for p in proposals]
+
+
+@router.patch("/proposals/{proposal_id}", response_model=SkillProposalOut)
+async def review_proposal(
+    proposal_id: uuid.UUID,
+    payload: SkillProposalReviewIn,
+    user: User = Depends(require_super_admin()),
+    db: AsyncSession = Depends(get_db),
+) -> SkillProposalOut:
+    """The only path that can ever turn a proposal into a live skill-content
+    change — see skill_evolution_service.review_proposal's docstring."""
+    if payload.status not in ("approved", "rejected"):
+        raise HTTPException(status_code=422, detail="status 必须是 approved 或 rejected")
+    proposal = await skill_evolution_service.get_proposal(db, proposal_id)
+    if proposal is None:
+        raise HTTPException(status_code=404, detail="提案不存在")
+    if proposal.status != "pending":
+        raise HTTPException(status_code=409, detail="该提案已被处理过")
+    updated = await skill_evolution_service.review_proposal(
+        db, proposal, reviewer_id=user.id, status=payload.status, review_note=payload.review_note,
+    )
+    return SkillProposalOut.model_validate(updated, from_attributes=True)

@@ -12,8 +12,11 @@ import { http } from "@/api/client";
 import { fmtDate } from "@/utils/format";
 import { agentsApi, profilesApi, type Profile, type ProfileCreate } from "@/api/agents";
 import { teamsApi } from "@/api/teams";
+import { skillEvolutionApi, type AdminSkill, type SkillProposal } from "@/api/skillEvolution";
+import { colorDiff, computeLineDiff } from "@/utils/diff";
 import { useAuthStore } from "@/stores/auth";
 import { useBrandingStore } from "@/stores/branding";
+import { useNotificationStore } from "@/stores/notifications";
 import { usePresence } from "@/composables/usePresence";
 import type {
   AdminRole,
@@ -29,10 +32,12 @@ import type {
 
 const authStore = useAuthStore();
 const branding = useBrandingStore();
+const ns = useNotificationStore();
 const isSuperAdmin = computed(() => authStore.user?.role === "super_admin");
 const { queryPresence, getStatus } = usePresence();
 
-const tab = ref<"overview" | "users" | "roles" | "identity" | "audit" | "assistants" | "system" | "mcp" | "performance">("overview");
+type AdminTab = "overview" | "users" | "roles" | "identity" | "audit" | "assistants" | "system" | "mcp" | "performance" | "skill-evolution";
+const tab = ref<AdminTab>("overview");
 const stats = ref<AdminStats | null>(null);
 const users = ref<User[]>([]);
 const userQ = ref("");
@@ -123,6 +128,87 @@ async function loadPerformance() {
   perfLoading.value = true;
   try { perfData.value = (await http.get("/admin/performance")).data; } catch { perfData.value = null; } finally { perfLoading.value = false; }
 }
+// ── Skill evolution (自我进化技能): admin-wide skill list + trigger + proposal review ──
+const evoSkills = ref<AdminSkill[]>([]);
+const evoSkillsLoading = ref(false);
+const evoProposals = ref<SkillProposal[]>([]);
+const evoProposalsLoading = ref(false);
+const evoStatusFilter = ref<"pending" | "approved" | "rejected" | "all">("pending");
+const evoRunning = ref<Set<string>>(new Set()); // skill ids with an evolution in flight
+const evoDetail = ref<Record<string, string | null | undefined>>({}); // skill id -> last status detail
+const evoReviewing = ref<Set<string>>(new Set()); // proposal ids being approved/rejected
+const evoReviewNotes = reactive<Record<string, string>>({});
+const evoExpanded = ref<Set<string>>(new Set());
+let evoPollTimer: ReturnType<typeof setInterval> | null = null;
+
+async function loadEvoSkills() {
+  evoSkillsLoading.value = true;
+  try { evoSkills.value = await skillEvolutionApi.listSkills(); } catch { evoSkills.value = []; } finally { evoSkillsLoading.value = false; }
+}
+async function loadEvoProposals() {
+  evoProposalsLoading.value = true;
+  try {
+    evoProposals.value = await skillEvolutionApi.listProposals(
+      evoStatusFilter.value === "all" ? undefined : { status: evoStatusFilter.value },
+    );
+  } catch { evoProposals.value = []; } finally { evoProposalsLoading.value = false; }
+}
+function evoSkillName(skillId: string): string {
+  return evoSkills.value.find((s) => s.id === skillId)?.name || skillId.slice(0, 8);
+}
+function evoSkillContent(skillId: string): string {
+  return evoSkills.value.find((s) => s.id === skillId)?.content || "";
+}
+function evoStopPolling() {
+  if (evoPollTimer) { clearInterval(evoPollTimer); evoPollTimer = null; }
+}
+function evoStartPolling() {
+  if (!evoPollTimer) evoPollTimer = setInterval(evoPollAll, 2000);
+}
+async function evoPollAll() {
+  if (!evoRunning.value.size) { evoStopPolling(); return; }
+  let anyFinished = false;
+  for (const skillId of Array.from(evoRunning.value)) {
+    try {
+      const st = await skillEvolutionApi.evolveStatus(skillId);
+      if (st.status === "running") continue;
+      evoRunning.value.delete(skillId);
+      evoDetail.value[skillId] = st.detail;
+      anyFinished = true;
+      if (st.status === "done") ns.toast(`「${evoSkillName(skillId)}」演化完成：${st.detail || "已生成新提案"}`);
+      else if (st.status === "error") ns.toast(`「${evoSkillName(skillId)}」演化失败：${st.detail || ""}`, "error");
+    } catch { evoRunning.value.delete(skillId); }
+  }
+  if (!evoRunning.value.size) evoStopPolling();
+  if (anyFinished) await loadEvoProposals();
+}
+async function triggerEvolve(skillId: string) {
+  try {
+    await skillEvolutionApi.evolve(skillId);
+    evoRunning.value.add(skillId);
+    evoDetail.value[skillId] = null;
+    evoStartPolling();
+    ns.toast("已加入演化队列");
+  } catch (e: any) {
+    ns.toast(e?.response?.data?.detail || "触发失败", "error");
+  }
+}
+function evoToggleExpand(proposalId: string) {
+  if (evoExpanded.value.has(proposalId)) evoExpanded.value.delete(proposalId);
+  else evoExpanded.value.add(proposalId);
+}
+async function evoReview(proposal: SkillProposal, status: "approved" | "rejected") {
+  evoReviewing.value.add(proposal.id);
+  try {
+    await skillEvolutionApi.review(proposal.id, { status, review_note: evoReviewNotes[proposal.id] || undefined });
+    ns.toast(status === "approved" ? "已批准，技能内容已更新" : "已驳回");
+    await Promise.all([loadEvoProposals(), loadEvoSkills()]);
+  } catch (e: any) {
+    ns.toast(e?.response?.data?.detail || "操作失败", "error");
+  } finally {
+    evoReviewing.value.delete(proposal.id);
+  }
+}
 async function checkMcpStatus(name: string) {
   try {
     const r = await http.get(`/admin/mcp-servers/${name}/status`);
@@ -163,11 +249,14 @@ async function deleteMcpServer(name: string) {
 watch(tab, (t) => {
   if (t === "mcp") loadMcpServers();
   if (t === "performance") loadPerformance();
+  if (t === "skill-evolution") { loadEvoSkills(); loadEvoProposals(); }
 });
+watch(evoStatusFilter, loadEvoProposals);
 
 onMounted(load);
 onUnmounted(() => {
   if (_auditTimer) { clearInterval(_auditTimer); _auditTimer = null; }
+  evoStopPolling();
 });
 async function load() {
   try { stats.value = await adminApi.stats(); } catch { /* will show nulls */ }
@@ -476,10 +565,16 @@ function teamName(id: string | null) {
 
 const providersOn = computed(() => providers.value.filter((p) => p.enabled).length);
 
-const TABS = [
-  ["overview", "概览"], ["users", "用户管理"], ["roles", "权限管理"],
-  ["identity", "身份与连接"], ["audit", "审计日志"], ["assistants", "助手管理"], ["mcp", "MCP 服务器"], ["system", "系统设置"], ["performance", "性能监控"],
-] as const;
+const TABS = computed(() => {
+  const base: [AdminTab, string][] = [
+    ["overview", "概览"], ["users", "用户管理"], ["roles", "权限管理"],
+    ["identity", "身份与连接"], ["audit", "审计日志"], ["assistants", "助手管理"], ["mcp", "MCP 服务器"], ["system", "系统设置"], ["performance", "性能监控"],
+  ];
+  // Super-admin only: the sole gate that lets an automated, real-money
+  // optimization pipeline's output ever take effect — hidden from plain admins.
+  if (isSuperAdmin.value) base.push(["skill-evolution", "技能演化"]);
+  return base;
+});
 
 // ── Assistants (Profiles) ──
 const profiles = ref<Profile[]>([]);
@@ -1641,6 +1736,93 @@ async function confirmImport() {
               <div style="font-size:13px;line-height:1.8;color:var(--ink)">
                 <div>状态: <strong :style="{ color: (perfData as any).redis?.connected ? 'var(--ok)' : 'var(--danger)' }">{{ (perfData as any).redis?.connected ? '已连接' : '未连接' }}</strong></div>
                 <div>内存: <strong>{{ (perfData as any).redis?.used_memory_mb }}MB</strong></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <template v-else-if="tab === 'skill-evolution'">
+        <div style="margin-bottom: 14px">
+          <div class="heading-serif">技能演化</div>
+          <div style="font-size: 12.5px; color: var(--ink-mute); margin-top: 4px">
+            触发 DSPy + GEPA 对技能内容的自动优化；产出仅为待审提案，只有在此批准后才会写入线上技能。
+          </div>
+        </div>
+
+        <!-- All skills — trigger evolution -->
+        <div class="section-card" style="margin-bottom: 16px">
+          <div class="section-head">
+            <div class="section-title">全部技能</div>
+            <button class="btn" style="font-size: 12px" @click="loadEvoSkills" :disabled="evoSkillsLoading">
+              <Icon name="refresh" :size="13" /> {{ evoSkillsLoading ? "加载中…" : "刷新" }}
+            </button>
+          </div>
+          <div v-if="!evoSkillsLoading && !evoSkills.length" style="padding: 24px; text-align: center; color: var(--ink-mute); font-size: 13px">
+            暂无技能。
+          </div>
+          <div v-else class="section-body flush">
+            <div v-for="s in evoSkills" :key="s.id" class="row-item" style="padding: 12px 16px; gap: 12px; align-items: flex-start">
+              <div style="flex: 1; min-width: 0">
+                <div style="font-size: 13.5px; font-weight: 600; color: var(--ink)">{{ s.name }}</div>
+                <div style="font-size: 11.5px; color: var(--ink-mute); margin-top: 3px">{{ s.description || "（无描述）" }}</div>
+                <div v-if="evoDetail[s.id]" style="font-size: 11px; color: var(--ink-mute); margin-top: 4px">最近结果：{{ evoDetail[s.id] }}</div>
+              </div>
+              <button class="btn primary" style="font-size: 11px; flex-shrink: 0" :disabled="evoRunning.has(s.id)" @click="triggerEvolve(s.id)">
+                {{ evoRunning.has(s.id) ? "演化中…" : "触发演化" }}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Proposal review queue -->
+        <div class="section-card">
+          <div class="section-head">
+            <div class="section-title">待审提案</div>
+            <div style="display: flex; gap: 6px">
+              <button v-for="st in (['pending', 'approved', 'rejected', 'all'] as const)" :key="st"
+                class="filter-select" :class="{ on: evoStatusFilter === st }" @click="evoStatusFilter = st">
+                {{ { pending: '待审', approved: '已批准', rejected: '已驳回', all: '全部' }[st] }}
+              </button>
+            </div>
+          </div>
+          <div v-if="!evoProposalsLoading && !evoProposals.length" style="padding: 24px; text-align: center; color: var(--ink-mute); font-size: 13px">
+            暂无提案。
+          </div>
+          <div v-else class="section-body flush">
+            <div v-for="p in evoProposals" :key="p.id" style="padding: 14px 16px; border-bottom: 1px solid var(--rule)">
+              <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px">
+                <div style="flex: 1; min-width: 0">
+                  <div style="font-size: 13.5px; font-weight: 600; color: var(--ink); display: flex; align-items: center; gap: 8px">
+                    {{ evoSkillName(p.skill_id) }}
+                    <span class="fb-st-pill" :style="{
+                      color: p.status === 'approved' ? 'var(--ok)' : p.status === 'rejected' ? 'var(--danger)' : 'var(--accent-deep)',
+                      borderColor: (p.status === 'approved' ? 'var(--ok)' : p.status === 'rejected' ? 'var(--danger)' : 'var(--accent-deep)') + '44',
+                    }">{{ { pending: '待审', approved: '已批准', rejected: '已驳回' }[p.status] }}</span>
+                  </div>
+                  <div style="font-size: 11.5px; color: var(--ink-mute); margin-top: 4px">
+                    分数 {{ p.eval_score_before.toFixed(2) }} → {{ p.eval_score_after.toFixed(2) }}
+                    · 改动幅度 {{ (p.diff_ratio * 100).toFixed(0) }}%
+                    · 真实样本 {{ p.dataset_summary.real_count ?? 0 }} / 合成样本 {{ p.dataset_summary.synthetic_count ?? 0 }}
+                  </div>
+                  <div v-if="p.rationale" style="font-size: 12px; color: var(--ink); margin-top: 6px">{{ p.rationale }}</div>
+                  <div v-if="p.status !== 'pending'" style="font-size: 11px; color: var(--ink-mute); margin-top: 4px">
+                    {{ p.status === 'approved' ? '已批准' : '已驳回' }} · {{ fmtDate(p.reviewed_at || '') }}
+                    <template v-if="p.review_note"> · 备注：{{ p.review_note }}</template>
+                  </div>
+                </div>
+                <button class="btn" style="font-size: 11px; flex-shrink: 0" @click="evoToggleExpand(p.id)">
+                  {{ evoExpanded.has(p.id) ? "收起 diff" : "查看 diff" }}
+                </button>
+              </div>
+
+              <pre v-if="evoExpanded.has(p.id)" class="diff-body" style="margin-top: 10px"
+                v-html="colorDiff(computeLineDiff(evoSkillContent(p.skill_id), p.proposed_content))"></pre>
+
+              <div v-if="p.status === 'pending'" style="margin-top: 10px; display: flex; gap: 8px; align-items: center">
+                <input class="cfg-input" style="flex: 1; font-size: 12px" v-model="evoReviewNotes[p.id]" placeholder="审核备注（可选）" />
+                <button class="btn primary" style="font-size: 12px" :disabled="evoReviewing.has(p.id)" @click="evoReview(p, 'approved')">批准</button>
+                <button class="btn text-danger" style="font-size: 12px" :disabled="evoReviewing.has(p.id)" @click="evoReview(p, 'rejected')">驳回</button>
               </div>
             </div>
           </div>

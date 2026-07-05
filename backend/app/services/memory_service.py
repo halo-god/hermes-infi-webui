@@ -136,6 +136,15 @@ async def get_skill(db: AsyncSession, skill_id: uuid.UUID) -> AgentSkill | None:
     return await db.get(AgentSkill, skill_id)
 
 
+async def list_all_skills(db: AsyncSession) -> list[AgentSkill]:
+    """Admin-wide view across every owner/team/profile — list_skills() above
+    is always scoped, for the personal skill-management page. Backs the
+    super_admin skill-evolution review UI, which needs to see every skill."""
+    stmt = select(AgentSkill).order_by(AgentSkill.created_at.desc())
+    result = await db.execute(stmt)
+    return list(result.scalars().all())
+
+
 async def update_skill(db: AsyncSession, skill: AgentSkill, **fields: object) -> AgentSkill:
     """Apply caller-provided fields as-is — pass only explicitly-set fields
     (e.g. via payload.model_dump(exclude_unset=True)) so an intentional

@@ -18,6 +18,7 @@ import { teamsApi } from "@/api/teams";
 import { projectsApi } from "@/api/projects";
 import { renderMarkdown, renderMarkdownAsync } from "@/utils/markdown";
 import { fmtNum } from "@/utils/format";
+import { colorDiff } from "@/utils/diff";
 import type { GroupMember, Knowledge, Message, RoundtableReply, WsAdapter } from "@/types";
 import type { SendOptions } from "@/components/Composer.vue";
 import type { Profile } from "@/api/agents";
@@ -716,16 +717,6 @@ async function forkFrom(msgId: string) {
   } catch {
     ns.toast("分叉失败", "error");
   }
-}
-
-// ── File diff colorizer ──
-function colorDiff(text: string): string {
-  return text.split("\n").map((line) => {
-    const esc = escapeHtml(line);
-    if (line.startsWith("+") && !line.startsWith("+++")) return `<span class="diff-add">${esc}</span>`;
-    if (line.startsWith("-") && !line.startsWith("---")) return `<span class="diff-del">${esc}</span>`;
-    return `<span>${esc}</span>`;
-  }).join("\n");
 }
 
 // ── Smart follow-up suggestion chips ──
