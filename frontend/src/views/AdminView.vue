@@ -488,10 +488,10 @@ const scanMsg = ref("");
 const hermesVersion = ref("");
 const showProfileForm = ref(false);
 const editingProfileId = ref<string | null>(null);
-const profileForm = reactive<ProfileCreate & { knowledge_ids: string[] }>({
+const profileForm = reactive<ProfileCreate & { knowledge_ids: string[]; mcp_server_names: string[] }>({
   name: "", handle: "", scope: "global", color: "#b8852a",
   icon: "sparkle", desc: "", default_model: "hermes-4", team_id: null,
-  system_prompt: null, skills: [], featured: false, knowledge_ids: [],
+  system_prompt: null, skills: [], featured: false, knowledge_ids: [], mcp_server_names: [],
 });
 // Selectable knowledge entries (team knowledge, labeled by team) for prompt injection.
 const knowledgeOptions = ref<{ id: string; label: string }[]>([]);
@@ -510,6 +510,12 @@ function toggleKnowledge(id: string) {
   const i = arr.indexOf(id);
   if (i >= 0) arr.splice(i, 1);
   else arr.push(id);
+}
+function toggleMcpServer(name: string) {
+  const arr = profileForm.mcp_server_names;
+  const i = arr.indexOf(name);
+  if (i >= 0) arr.splice(i, 1);
+  else arr.push(name);
 }
 const skillInput = ref("");
 const profileSaving = ref(false);
@@ -567,12 +573,13 @@ function openCreateProfile() {
   Object.assign(profileForm, {
     name: "", handle: "", scope: "global", color: "#b8852a",
     icon: "sparkle", desc: "", default_model: "hermes-4", team_id: null,
-    system_prompt: null, skills: [], featured: false, knowledge_ids: [],
+    system_prompt: null, skills: [], featured: false, knowledge_ids: [], mcp_server_names: [],
   });
   skillInput.value = "";
   profileError.value = "";
   showProfileForm.value = true;
   loadKnowledgeOptions();
+  loadMcpServers();
 }
 function openEditProfile(p: Profile) {
   editingProfileId.value = p.id;
@@ -580,12 +587,13 @@ function openEditProfile(p: Profile) {
     name: p.name, handle: p.handle, scope: p.scope, color: p.color,
     icon: p.icon, desc: p.desc, default_model: p.default_model, team_id: p.team_id,
     system_prompt: p.system_prompt ?? null, skills: [...(p.skills || [])], featured: p.featured ?? false,
-    knowledge_ids: [...(p.knowledge_ids || [])],
+    knowledge_ids: [...(p.knowledge_ids || [])], mcp_server_names: [...(p.mcp_server_names || [])],
   });
   skillInput.value = "";
   profileError.value = "";
   showProfileForm.value = true;
   loadKnowledgeOptions();
+  loadMcpServers();
 }
 function addSkill() {
   const s = skillInput.value.trim();
@@ -608,6 +616,7 @@ async function saveProfile() {
         team_id: profileForm.team_id, system_prompt: profileForm.system_prompt,
         skills: profileForm.skills, featured: profileForm.featured,
         knowledge_ids: profileForm.knowledge_ids,
+        mcp_server_names: profileForm.mcp_server_names,
       });
     } else {
       await profilesApi.create({ ...profileForm });
@@ -1359,6 +1368,17 @@ async function confirmImport() {
               <label v-for="k in knowledgeOptions" :key="k.id" style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;color:var(--ink)">
                 <input type="checkbox" :checked="profileForm.knowledge_ids.includes(k.id)" @change="toggleKnowledge(k.id)" style="width:13px;height:13px;cursor:pointer" />
                 {{ k.label }}
+              </label>
+            </div>
+          </label>
+          <!-- MCP server binding (threaded into the agent's ACP session) -->
+          <label class="text-mute-sm" style="display:block;margin-top:12px">
+            绑定 MCP 服务器（该助手的会话将携带这些工具）
+            <div v-if="!mcpServers.length" style="margin-top:6px;font-size:12px;color:var(--ink-mute)">暂无已注册的 MCP 服务器，请先在"MCP 服务器"标签页添加。</div>
+            <div v-else style="margin-top:6px;max-height:160px;overflow-y:auto;border:1px solid var(--rule);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:4px">
+              <label v-for="s in mcpServers" :key="s.name" style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;color:var(--ink)">
+                <input type="checkbox" :checked="profileForm.mcp_server_names.includes(s.name)" @change="toggleMcpServer(s.name)" style="width:13px;height:13px;cursor:pointer" />
+                {{ s.name }}
               </label>
             </div>
           </label>

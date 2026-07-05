@@ -90,7 +90,7 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
         try:
             await client.start()
             await client.initialize()
-            session_id = await client.new_session(cwd)
+            session_id = await client.new_session(cwd, mcp_servers=target.get("mcp_servers"))
             # Nobody can answer an interactive clarify modal mid-roundtable —
             # drain any clarify request the agent raises and auto-decline it
             # immediately instead of letting it hang until ACPTimeout. This is

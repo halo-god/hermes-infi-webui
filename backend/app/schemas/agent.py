@@ -41,6 +41,7 @@ class ProfileOut(BaseModel):
     featured: bool = False
     knowledge_ids: list[str] = []
     knowledge_folder_ids: list[str] = []
+    mcp_server_names: list[str] = []
 
     @field_validator("skills", mode="before")
     @classmethod
@@ -90,6 +91,7 @@ class ProfileUpdate(BaseModel):
     featured: bool | None = None
     knowledge_ids: list[str] | None = None
     knowledge_folder_ids: list[str] | None = None
+    mcp_server_names: list[str] | None = None
 
 
 class ProfileExport(BaseModel):

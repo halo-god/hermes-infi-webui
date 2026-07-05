@@ -277,8 +277,10 @@ class Runner:
                     import os
                     cwd = os.path.join(settings.workspace_root, new_conv_id)
                     os.makedirs(cwd, exist_ok=True)
+                    mcp_servers = self.pool._mcp_servers.get(conv_id)
                     new_sid = await asyncio.wait_for(
-                        client.fork_session(client._session_id, cwd), timeout=15,
+                        client.fork_session(client._session_id, cwd, mcp_servers=mcp_servers),
+                        timeout=15,
                     )
                     await redis.publish(response_channel, _json.dumps({"session_id": new_sid}))
                     logger.info("Forked ACP session %s -> %s", client._session_id[:8], new_sid[:8])
@@ -461,6 +463,7 @@ class Runner:
         text = task["text"]
         system_prompt: str | None = task.get("system_prompt") or None
         profile_dir: str | None = task.get("profile_dir") or None
+        mcp_servers: list | None = task.get("mcp_servers") or None
 
         agent = self.agents.get(agent_id) or self.agents.get("hermes")
         if agent is None:
@@ -635,6 +638,7 @@ class Runner:
             client, new_session = await self.pool.get(
                 conversation_id, agent.command, cwd, on_update, on_fs_write,
                 acp_session_id=acp_session_id, profile_dir=profile_dir,
+                mcp_servers=mcp_servers,
             )
             logger.info(
                 "handle_single: conv=%s msg=%s client_pid=%s new_session=%s",

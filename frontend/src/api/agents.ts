@@ -19,6 +19,7 @@ export interface Profile {
   featured?: boolean;
   knowledge_ids?: string[];
   knowledge_folder_ids?: string[];
+  mcp_server_names?: string[];
 }
 
 export interface ScanResult {
@@ -72,6 +73,7 @@ export interface ProfileUpdate {
   featured?: boolean;
   knowledge_ids?: string[];
   knowledge_folder_ids?: string[];
+  mcp_server_names?: string[];
 }
 
 export const agentsApi = {

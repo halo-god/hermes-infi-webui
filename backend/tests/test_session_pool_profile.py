@@ -42,10 +42,11 @@ class FakeACPClient:
     async def authenticate(self, method):
         pass
 
-    async def new_session(self, cwd):
+    async def new_session(self, cwd, mcp_servers=None):
+        self.mcp_servers = mcp_servers
         return f"sess-{len(FakeACPClient.instances)}"
 
-    async def resume_session(self, session_id, cwd):
+    async def resume_session(self, session_id, cwd, mcp_servers=None):
         raise RuntimeError("unknown session in this profile's store")
 
     async def stop(self):
@@ -106,6 +107,29 @@ async def test_profile_switch_respawns(pool, tmp_path):
     assert c1.stopped
     assert c2.env == {"HERMES_HOME": str(b)}
     assert sid2 is not None  # fresh session in the new profile
+
+
+async def test_mcp_servers_passed_to_new_session(pool):
+    servers = [{"name": "fs", "command": "npx", "args": ["-y", "srv"], "env": {}}]
+    c, sid = await pool.get("conv1", ["hermes", "acp"], "/tmp", _noop_update, _noop_fs,
+                            mcp_servers=servers)
+    assert c.mcp_servers == servers
+    assert sid is not None
+
+
+async def test_no_mcp_servers_defaults_to_none(pool):
+    c, _ = await pool.get("conv1", ["hermes", "acp"], "/tmp", _noop_update, _noop_fs)
+    assert c.mcp_servers is None
+
+
+async def test_mcp_servers_change_respawns(pool):
+    c1, _ = await pool.get("conv1", ["hermes", "acp"], "/tmp", _noop_update, _noop_fs,
+                           mcp_servers=[{"name": "a"}])
+    c2, sid2 = await pool.get("conv1", ["hermes", "acp"], "/tmp", _noop_update, _noop_fs,
+                              mcp_servers=[{"name": "b"}])
+    assert c2 is not c1
+    assert c1.stopped
+    assert sid2 is not None
 
 
 def test_profile_env_missing_dir_falls_back(tmp_path):

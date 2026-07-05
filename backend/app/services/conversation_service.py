@@ -321,6 +321,50 @@ def _profile_dir(profile: Profile | None) -> str | None:
     return os.path.dirname(os.path.expanduser(profile.path))
 
 
+def _mcp_server_entry(server: dict) -> dict | None:
+    """Convert one admin-registered MCP server record into the ACP `mcpServers`
+    session-param shape.
+
+    NOTE: the exact field names a real `hermes` ACP agent expects for an
+    `mcpServers` entry aren't observable anywhere in this repo (the param has
+    never been populated until now) — this mapping follows the conventional
+    stdio/SSE MCP client-config shape and may need adjustment once verified
+    against the real agent binary. Isolated here so that's a one-place fix.
+    """
+    name = server.get("name")
+    if not name:
+        return None
+    transport = server.get("transport", "stdio")
+    if transport == "stdio":
+        command = (server.get("command") or "").strip()
+        if not command:
+            return None
+        parts = command.split()
+        return {"name": name, "command": parts[0], "args": parts[1:], "env": server.get("env") or {}}
+    url = server.get("url")
+    if not url:
+        return None
+    return {"name": name, "type": "sse", "url": url, "headers": server.get("env") or {}}
+
+
+async def _resolve_mcp_servers(db: AsyncSession, profile: Profile | None) -> list[dict]:
+    """Resolve a Profile's enabled MCP server names against the admin-managed
+    catalog, converted to the ACP session-param shape.
+
+    No profile or no servers enabled -> [] (default off, not default-all —
+    a chat session shouldn't silently gain tool access just because the admin
+    registered a server somewhere)."""
+    names = set(getattr(profile, "mcp_server_names", None) or []) if profile else set()
+    if not names:
+        return []
+    from app.services import settings_service
+
+    settings_row = await settings_service.get(db)
+    catalog: list[dict] = (settings_row.data or {}).get("mcp_servers", [])
+    entries = [_mcp_server_entry(s) for s in catalog if s.get("name") in names]
+    return [e for e in entries if e]
+
+
 def _build_attached_prompt(text: str, attached: list[dict]) -> str:
     """Inject file references into the prompt text so the agent knows about attachments.
 
@@ -353,6 +397,7 @@ async def send_message(
     system_prompt: str | None = None,
     existing_user_msg: Message | None = None,
     profile_dir: str | None = None,
+    mcp_servers: list[dict] | None = None,
     agent_id_override: str | None = None,
     profile_id: str | None = None,
     task_id: uuid.UUID | None = None,
@@ -461,6 +506,7 @@ async def send_message(
             "content_blocks": prompt_blocks if len(prompt_blocks) > 1 else None,
             "system_prompt": system_prompt,
             "profile_dir": profile_dir,
+            "mcp_servers": mcp_servers or [],
         }
     )
     return user_msg, agent_msg
@@ -713,12 +759,14 @@ async def dispatch(
     # Load profile system_prompt — request-level override wins over conversation default
     system_prompt: str | None = None
     profile_dir: str | None = None
+    mcp_servers: list[dict] = []
     effective_profile_id = profile_id_override or convo.profile_id
     if effective_profile_id:
         profile = await db.get(Profile, effective_profile_id)
         if profile:
             system_prompt = profile.system_prompt or None
             profile_dir = _profile_dir(profile)
+            mcp_servers = await _resolve_mcp_servers(db, profile)
             # Inject the Profile's bound knowledge-base content (reuse loop)
             knowledge_prompt = await _build_knowledge_prompt(db, profile)
             if knowledge_prompt:
@@ -741,7 +789,10 @@ async def dispatch(
         # underlying CLI agent (unlike group-chat roundtable, there's no
         # per-member Profile here — active_agent_ids are bare agent ids).
         targets = [
-            {"agent_id": aid, "profile_id": None, "system_prompt": system_prompt, "profile_dir": profile_dir}
+            {
+                "agent_id": aid, "profile_id": None, "system_prompt": system_prompt,
+                "profile_dir": profile_dir, "mcp_servers": mcp_servers,
+            }
             for aid in agents
         ]
         return await send_roundtable(
@@ -751,8 +802,8 @@ async def dispatch(
     return await send_message(
         db, convo, text,
         attached_file_ids=attached_file_ids, owner_id=owner_id,
-        system_prompt=system_prompt, profile_dir=profile_dir, task_id=task_id,
-        profile_id=effective_profile_id,
+        system_prompt=system_prompt, profile_dir=profile_dir, mcp_servers=mcp_servers,
+        task_id=task_id, profile_id=effective_profile_id,
     )
 
 
@@ -1376,6 +1427,7 @@ async def dispatch_group(
         target_profile_id, target_agent_id = agent_targets[0]
         system_prompt = None
         profile_dir = None
+        mcp_servers: list[dict] = []
         # 优先级：显式 profile_id_override > 该成员绑定的 Profile > 会话默认
         effective_profile_id = profile_id_override or target_profile_id or convo.profile_id
         if not profile_id_override and not target_profile_id:
@@ -1394,6 +1446,7 @@ async def dispatch_group(
             if profile:
                 system_prompt = profile.system_prompt or None
                 profile_dir = _profile_dir(profile)
+                mcp_servers = await _resolve_mcp_servers(db, profile)
 
         memory_prompt = await _build_memory_prompt(db, owner_id)
         if memory_prompt:
@@ -1410,6 +1463,7 @@ async def dispatch_group(
             system_prompt=system_prompt,
             existing_user_msg=user_msg,
             profile_dir=profile_dir,
+            mcp_servers=mcp_servers,
             agent_id_override=target_agent_id,
             profile_id=effective_profile_id,
         )
@@ -1422,12 +1476,14 @@ async def dispatch_group(
     for target_profile_id, target_agent_id in agent_targets:
         t_system_prompt = None
         t_profile_dir = None
+        t_mcp_servers: list[dict] = []
         eff_pid = target_profile_id or convo.profile_id
         if eff_pid:
             profile = await db.get(Profile, eff_pid)
             if profile:
                 t_system_prompt = profile.system_prompt or None
                 t_profile_dir = _profile_dir(profile)
+                t_mcp_servers = await _resolve_mcp_servers(db, profile)
         if memory_prompt:
             t_system_prompt = f"{t_system_prompt}\n\n{memory_prompt}" if t_system_prompt else memory_prompt
         targets.append({
@@ -1435,6 +1491,7 @@ async def dispatch_group(
             "profile_id": target_profile_id,
             "system_prompt": t_system_prompt,
             "profile_dir": t_profile_dir,
+            "mcp_servers": t_mcp_servers,
         })
 
     return await send_roundtable(

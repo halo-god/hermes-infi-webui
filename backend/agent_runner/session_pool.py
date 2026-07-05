@@ -31,6 +31,9 @@ class SessionPool:
         # profile_dir the client was spawned with — HERMES_HOME is fixed at
         # spawn, so a profile switch must drop and respawn the subprocess.
         self._profile_dirs: dict[str, str | None] = {}
+        # mcpServers the client's session was created with — also fixed at
+        # session creation, so a change requires a respawn just like profile_dir.
+        self._mcp_servers: dict[str, list | None] = {}
 
     def _alive(self, c: ACPClient) -> bool:
         return (
@@ -48,23 +51,28 @@ class SessionPool:
         on_fs_write: OnFsWrite,
         acp_session_id: str | None = None,
         profile_dir: str | None = None,
+        mcp_servers: list | None = None,
     ) -> tuple[ACPClient, str | None]:
         """Return (client, new_session_id_or_None). session id is set only when
         a fresh subprocess+session was created."""
         self._last_used[conversation_id] = time.monotonic()
         c = self._clients.get(conversation_id)
         if c is not None and self._alive(c):
-            if self._profile_dirs.get(conversation_id) == profile_dir:
+            if (
+                self._profile_dirs.get(conversation_id) == profile_dir
+                and self._mcp_servers.get(conversation_id) == mcp_servers
+            ):
                 c.on_update = on_update
                 c.on_fs_write = on_fs_write
                 return c, None
-            # Profile changed mid-conversation: the live subprocess is pinned to
-            # the old HERMES_HOME, so respawn. The stored acp_session_id lives in
-            # the old profile's session store — resume below fails and falls back
-            # to a fresh session, which the runner persists.
+            # Profile or MCP server set changed mid-conversation: mcpServers is
+            # fixed at session/new time just like HERMES_HOME, so respawn. The
+            # stored acp_session_id lives in the old session store — resume
+            # below fails and falls back to a fresh session, which the runner
+            # persists.
             logger.info(
-                "Profile changed for conv %s (%s -> %s), respawning agent",
-                conversation_id[:8], self._profile_dirs.get(conversation_id), profile_dir,
+                "Profile/MCP config changed for conv %s, respawning agent",
+                conversation_id[:8],
             )
             await self.drop(conversation_id)
             c = None
@@ -109,31 +117,40 @@ class SessionPool:
                 if supports_resume:
                     try:
                         await asyncio.wait_for(
-                            c.resume_session(acp_session_id, cwd), timeout=POOL_SESSION_TIMEOUT,
+                            c.resume_session(acp_session_id, cwd, mcp_servers=mcp_servers),
+                            timeout=POOL_SESSION_TIMEOUT,
                         )
                         session_id = None  # resumed, no new session
                         logger.info("Resumed ACP session %s for conv %s", acp_session_id[:8], conversation_id[:8])
                     except Exception as exc:
                         logger.warning("Resume failed for %s: %s, falling back to new", acp_session_id[:8], exc)
-                        session_id = await asyncio.wait_for(c.new_session(cwd), timeout=POOL_SESSION_TIMEOUT)
+                        session_id = await asyncio.wait_for(
+                            c.new_session(cwd, mcp_servers=mcp_servers), timeout=POOL_SESSION_TIMEOUT,
+                        )
                 else:
                     # No resume support — create new session (don't use load,
                     # as it replays history and conflicts with our on_update callback)
-                    session_id = await asyncio.wait_for(c.new_session(cwd), timeout=POOL_SESSION_TIMEOUT)
+                    session_id = await asyncio.wait_for(
+                        c.new_session(cwd, mcp_servers=mcp_servers), timeout=POOL_SESSION_TIMEOUT,
+                    )
             else:
-                session_id = await asyncio.wait_for(c.new_session(cwd), timeout=POOL_SESSION_TIMEOUT)
+                session_id = await asyncio.wait_for(
+                    c.new_session(cwd, mcp_servers=mcp_servers), timeout=POOL_SESSION_TIMEOUT,
+                )
         except (asyncio.TimeoutError, Exception) as exc:
             logger.error("Failed to create ACP session for %s: %s", conversation_id, exc)
             await c.stop()
             raise
         self._clients[conversation_id] = c
         self._profile_dirs[conversation_id] = profile_dir
+        self._mcp_servers[conversation_id] = mcp_servers
         return c, session_id
 
     async def drop(self, conversation_id: str) -> None:
         c = self._clients.pop(conversation_id, None)
         self._last_used.pop(conversation_id, None)
         self._profile_dirs.pop(conversation_id, None)
+        self._mcp_servers.pop(conversation_id, None)
         if c:
             await c.stop()
 
@@ -151,3 +168,4 @@ class SessionPool:
         self._clients.clear()
         self._last_used.clear()
         self._profile_dirs.clear()
+        self._mcp_servers.clear()
