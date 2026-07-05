@@ -119,6 +119,10 @@ class Settings(BaseSettings):
     memory_consolidate_status_ttl: int = 3600  # done/error status visibility window
     # running-lock TTL; must exceed acp_prompt_timeout so a slow run can't double-start
     memory_consolidate_lock_ttl: int = 1200
+    # Retrieval-time injection of episodic memory + skills — kill switch in
+    # case pg_trgm relevance misbehaves in production; the flat
+    # user_profile/soul/notes injection is unaffected either way.
+    memory_episodic_injection_enabled: bool = True
 
     # ── Uploads ──
     max_upload_mb: int = 25  # reject uploads larger than this (per file)

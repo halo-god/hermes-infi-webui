@@ -7,7 +7,7 @@ import { http } from "@/api/client";
 import { authApi } from "@/api/auth";
 import { useAuthStore } from "@/stores/auth";
 import { useNotificationStore } from "@/stores/notifications";
-import { memoryApi, type Memory } from "@/api/memory";
+import { memoryApi, type Memory, type MemoryEpisode, type Skill } from "@/api/memory";
 
 const auth = useAuthStore();
 const ns = useNotificationStore();
@@ -175,8 +175,87 @@ async function triggerConsolidate() {
   }
 }
 
-watch(tab, (t) => { if (t === "memory") { loadMemory(); refreshConsolidateStatus(); } });
-onMounted(() => { if (tab.value === "memory") { loadMemory(); refreshConsolidateStatus(); } });
+// ── 情景记忆 (episodes, read-only — written by 做梦整理) ──
+const episodes = ref<MemoryEpisode[]>([]);
+const episodesLoading = ref(false);
+async function loadEpisodes() {
+  episodesLoading.value = true;
+  try {
+    episodes.value = await memoryApi.episodes();
+  } catch { /* ignore */ } finally {
+    episodesLoading.value = false;
+  }
+}
+
+// ── 技能 (skills, user-manageable) ──
+const skills = ref<Skill[]>([]);
+const skillsLoading = ref(false);
+const showSkillForm = ref(false);
+const editingSkillId = ref<string | null>(null);
+const skillForm = reactive({ name: "", description: "", content: "", keywords: "", always: false });
+const skillSaving = ref(false);
+
+async function loadSkills() {
+  skillsLoading.value = true;
+  try {
+    skills.value = await memoryApi.listSkills();
+  } catch { /* ignore */ } finally {
+    skillsLoading.value = false;
+  }
+}
+function openCreateSkill() {
+  editingSkillId.value = null;
+  Object.assign(skillForm, { name: "", description: "", content: "", keywords: "", always: false });
+  showSkillForm.value = true;
+}
+function openEditSkill(s: Skill) {
+  editingSkillId.value = s.id;
+  Object.assign(skillForm, {
+    name: s.name, description: s.description, content: s.content,
+    keywords: (s.trigger_conditions.keywords || []).join(", "),
+    always: !!s.trigger_conditions.always,
+  });
+  showSkillForm.value = true;
+}
+async function saveSkill() {
+  skillSaving.value = true;
+  try {
+    const trigger_conditions = {
+      keywords: skillForm.keywords.split(",").map((k) => k.trim()).filter(Boolean),
+      always: skillForm.always,
+    };
+    if (editingSkillId.value) {
+      await memoryApi.updateSkill(editingSkillId.value, {
+        name: skillForm.name, description: skillForm.description,
+        content: skillForm.content, trigger_conditions,
+      });
+    } else {
+      await memoryApi.createSkill({
+        name: skillForm.name, description: skillForm.description,
+        content: skillForm.content, trigger_conditions,
+      });
+    }
+    showSkillForm.value = false;
+    await loadSkills();
+    ns.toast("已保存");
+  } catch (e: any) {
+    ns.toast(e?.response?.data?.detail || "保存失败", "error");
+  } finally {
+    skillSaving.value = false;
+  }
+}
+async function toggleSkillEnabled(s: Skill) {
+  await memoryApi.updateSkill(s.id, { enabled: !s.enabled });
+  await loadSkills();
+}
+async function deleteSkillItem(s: Skill) {
+  if (!confirm(`删除技能「${s.name}」？`)) return;
+  await memoryApi.deleteSkill(s.id);
+  await loadSkills();
+}
+
+watch(tab, (t) => { if (t === "memory") { loadMemory(); refreshConsolidateStatus(); loadEpisodes(); loadSkills(); } });
+onMounted(() => { if (tab.value === "memory") { loadMemory(); refreshConsolidateStatus(); loadEpisodes(); loadSkills(); } });
 onUnmounted(stopPolling);
 
 const notifyPrefs = reactive({
@@ -317,6 +396,85 @@ async function saveNotifyPrefs() {
               <div v-else class="memory-empty" @click="startEditMemory(sec.key)">
                 <span>{{ sec.placeholder }}</span>
                 <span class="memory-empty-hint">点击编辑</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 情景记忆：整理时生成的可检索历史片段（只读） -->
+          <div class="section-card" style="margin-bottom: 16px">
+            <div class="section-head">
+              <div class="section-title">历史对话回忆</div>
+              <div class="text-mute-sm" style="margin-top:2px">每次"整理记忆"时按会话生成的摘要，聊天时会按相关性检索注入</div>
+            </div>
+            <div v-if="episodesLoading" style="padding: 18px; font-size: 12.5px; color: var(--ink-mute)">加载中…</div>
+            <div v-else-if="!episodes.length" style="padding: 18px; font-size: 12.5px; color: var(--ink-mute)">暂无历史回忆，整理记忆后会自动生成</div>
+            <div v-else style="padding: 0 18px 14px; display: flex; flex-direction: column; gap: 10px">
+              <div v-for="ep in episodes" :key="ep.id" style="padding: 10px 12px; border: 1px solid var(--rule); border-radius: 8px">
+                <div style="display:flex;justify-content:space-between;gap:8px;font-size:12.5px;font-weight:500;color:var(--ink)">
+                  <span>{{ ep.title || "（未命名会话）" }}</span>
+                  <span class="text-mute-sm" style="flex-shrink:0">{{ relTime(ep.consolidated_at) }}</span>
+                </div>
+                <div style="margin-top:4px;font-size:12.5px;color:var(--ink-mute)">{{ ep.summary }}</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 技能：按关键词/常驻条件触发注入 -->
+          <div class="section-card">
+            <div class="section-head" style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">
+              <div>
+                <div class="section-title">技能</div>
+                <div class="text-mute-sm" style="margin-top:2px">命中关键词或标记为常驻时，才会注入这条内容</div>
+              </div>
+              <button class="btn primary" style="font-size:12px;flex-shrink:0" @click="openCreateSkill">+ 新建技能</button>
+            </div>
+            <div v-if="skillsLoading" style="padding: 18px; font-size: 12.5px; color: var(--ink-mute)">加载中…</div>
+            <div v-else-if="!skills.length" style="padding: 18px; font-size: 12.5px; color: var(--ink-mute)">暂无技能</div>
+            <div v-else style="padding: 0 18px 14px; display: flex; flex-direction: column; gap: 10px">
+              <div v-for="s in skills" :key="s.id" :style="{ padding: '10px 12px', border: '1px solid var(--rule)', borderRadius: '8px', opacity: s.enabled ? 1 : 0.5 }">
+                <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start">
+                  <div>
+                    <div style="font-size:12.5px;font-weight:500;color:var(--ink)">{{ s.name }}</div>
+                    <div v-if="s.description" style="margin-top:2px;font-size:12px;color:var(--ink-mute)">{{ s.description }}</div>
+                    <div style="margin-top:4px;font-size:11.5px;color:var(--ink-mute)">
+                      触发：<span v-if="s.trigger_conditions.always">常驻</span><span v-else-if="s.trigger_conditions.keywords?.length">{{ s.trigger_conditions.keywords.join(' / ') }}</span><span v-else>（未设置）</span>
+                    </div>
+                  </div>
+                  <div style="display:flex;gap:6px;flex-shrink:0">
+                    <button class="btn" style="font-size:11.5px" @click="toggleSkillEnabled(s)">{{ s.enabled ? '禁用' : '启用' }}</button>
+                    <button class="btn" style="font-size:11.5px" @click="openEditSkill(s)">编辑</button>
+                    <button class="btn text-danger" style="font-size:11.5px" @click="deleteSkillItem(s)">删除</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 技能编辑弹层 -->
+          <div v-if="showSkillForm" style="position:fixed;inset:0;background:rgba(0,0,0,0.3);display:flex;align-items:center;justify-content:center;z-index:900" @click.self="showSkillForm = false">
+            <div class="section-card" style="width: 480px; max-width: 92vw; max-height: 82vh; overflow-y: auto">
+              <div class="section-head"><div class="section-title">{{ editingSkillId ? "编辑技能" : "新建技能" }}</div></div>
+              <div style="padding: 0 18px 18px; display: flex; flex-direction: column; gap: 10px">
+                <label class="text-mute-sm">名称
+                  <input v-model="skillForm.name" class="cfg-input" placeholder="例：部署技能" />
+                </label>
+                <label class="text-mute-sm">描述
+                  <input v-model="skillForm.description" class="cfg-input" placeholder="一句话说明这个技能是做什么的" />
+                </label>
+                <label class="text-mute-sm">内容（命中时注入到系统提示词）
+                  <textarea v-model="skillForm.content" class="cfg-input" style="width:100%;min-height:100px;resize:vertical" placeholder="具体的操作步骤/规则说明"></textarea>
+                </label>
+                <label class="text-mute-sm">触发关键词（逗号分隔，命中任意一个即触发）
+                  <input v-model="skillForm.keywords" class="cfg-input" placeholder="例：部署, 上线" />
+                </label>
+                <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--ink-mute);cursor:pointer">
+                  <input type="checkbox" v-model="skillForm.always" style="width:14px;height:14px;cursor:pointer" />
+                  常驻（每次都注入，不看关键词）
+                </label>
+                <div style="display:flex;gap:8px;margin-top:4px">
+                  <button class="btn primary" :disabled="skillSaving || !skillForm.name || !skillForm.content" @click="saveSkill">{{ skillSaving ? "保存中…" : "保存" }}</button>
+                  <button class="btn" @click="showSkillForm = false">取消</button>
+                </div>
               </div>
             </div>
           </div>

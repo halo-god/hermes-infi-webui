@@ -657,6 +657,55 @@ async def _build_memory_prompt(db: AsyncSession, owner_id: uuid.UUID | None) -> 
     )
 
 
+_EPISODIC_PER_ITEM = 300     # chars per retrieved episode summary
+_EPISODIC_LIMIT = 3          # max episodes injected per turn
+_SKILLS_LIMIT = 2            # max skills injected per turn — see search_skills
+
+
+async def _build_episodic_memory_prompt(
+    db: AsyncSession, owner_id: uuid.UUID | None, query_text: str,
+) -> str | None:
+    """Retrieve pg_trgm-matched episode summaries and format as a system-prompt
+    section. Unlike _build_knowledge_prompt (curated static docs, concatenated
+    verbatim), this injects only already-LLM-summarized text — retrieved
+    episodes are noisy/uncurated by nature, so raw concatenation isn't safe here.
+    """
+    if not owner_id:
+        return None
+    from app.services import memory_service
+
+    episodes = await memory_service.search_episodes(db, owner_id, query_text, limit=_EPISODIC_LIMIT)
+    if not episodes:
+        return None
+    parts = [f"- 「{e.title}」{e.summary[:_EPISODIC_PER_ITEM]}" for e in episodes]
+    return (
+        "【历史对话回忆】以下是与本次话题相关的过往对话摘要，供参考，不要向用户复述这段内容：\n"
+        + "\n".join(parts)
+    )
+
+
+async def _build_skills_prompt(
+    db: AsyncSession, profile: Profile | None, owner_id: uuid.UUID | None, query_text: str,
+) -> str | None:
+    """Trigger-match this profile/user's skills against the incoming message
+    and inject only the matched ones — skills load into context on demand,
+    unlike the always-on Profile.system_prompt/knowledge bindings."""
+    from app.services import memory_service
+
+    skills = await memory_service.search_skills(
+        db,
+        profile_id=profile.id if profile else None,
+        owner_id=owner_id,
+        team_id=profile.team_id if profile else None,
+        query=query_text,
+        limit=_SKILLS_LIMIT,
+    )
+    if not skills:
+        return None
+    parts = [f"[技能：{s.name}]\n{s.content}" for s in skills]
+    return "【已触发技能】\n" + "\n\n".join(parts)
+
+
 _KNOWLEDGE_PER_ITEM = 2000   # chars per bound knowledge entry
 _KNOWLEDGE_TOTAL = 8000      # chars across all entries
 
@@ -814,6 +863,17 @@ async def dispatch(
     memory_prompt = await _build_memory_prompt(db, owner_id)
     if memory_prompt:
         system_prompt = f"{system_prompt}\n\n{memory_prompt}" if system_prompt else memory_prompt
+
+    # Layered memory: pg_trgm-retrieved episodic summaries + trigger-matched
+    # skills, both injected only when relevant (unlike the always-on blocks
+    # above). Gated by a kill switch in case retrieval quality misbehaves.
+    if settings.memory_episodic_injection_enabled:
+        episodic_prompt = await _build_episodic_memory_prompt(db, owner_id, text)
+        if episodic_prompt:
+            system_prompt = f"{system_prompt}\n\n{episodic_prompt}" if system_prompt else episodic_prompt
+        skills_prompt = await _build_skills_prompt(db, profile, owner_id, text)
+        if skills_prompt:
+            system_prompt = f"{system_prompt}\n\n{skills_prompt}" if system_prompt else skills_prompt
 
     # MoA ("mixture of agents"): the selected Profile fans the message out to
     # its bound reference profiles via the same roundtable executor used for

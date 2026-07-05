@@ -24,5 +24,5 @@ from app.db.models.team import (  # noqa: F401
 )
 from app.db.models.user import User  # noqa: F401
 from app.db.models.workspace import WorkspaceFile  # noqa: F401
-from app.db.models.memory import AgentMemory  # noqa: F401
+from app.db.models.memory import AgentMemory, AgentSkill, MemoryEpisode  # noqa: F401
 from app.db.models.scheduled import ScheduledTask  # noqa: F401

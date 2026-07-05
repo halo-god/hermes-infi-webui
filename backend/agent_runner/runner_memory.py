@@ -32,8 +32,9 @@ CONSOLIDATE_PROMPT = """【记忆整理任务】你正在执行"做梦"式记忆
 4. notes（我的笔记）：值得长期记住的具体事项（进行中的项目、重要约定、待办背景等）。
 5. 三段内容总字数不得超过 {budget} 字。宁可精炼，不要堆砌。
 6. 对话摘录中 AI 的某些回复可能包含对工具调用结果（如文件内容、搜索结果）的复述，这些属于执行任务的中间输出，不是用户主动提供的信息。整理时请忽略这类复述，只提取用户与 AI 之间的真实交流内容。
-7. 只输出一个 JSON 对象，不要输出任何其他文字、解释或 markdown 代码块：
-{{"user_profile": "...", "soul": "...", "notes": "..."}}
+7. 另外，【近期对话摘录】按 "## 会话「标题」" 分为若干节，请为每一节单独写一段不超过 200 字的摘要（这段话之后会被单独存起来按需检索，所以要能独立说明这节对话讲了什么），按节出现的顺序放入 "episodes" 数组，数组长度必须与分节数完全一致，一节都不能少。
+8. 只输出一个 JSON 对象，不要输出任何其他文字、解释或 markdown 代码块：
+{{"user_profile": "...", "soul": "...", "notes": "...", "episodes": ["...", "..."]}}
 
 【现有记忆】
 [用户画像]
@@ -50,11 +51,9 @@ CONSOLIDATE_PROMPT = """【记忆整理任务】你正在执行"做梦"式记忆
 """
 
 
-def parse_memory_json(text: str) -> dict[str, str] | None:
-    """Extract {"user_profile","soul","notes"} from LLM output.
-
-    Tolerates markdown fences and surrounding prose. Returns None on failure.
-    """
+def _extract_json_dict(text: str) -> dict | None:
+    """Find the first JSON object in LLM output, tolerating markdown fences
+    and surrounding prose. Returns None if nothing parses as a dict."""
     candidates: list[str] = []
     m = _JSON_FENCE_RE.search(text)
     if m:
@@ -67,15 +66,46 @@ def parse_memory_json(text: str) -> dict[str, str] | None:
             data = json.loads(raw)
         except (ValueError, TypeError):
             continue
-        if not isinstance(data, dict):
-            continue
-        out: dict[str, str] = {}
-        for key in _MEMORY_KEYS:
-            val = data.get(key)
-            out[key] = val.strip() if isinstance(val, str) else ""
-        if any(out.values()):
-            return out
+        if isinstance(data, dict):
+            return data
     return None
+
+
+def parse_memory_json(text: str) -> dict[str, str] | None:
+    """Extract {"user_profile","soul","notes"} from LLM output.
+
+    Tolerates markdown fences and surrounding prose. Returns None on failure.
+    """
+    data = _extract_json_dict(text)
+    if data is None:
+        return None
+    out: dict[str, str] = {}
+    for key in _MEMORY_KEYS:
+        val = data.get(key)
+        out[key] = val.strip() if isinstance(val, str) else ""
+    if any(out.values()):
+        return out
+    return None
+
+
+def parse_episode_summaries(text: str, expected_count: int) -> list[str] | None:
+    """Extract the per-conversation "episodes" array from the same
+    consolidation response, positionally aligned with the input sections.
+
+    Returns None (skip episode creation for this run, don't fail the whole
+    consolidation) if the field is missing, malformed, or its length doesn't
+    match expected_count — a prompt/parsing regression here must not
+    regress the already-shipped flat user_profile/soul/notes update.
+    """
+    data = _extract_json_dict(text)
+    if data is None:
+        return None
+    episodes = data.get("episodes")
+    if not isinstance(episodes, list) or len(episodes) != expected_count:
+        return None
+    if not all(isinstance(e, str) and e.strip() for e in episodes):
+        return None
+    return [e.strip() for e in episodes]
 
 
 def trim_memory_to_budget(mem: dict[str, str], budget: int) -> dict[str, str]:
@@ -168,6 +198,10 @@ async def handle_memory_consolidate(task: dict, agents: dict) -> None:
 
             budget = settings.memory_consolidate_input_chars
             sections: list[str] = []
+            # Parallel to `sections` — (conversation_id, title, raw_chars) for
+            # each section, used to write one MemoryEpisode per section once
+            # the LLM returns per-section summaries in the same order.
+            episode_meta: list[tuple[uuid.UUID, str, int]] = []
             used = 0
             for convo in convos:
                 res = await db.execute(
@@ -182,6 +216,7 @@ async def handle_memory_consolidate(task: dict, agents: dict) -> None:
                 if used + len(section) > budget:
                     section = section[: budget - used]
                 sections.append(section)
+                episode_meta.append((convo.id, convo.title, len(section)))
                 used += len(section)
                 if used >= budget:
                     break
@@ -251,12 +286,27 @@ async def handle_memory_consolidate(task: dict, agents: dict) -> None:
             parsed[k] = parsed[k] or old[k]
         parsed = trim_memory_to_budget(parsed, settings.memory_total_chars)
 
+        # Per-conversation summaries for the searchable episodic layer — best
+        # effort: a missing/malformed "episodes" field skips episode creation
+        # for this run without failing the (already-shipped) flat update above.
+        episode_summaries = parse_episode_summaries(buf["text"], len(episode_meta))
+        if episode_summaries is None and episode_meta:
+            logger.info(
+                "memory_consolidate: no usable per-section episodes for %s (expected %d)",
+                user_id[:8], len(episode_meta),
+            )
+
         async with async_session_maker() as db:
             await memory_service.upsert_memory(
                 db, uuid.UUID(user_id),
                 notes=parsed["notes"], user_profile=parsed["user_profile"],
                 soul=parsed["soul"], last_consolidated_at=consolidation_ts,
             )
+            if episode_summaries:
+                for (conv_id, title, raw_chars), summary in zip(episode_meta, episode_summaries):
+                    await memory_service.add_episode(
+                        db, uuid.UUID(user_id), conv_id, title, summary, raw_chars, consolidation_ts,
+                    )
         await _set_status("done")
     except ACPTimeout:
         await _set_status("error", "整理超时")
