@@ -300,7 +300,7 @@ function getUserDisplay(msg: Message): { name: string; initials: string; color: 
 
 // ── Group: reply / reactions / edit / recall / typing ──
 const replyTarget = ref<{ id: string; label: string; snippet: string } | null>(null);
-const REACTION_EMOJIS = ["👍", "❤️", "😄", "🎉", "👀", "🙏"];
+const REACTION_EMOJIS = ["👍", "👎", "❤️", "😄", "🎉", "👀", "🙏"];
 const openEmojiFor = ref<string | null>(null);
 function toggleEmojiPicker(msgId: string) {
   openEmojiFor.value = openEmojiFor.value === msgId ? null : msgId;
@@ -328,6 +328,14 @@ function reactionEntries(msg: Message): { emoji: string; count: number; mine: bo
   return Object.entries(r).map(([emoji, users]) => ({
     emoji, count: users.length, mine: users.includes(meId),
   }));
+}
+
+// Thumbs up/down on the always-visible msg-tools row — unlike the emoji
+// picker above, not gated by isGroup, so personal 1:1 chat gets a quality
+// signal too (feeds the self-evolving-skills eval dataset).
+function isReacted(msg: Message, emoji: string): boolean {
+  const meId = auth.user?.id || "";
+  return (msg.reactions?.[emoji] || []).includes(meId);
 }
 
 async function editMsg(msg: Message) {
@@ -1185,6 +1193,18 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                   </div>
                 </div>
                 <div v-if="chat.messages[row.index].role === 'agent' && chat.messages[row.index].status !== 'streaming'" class="msg-tools">
+                  <button
+                    title="有用"
+                    class="msg-thumb"
+                    :class="{ active: isReacted(chat.messages[row.index], '👍') }"
+                    @click="toggleReaction(chat.messages[row.index], '👍')"
+                  >👍</button>
+                  <button
+                    title="没用"
+                    class="msg-thumb"
+                    :class="{ active: isReacted(chat.messages[row.index], '👎') }"
+                    @click="toggleReaction(chat.messages[row.index], '👎')"
+                  >👎</button>
                   <button title="复制" @click="copyMessage(chat.messages[row.index].content.text)"><Icon name="copy" :size="12" /></button>
                   <button title="重新生成" @click="regenerate(chat.messages[row.index].id)"><Icon name="refresh" :size="12" /></button>
 
