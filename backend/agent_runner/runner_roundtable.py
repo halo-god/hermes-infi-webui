@@ -13,7 +13,12 @@ from app.db.base import async_session_maker
 from app.db.models.conversation import Conversation, Message
 from agent_runner import storage
 from agent_runner.acp_client import ACPClient, ACPTimeout, profile_env
-from agent_runner.runner_clarify import pop_clarify_request, deliver_clarify_response
+from agent_runner.acp_persona import (
+    make_persona_client,
+    run_prompt_with_clarify_guard,
+    start_persona_session,
+    wrap_persona_prompt,
+)
 
 logger = logging.getLogger("hermes.runner")
 
@@ -57,10 +62,7 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
         agent = agents.get(aid) or agents.get("hermes")
         buf = {"text": ""}
         reply_status = "complete"
-        env = profile_env(target.get("profile_dir") or None)
-        prompt_text = text
-        if target.get("system_prompt"):
-            prompt_text = f"【角色设定】\n{target['system_prompt']}\n【角色设定结束】\n\n{text}"
+        prompt_text = wrap_persona_prompt(text, target.get("system_prompt"))
 
         async def on_update(update: dict) -> None:
             if update.get("sessionUpdate") == "agent_message_chunk":
@@ -84,37 +86,19 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
                 "name": f.name, "kind": f.kind, "version": f.current_version,
             })
 
-        client = ACPClient(
-            agent.command, cwd, protocol_version=settings.acp_protocol_version,
-            on_update=on_update, on_fs_write=on_fs, env=env,
+        client = make_persona_client(
+            agent.command, cwd, on_update=on_update, on_fs_write=on_fs,
+            profile_dir=target.get("profile_dir"),
         )
         try:
-            await client.start()
-            await client.initialize()
-            session_id = await client.new_session(cwd, mcp_servers=target.get("mcp_servers"))
+            session_id = await start_persona_session(client, cwd, target.get("mcp_servers"))
             # Nobody can answer an interactive clarify modal mid-roundtable —
-            # drain any clarify request the agent raises and auto-decline it
-            # immediately instead of letting it hang until ACPTimeout. This is
-            # a hard backstop; the prompt preamble asking agents not to call
+            # run_prompt_with_clarify_guard drains and auto-declines any
+            # clarify request instead of letting it hang until ACPTimeout.
+            # Hard backstop; the prompt preamble asking agents not to call
             # clarify is advisory only and can't be trusted on its own.
             clarify_sid = session_id or conversation_id
-            prompt_task = asyncio.create_task(client.prompt(prompt_text))
-            while not prompt_task.done():
-                try:
-                    await asyncio.wait_for(asyncio.shield(prompt_task), timeout=1.0)
-                except asyncio.TimeoutError:
-                    pass
-                try:
-                    data = await pop_clarify_request(clarify_sid)
-                    if data:
-                        clarify_id = data.get("clarify_id") or uuid.uuid4().hex[:12]
-                        logger.info(
-                            "roundtable clarify auto-declined (%s): %s", aid, clarify_id,
-                        )
-                        await deliver_clarify_response(clarify_sid, clarify_id, "")
-                except Exception:
-                    logger.debug("roundtable clarify poll failed", exc_info=True)
-            await prompt_task
+            await run_prompt_with_clarify_guard(client, clarify_sid, prompt_text, aid)
         except ACPTimeout as exc:
             logger.error("roundtable timeout (%s): %s", aid, exc)
             reply_status = "timeout"

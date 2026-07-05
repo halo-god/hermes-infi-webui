@@ -44,6 +44,9 @@ async def list_conversations(
         ((Conversation.owner_id == owner_id)
         | ((Conversation.type == "group") & Conversation.id.in_(group_subq)))
         & (Conversation.title != "__file_storage__")
+        # Background subagent conversations are headless — surfaced only via
+        # the parent conversation's subagent panel, never the sidebar.
+        & (Conversation.type != "subagent")
     )
     if pinned_only:
         stmt = stmt.where(Conversation.pinned.is_(True))

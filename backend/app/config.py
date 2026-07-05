@@ -124,6 +124,11 @@ class Settings(BaseSettings):
     # user_profile/soul/notes injection is unaffected either way.
     memory_episodic_injection_enabled: bool = True
 
+    # ── Background subagents (persistent, non-blocking ACP peer sessions) ──
+    subagent_idle_timeout_seconds: int = 900     # evict if no activity for 15 min
+    subagent_max_lifetime_seconds: int = 14400   # hard cap: 4 hours, regardless of activity
+    subagent_status_flush_interval_seconds: int = 5  # min gap between DB status writes
+
     # ── Uploads ──
     max_upload_mb: int = 25  # reject uploads larger than this (per file)
 

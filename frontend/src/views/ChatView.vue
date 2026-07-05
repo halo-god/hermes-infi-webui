@@ -26,6 +26,7 @@ import type { Profile } from "@/api/agents";
 const WorkspacePanel = defineAsyncComponent(() => import("@/components/WorkspacePanel.vue"));
 const ExtractItemsModal = defineAsyncComponent(() => import("@/components/ExtractItemsModal.vue"));
 const MemberPanel = defineAsyncComponent(() => import("@/components/MemberPanel.vue"));
+const SubagentPanel = defineAsyncComponent(() => import("@/components/SubagentPanel.vue"));
 
 const chat = useChatStore();
 const auth = useAuthStore();
@@ -46,6 +47,7 @@ const scroller = ref<HTMLElement | null>(null);
 const loadMoreSentinel = ref<HTMLElement | null>(null);
 const showWorkspace = ref(false);
 const showMemberPanel = ref(false);
+const showSubagentPanel = ref(false);
 const showExtractModal = ref(false);
 const landingProfileId = ref<string>("");
 const teamKnowledge = ref<Knowledge[]>([]);
@@ -955,6 +957,9 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
             <button class="thread-action text-mute-sm" v-if="chat.messages.length >= 2" @click="showExtractModal = true" style="flex-shrink:0;margin-top:2px" title="从对话内容自动创建项目与任务">
               <Icon name="sparkle" /> 智能创建
             </button>
+            <button class="thread-action text-mute-sm" v-if="chat.activeId" @click="showSubagentPanel = !showSubagentPanel" :style="{ flexShrink: '0', marginTop: '2px', color: showSubagentPanel ? 'var(--accent)' : undefined }" title="后台任务：让子代理在后台独立完成一项工作，不阻塞当前对话">
+              <Icon name="cube" /> 后台任务
+            </button>
             <!-- Fork session -->
             <button class="thread-action text-mute-sm" v-if="chat.activeId && activeConvo?.acp_session_id" @click="forkSession" :disabled="forking" style="flex-shrink:0;margin-top:2px" title="Fork ACP session (分支历史)">
               <Icon name="copy" /> {{ forking ? 'Forking…' : 'Fork' }}
@@ -1251,6 +1256,12 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
         :channel-mode="activeConvo?.channel_mode || 'mention'"
         @close="showMemberPanel = false"
         @update:channel-mode="onChannelModeChange"
+      />
+
+      <SubagentPanel
+        v-if="showSubagentPanel && chat.activeId"
+        :conversation-id="chat.activeId"
+        @close="showSubagentPanel = false"
       />
     </div>
   </div>
