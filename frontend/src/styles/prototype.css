@@ -46,12 +46,12 @@
   }
 
   .side-section { padding: 4px 10px; }
-  .team-scroll { max-height: 170px; overflow-y: auto; flex-shrink: 0; }
+  .team-scroll { max-height: 150px; overflow-y: auto; flex-shrink: 0; }
   /* Shared thin scrollbar for the sidebar's scrollable lists (teams, group
-     chats, conversations) so all three look the same rather than falling
-     back to the browser's default scrollbar. */
-  .team-scroll::-webkit-scrollbar, .convo-list::-webkit-scrollbar { width: 4px; }
-  .team-scroll::-webkit-scrollbar-thumb, .convo-list::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 2px; }
+     chats, conversations) and the main thread/stage so every scrollable
+     surface looks the same rather than falling back to the browser default. */
+  .team-scroll::-webkit-scrollbar, .convo-list::-webkit-scrollbar, .thread::-webkit-scrollbar, .stage::-webkit-scrollbar { width: 4px; }
+  .team-scroll::-webkit-scrollbar-thumb, .convo-list::-webkit-scrollbar-thumb, .thread::-webkit-scrollbar-thumb, .stage::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 2px; }
   .side-row {
     display: flex; align-items: center; gap: 10px;
     padding: 8px 10px;
