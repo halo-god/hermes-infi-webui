@@ -51,7 +51,8 @@
      chats, conversations) and the main thread/stage so every scrollable
      surface looks the same rather than falling back to the browser default. */
   .team-scroll::-webkit-scrollbar, .convo-list::-webkit-scrollbar, .thread::-webkit-scrollbar, .stage::-webkit-scrollbar { width: 4px; }
-  .team-scroll::-webkit-scrollbar-thumb, .convo-list::-webkit-scrollbar-thumb, .thread::-webkit-scrollbar-thumb, .stage::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 2px; }
+  .team-scroll::-webkit-scrollbar-thumb, .convo-list::-webkit-scrollbar-thumb, .thread::-webkit-scrollbar-thumb, .stage::-webkit-scrollbar-thumb { background: var(--ink-mute); border-radius: 2px; }
+  .team-scroll::-webkit-scrollbar-thumb:hover, .convo-list::-webkit-scrollbar-thumb:hover, .thread::-webkit-scrollbar-thumb:hover, .stage::-webkit-scrollbar-thumb:hover { background: var(--ink-soft); }
   .side-row {
     display: flex; align-items: center; gap: 10px;
     padding: 8px 10px;
