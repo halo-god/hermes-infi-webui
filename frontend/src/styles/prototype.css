@@ -96,6 +96,14 @@
     color: var(--ink-mute);
     font-weight: 600;
   }
+  /* Top/bottom borders on the three scrollable list blocks so teams / group
+     chats / conversations are clearly separated from each other and from the
+     surrounding nav / footer areas. */
+  .side .team-scroll,
+  .side .convo-list {
+    border-top: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
+  }
   .side-label button {
     color: var(--ink-mute);
     font-size: 14px;
