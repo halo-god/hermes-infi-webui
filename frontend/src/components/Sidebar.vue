@@ -493,7 +493,7 @@ function doDeleteFolder() {
 
       <div class="side-label">
         {{ t('nav.conversations') }}
-        <button class="side-label-btn" title="新建文件夹" @click.stop="showNewFolderInput = !showNewFolderInput">+ 文件夹</button>
+        <button class="side-label-btn" title="新建文件夹" @click.stop="showNewFolderInput = !showNewFolderInput"><Icon name="folder" :size="14" /></button>
       </div>
       <div v-if="showNewFolderInput" class="new-folder-row">
         <input
