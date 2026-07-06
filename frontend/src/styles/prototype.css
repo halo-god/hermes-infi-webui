@@ -46,9 +46,12 @@
   }
 
   .side-section { padding: 4px 10px; }
-  .team-scroll { max-height: 200px; overflow-y: auto; flex-shrink: 0; }
-  .team-scroll::-webkit-scrollbar { width: 4px; }
-  .team-scroll::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 2px; }
+  .team-scroll { max-height: 170px; overflow-y: auto; flex-shrink: 0; }
+  /* Shared thin scrollbar for the sidebar's scrollable lists (teams, group
+     chats, conversations) so all three look the same rather than falling
+     back to the browser's default scrollbar. */
+  .team-scroll::-webkit-scrollbar, .convo-list::-webkit-scrollbar { width: 4px; }
+  .team-scroll::-webkit-scrollbar-thumb, .convo-list::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 2px; }
   .side-row {
     display: flex; align-items: center; gap: 10px;
     padding: 8px 10px;
@@ -3731,21 +3734,14 @@ body[data-atmos="cinnabar"] {
   .ctx-ring { width: 24px; height: 24px; }
   .ctx-label { font-size: 10px; color: var(--ink-mute); }
 
-  /* ── Export menu ── */
-  .export-menu { position: absolute; top: 100%; right: 0; background: var(--bg-panel); border: 1px solid var(--rule);
-                 border-radius: 8px; z-index: 50; min-width: 100px; box-shadow: var(--shadow-lg); }
-  .export-menu .menu-item { display: block; width: 100%; text-align: left; padding: 8px 14px;
-                             font-size: 13px; color: var(--ink); background: none; border: none;
-                             cursor: pointer; }
-  .export-menu .menu-item:hover { background: var(--bg-hover); }
+  /* ── Thread "more actions" menu (members / extract / subagents / fork / export) ── */
+  .thread-more-menu { position: absolute; top: 100%; right: 0; background: var(--bg-panel); border: 1px solid var(--rule);
+                 border-radius: 8px; z-index: 50; min-width: 160px; padding: 4px; box-shadow: var(--shadow-lg); }
+  .thread-more-menu .menu-item { width: 100%; background: none; border: none; }
+  .thread-more-menu .menu-item:hover { background: var(--bg-hover); }
+  .thread-more-menu .menu-item:disabled { opacity: 0.5; cursor: default; }
 
-  /* ── Session controls: mode toggle + model picker ── */
-  .mode-toggle { display: inline-flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
-  .mode-btn { font-size: 11px; padding: 3px 8px; border: none; background: none; color: var(--ink-mute);
-              cursor: pointer; transition: all 0.15s; white-space: nowrap; }
-  .mode-btn:not(:last-child) { border-right: 1px solid var(--rule); }
-  .mode-btn.active { background: var(--accent-tint, rgba(184,133,42,0.15)); color: var(--accent-deep, #7a5a1a); font-weight: 600; }
-  .mode-btn:hover:not(.active) { background: var(--bg-hover); }
+  /* ── Session controls: model picker ── */
   .model-btn { font-size: 12px; }
   .model-dropdown { position: absolute; top: 100%; right: 0; background: var(--bg-panel); border: 1px solid var(--rule);
                     border-radius: 8px; z-index: 50; min-width: 140px; box-shadow: var(--shadow-lg); padding: 4px 0; }
