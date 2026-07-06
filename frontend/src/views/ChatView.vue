@@ -292,7 +292,8 @@ function getUserDisplay(msg: Message): { name: string; initials: string; color: 
   const meId = auth.user?.id;
   // owner_id null = local optimistic bubble = self; or owner matches me = self.
   if (!msg.owner_id || (meId && msg.owner_id === meId)) {
-    return { name: '你', initials: '我', color: 'var(--accent)' };
+    const myName = auth.user?.name || auth.user?.email || '我';
+    return { name: myName, initials: myName.slice(0, 1).toUpperCase(), color: 'var(--accent)' };
   }
   const m = groupMembers.value.find((gm) => gm.user_id === msg.owner_id);
   const name = m?.user_name || '成员';
