@@ -687,12 +687,15 @@ class Runner:
             )
             if new_session:
                 await self._set_session_id(conversation_id, new_session)
-                if session_mode:
-                    try:
-                        await client.set_session_mode(new_session, session_mode)
-                        logger.info("Applied session_mode=%s to new session %s", session_mode, new_session[:8])
-                    except Exception:
-                        logger.debug("Could not apply session_mode", exc_info=True)
+                # No manual approval UI anymore — conversations without an explicit
+                # mode (the vast majority) default to full-auto (dont_ask) rather
+                # than the ACP agent's own default (typically "ask").
+                effective_mode = session_mode or "dont_ask"
+                try:
+                    await client.set_session_mode(new_session, effective_mode)
+                    logger.info("Applied session_mode=%s to new session %s", effective_mode, new_session[:8])
+                except Exception:
+                    logger.debug("Could not apply session_mode", exc_info=True)
 
             clarify_session_id = new_session or acp_session_id or conversation_id
             effective_text = text

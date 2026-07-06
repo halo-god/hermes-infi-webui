@@ -623,13 +623,9 @@ const ctxTooltip = computed(() =>
 );
 
 // ── Session controls ──
+// Edit-approval mode is no longer user-toggleable here — every session runs
+// full-auto (dont_ask) by default now (see runner.py's effective_mode).
 const forking = ref(false);
-const sessionMode = ref<string>(activeConvo.value?.session_mode || "ask");
-const SESSION_MODES = [
-  { id: "ask", label: "Ask", desc: "编辑需确认" },
-  { id: "accept_edits", label: "Accept", desc: "自动审批工作区" },
-  { id: "dont_ask", label: "Auto", desc: "全自动" },
-];
 
 async function forkSession() {
   if (!chat.activeId || forking.value) return;
@@ -645,23 +641,10 @@ async function forkSession() {
   }
 }
 
-async function changeSessionMode(mode: string) {
-  if (!chat.activeId) return;
-  const prev = sessionMode.value;
-  sessionMode.value = mode;
-  try {
-    await conversationsApi.setSessionMode(chat.activeId, mode);
-  } catch {
-    sessionMode.value = prev;
-    ns.toast("切换失败", "error");
-  }
-}
-
-
 const ctxK = computed(() => chat.contextTokens >= 1000 ? `${(chat.contextTokens / 1000).toFixed(0)}k` : `${chat.contextTokens}`);
 
-// ── Session export ──
-const showExport = ref(false);
+// ── Thread "more actions" menu (members / extract / subagents / fork / export) ──
+const showMoreMenu = ref(false);
 const editingTitle = ref(false);
 const titleDraft = ref("");
 
@@ -694,12 +677,12 @@ function exportMd() {
     return `${who}\n\n${m.content.text || ""}`;
   }).join("\n\n---\n\n");
   download(new Blob([md_content], { type: "text/markdown" }), `${title}.md`);
-  showExport.value = false;
+  showMoreMenu.value = false;
 }
 function exportJson() {
   const title = activeConvo.value?.title || "conversation";
   download(new Blob([JSON.stringify(chat.messages, null, 2)], { type: "application/json" }), `${title}.json`);
-  showExport.value = false;
+  showMoreMenu.value = false;
 }
 
 // ── Conversation fork ──
@@ -810,7 +793,7 @@ function handleComposerCommand(cmd: string) {
     router.push("/");
     draft.value = "";
   } else if (cmd === "export") {
-    showExport.value = true;
+    showMoreMenu.value = true;
   } else if (cmd === "clear") {
     draft.value = "";
   }
@@ -950,31 +933,31 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
             <button class="thread-action text-mute-sm" v-if="chat.files.length" @click="showWorkspace = !showWorkspace" style="flex-shrink:0;margin-top:2px">
               <Icon name="folder" /> 工作区 ({{ chat.files.length }})
             </button>
-            <button class="thread-action text-mute-sm" v-if="isGroup" @click="showMemberPanel = !showMemberPanel" :style="{ flexShrink: '0', marginTop: '2px', color: showMemberPanel ? 'var(--accent)' : undefined }">
-              <Icon name="users" /> 成员
-            </button>
-            <button class="thread-action text-mute-sm" v-if="chat.messages.length >= 2" @click="showExtractModal = true" style="flex-shrink:0;margin-top:2px" title="从对话内容自动创建项目与任务">
-              <Icon name="sparkle" /> 智能创建
-            </button>
-            <button class="thread-action text-mute-sm" v-if="chat.activeId" @click="showSubagentPanel = !showSubagentPanel" :style="{ flexShrink: '0', marginTop: '2px', color: showSubagentPanel ? 'var(--accent)' : undefined }" title="后台任务：让子代理在后台独立完成一项工作，不阻塞当前对话">
-              <Icon name="cube" /> 后台任务
-            </button>
-            <!-- Fork session -->
-            <button class="thread-action text-mute-sm" v-if="chat.activeId && activeConvo?.acp_session_id" @click="forkSession" :disabled="forking" style="flex-shrink:0;margin-top:2px" title="Fork ACP session (分支历史)">
-              <Icon name="copy" /> {{ forking ? 'Forking…' : 'Fork' }}
-            </button>
-            <!-- Edit approval mode -->
-            <div v-if="chat.activeId && activeConvo?.acp_session_id" class="mode-toggle text-mute-sm" style="flex-shrink:0;margin-top:2px">
-              <button v-for="m in SESSION_MODES" :key="m.id" class="mode-btn" :class="{ active: sessionMode === m.id }" :title="m.desc" @click="changeSessionMode(m.id)">
-                {{ m.label }}
+            <div v-if="chat.activeId" style="position:relative;flex-shrink:0;margin-top:2px;">
+              <button class="thread-action text-mute-sm" @click="showMoreMenu = !showMoreMenu" title="更多操作">
+                <Icon name="more" />
               </button>
-            </div>
-
-            <div v-if="chat.messages.length >= 2" style="position:relative;flex-shrink:0;margin-top:2px;">
-              <button class="thread-action" @click="showExport = !showExport"><Icon name="download" /> 导出</button>
-              <div v-if="showExport" class="export-menu" @mouseleave="showExport = false">
-                <button class="menu-item" @click="exportMd()">Markdown</button>
-                <button class="menu-item" @click="exportJson()">JSON</button>
+              <div v-if="showMoreMenu" class="thread-more-menu" @mouseleave="showMoreMenu = false">
+                <button v-if="isGroup" class="menu-item" @click="showMemberPanel = !showMemberPanel; showMoreMenu = false">
+                  <Icon name="users" :size="13" /> 成员
+                </button>
+                <button v-if="chat.messages.length >= 2" class="menu-item" @click="showExtractModal = true; showMoreMenu = false">
+                  <Icon name="sparkle" :size="13" /> 智能创建
+                </button>
+                <button class="menu-item" @click="showSubagentPanel = !showSubagentPanel; showMoreMenu = false">
+                  <Icon name="cube" :size="13" /> 后台任务
+                </button>
+                <button v-if="activeConvo?.acp_session_id" class="menu-item" :disabled="forking" @click="forkSession(); showMoreMenu = false">
+                  <Icon name="copy" :size="13" /> {{ forking ? 'Forking…' : 'Fork 会话' }}
+                </button>
+                <template v-if="chat.messages.length >= 2">
+                  <button class="menu-item" @click="exportMd()">
+                    <Icon name="download" :size="13" /> 导出 Markdown
+                  </button>
+                  <button class="menu-item" @click="exportJson()">
+                    <Icon name="download" :size="13" /> 导出 JSON
+                  </button>
+                </template>
               </div>
             </div>
           </div>
