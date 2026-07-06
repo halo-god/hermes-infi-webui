@@ -1066,9 +1066,6 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
               <div v-if="chat.messages[row.index].role === 'agent'" class="msg-avatar" :style="{ background: profileDisplay(profileForEntity(chat.messages[row.index].agent_id || 'hermes', chat.messages[row.index].profile_id)).color }">
                 <Icon :name="profileDisplay(profileForEntity(chat.messages[row.index].agent_id || 'hermes', chat.messages[row.index].profile_id)).icon" :size="14" />
               </div>
-              <div v-else-if="isGroup && chat.messages[row.index].role === 'user'" class="msg-avatar user-avatar-group" :style="{ background: getUserDisplay(chat.messages[row.index]).color }">
-                <span class="avatar-initials">{{ getUserDisplay(chat.messages[row.index]).initials }}</span>
-              </div>
               <div class="msg-body">
                 <div v-if="chat.messages[row.index].role === 'agent'" class="msg-name">
                   {{ profileDisplay(profileForEntity(chat.messages[row.index].agent_id || 'hermes', chat.messages[row.index].profile_id)).label }}
