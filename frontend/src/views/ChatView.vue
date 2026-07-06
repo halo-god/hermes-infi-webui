@@ -1197,7 +1197,9 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                   ⎇ 分叉
                 </div>
               </div>
-              <div v-if="chat.messages[row.index].role === 'user'" class="msg-avatar"><Icon name="user" :size="14" /></div>
+              <div v-if="chat.messages[row.index].role === 'user'" class="msg-avatar user-avatar-group" :style="{ background: getUserDisplay(chat.messages[row.index]).color }">
+                <span class="avatar-initials">{{ getUserDisplay(chat.messages[row.index]).initials }}</span>
+              </div>
             </div>
               </template>
             </div>
