@@ -182,6 +182,7 @@ watch(
   },
   { immediate: true }
 );
+const memberCount = computed(() => groupAgents.value.length + groupMembers.value.length);
 
 // Load team knowledge when the active conversation has a team_id
 watch(
@@ -934,14 +935,14 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
             <button class="thread-action text-mute-sm" v-if="chat.files.length" @click="showWorkspace = !showWorkspace" style="flex-shrink:0;margin-top:2px">
               <Icon name="folder" /> 工作区 ({{ chat.files.length }})
             </button>
+            <button class="thread-action text-mute-sm" v-if="isGroup" @click="showMemberPanel = !showMemberPanel" style="flex-shrink:0;margin-top:2px" title="群聊成员">
+              <Icon name="channel" /> 成员 ({{ memberCount }})
+            </button>
             <div v-if="chat.activeId" style="position:relative;flex-shrink:0;margin-top:2px;">
               <button class="thread-action text-mute-sm" @click="showMoreMenu = !showMoreMenu" title="更多操作">
                 <Icon name="more" />
               </button>
               <div v-if="showMoreMenu" class="thread-more-menu" @mouseleave="showMoreMenu = false">
-                <button v-if="isGroup" class="menu-item" @click="showMemberPanel = !showMemberPanel; showMoreMenu = false">
-                  <Icon name="users" :size="13" /> 成员
-                </button>
                 <button v-if="chat.messages.length >= 2" class="menu-item" @click="showExtractModal = true; showMoreMenu = false">
                   <Icon name="sparkle" :size="13" /> 智能创建
                 </button>
