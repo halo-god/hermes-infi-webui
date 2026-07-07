@@ -39,6 +39,7 @@ from agent_runner import discovery, storage
 from agent_runner.acp_client import ACPTimeout
 from agent_runner.session_pool import SessionPool
 from agent_runner.subagent_pool import SubagentPool
+from agent_runner.workspace_watcher import WorkspaceWatcher
 from agent_runner.metrics import (
     TASKS_ENQUEUED,
     TASKS_COMPLETED,
@@ -78,6 +79,7 @@ class Runner:
         self._active_tasks: set[asyncio.Task] = set()
         self._bg_tasks: set[asyncio.Task] = set()
         self._task_retries: dict[str, int] = {}  # entry_id -> retry count
+        self._watchers: dict[str, WorkspaceWatcher] = {}  # conversation_id -> watcher
 
     # ── Singleton lock ──
     async def _acquire_lock(self) -> bool:
@@ -228,6 +230,12 @@ class Runner:
             if evict_counter * HEARTBEAT_INTERVAL >= 300:  # every 5 minutes
                 evict_counter = 0
                 await self.pool.evict_idle()
+                # Also stop watchers for idle conversations
+                active_conv_ids = set(self.pool._clients.keys())
+                for cid in list(self._watchers.keys()):
+                    if cid not in active_conv_ids:
+                        self._watchers[cid].stop()
+                        del self._watchers[cid]
             await self._sweep_subagents()
 
     # ── ACP session control loop ──
@@ -403,6 +411,9 @@ class Runner:
             if self._bg_tasks:
                 await asyncio.gather(*self._bg_tasks, return_exceptions=True)
             await self.subagent_pool.close_all()
+            for w in list(self._watchers.values()):
+                w.stop()
+            self._watchers.clear()
             await self._release_lock()
 
     # ── concurrency helpers ──
@@ -685,6 +696,23 @@ class Runner:
                 conversation_id[:8], message_id[:8],
                 client._proc.pid if client._proc else "None", new_session,
             )
+            # Start filesystem watcher for MCP write_file tools that bypass ACP.
+            watcher = self._watchers.get(conversation_id)
+            if watcher:
+                watcher.stop()
+            watcher = WorkspaceWatcher(
+                conversation_id,
+                cwd,
+                agent_id,
+                acc["current_msg_id"],
+                get_current_msg_id=lambda: acc["current_msg_id"],
+                publish_event=lambda ev: R.publish_event(conversation_id, ev),
+            )
+            watcher.start()
+            # Scan for files written before watcher started (MCP may write
+            # during prompt while the watcher wasn't active yet).
+            await watcher.scan_existing()
+            self._watchers[conversation_id] = watcher
             if new_session:
                 await self._set_session_id(conversation_id, new_session)
                 # No manual approval UI anymore — conversations without an explicit

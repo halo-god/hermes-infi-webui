@@ -3,6 +3,7 @@ name: hermes
 services:
   postgres:
     image: docker.m.daocloud.io/library/postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-hermes}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hermes}
@@ -20,7 +21,7 @@ services:
       resources:
         limits:
           cpus: "2.0"
-          memory: 1G
+          memory: 2G
         reservations:
           cpus: "0.5"
           memory: 256M
@@ -28,6 +29,7 @@ services:
   redis:
     image: docker.m.daocloud.io/library/redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
+    restart: unless-stopped
     volumes:
       - redisdata:/data
     healthcheck:
@@ -41,13 +43,14 @@ services:
       resources:
         limits:
           cpus: "1.0"
-          memory: 512M
+          memory: 4G
         reservations:
           cpus: "0.25"
           memory: 128M
 
   minio:
     image: docker.m.daocloud.io/minio/minio:latest
+    restart: unless-stopped
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-hermes}
@@ -61,7 +64,7 @@ services:
       resources:
         limits:
           cpus: "1.0"
-          memory: 512M
+          memory: 2G
         reservations:
           cpus: "0.25"
           memory: 128M
