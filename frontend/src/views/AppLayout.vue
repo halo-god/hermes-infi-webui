@@ -9,6 +9,7 @@ import TweaksPanel from "@/components/TweaksPanel.vue";
 import SearchPalette from "@/components/SearchPalette.vue";
 import NotificationPanel from "@/components/NotificationPanel.vue";
 import FeedbackPanel from "@/components/FeedbackPanel.vue";
+import HelpPanel from "@/components/HelpPanel.vue";
 import ToastContainer from "@/components/ToastContainer.vue";
 import { useChatStore } from "@/stores/chat";
 import { useAuthStore } from "@/stores/auth";
@@ -97,6 +98,7 @@ const isNight = computed(() => ["night", "ink"].includes(document.body.dataset.a
         <span class="topbar-spacer"></span>
         <FeedbackPanel />
         <NotificationPanel />
+        <HelpPanel />
         <button class="icon-btn" title="切换氣質" @click="cycleAtmos"><Icon :name="isNight ? 'sun' : 'moon'" /></button>
         <button class="icon-btn" title="调整 Tweaks" @click="showTweaks = !showTweaks"><Icon name="settings" /></button>
       </div>
