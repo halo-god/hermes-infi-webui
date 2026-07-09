@@ -551,9 +551,12 @@ async def upload_knowledge(
     import re as _re
     name = _re.sub(r"[^\w.\-\u4e00-\u9fff]", "_", file.filename or "upload").strip("_. ") or "upload"
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"
+    from app.core.files import OFFICE_EXTRACTORS
     TEXT_EXTS = {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
                  "yaml", "yml", "toml", "sh", "log", "xml", "css", "diff", "patch"}
-    if ext in TEXT_EXTS:
+    if ext in OFFICE_EXTRACTORS:
+        content = OFFICE_EXTRACTORS[ext](raw) or "<p><em>(\u65e0\u6cd5\u89e3\u6790\u6587\u6863\u5185\u5bb9)</em></p>"
+    elif ext in TEXT_EXTS:
         content = raw.decode("utf-8", "ignore")
     elif ext == "pdf":
         try:

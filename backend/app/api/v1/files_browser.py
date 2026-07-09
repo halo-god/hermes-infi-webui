@@ -18,7 +18,7 @@ from app.db.models.user import User
 from app.db.models.workspace import WorkspaceFile
 from app.deps import get_current_user, get_db, user_from_ticket_or_header
 from app.core import object_storage
-from app.core.files import read_upload_capped, extract_pdf_text, is_text_extractable
+from app.core.files import read_upload_capped, extract_pdf_text, is_text_extractable, OFFICE_EXTRACTORS
 from app.config import settings
 
 router = APIRouter()
@@ -373,14 +373,21 @@ async def upload_standalone_file(
             raw,
             file.content_type or "application/octet-stream",
         )
-        if is_text_extractable(ext):
+        if ext in OFFICE_EXTRACTORS:
+            content = OFFICE_EXTRACTORS[ext](raw) or "<p><em>(无法解析文档内容)</em></p>"
+        elif is_text_extractable(ext):
             if ext == "pdf":
                 content = extract_pdf_text(raw)
-            else:
+            elif ext in {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
+                       "yaml", "yml", "toml", "sh", "bash", "log", "xml", "css", "diff", "patch"}:
                 content = raw.decode("utf-8", "ignore")
+            else:
+                content = None
     else:
         # Small files → inline
-        if ext in {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
+        if ext in OFFICE_EXTRACTORS:
+            content = OFFICE_EXTRACTORS[ext](raw) or "<p><em>(无法解析文档内容)</em></p>"
+        elif ext in {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
                    "yaml", "yml", "toml", "sh", "bash", "log", "xml", "css", "diff", "patch"}:
             content = raw.decode("utf-8", "ignore")
         elif ext == "pdf":
@@ -575,7 +582,12 @@ async def get_file_content(
     elif wf.storage_key:
         try:
             raw = await asyncio.to_thread(object_storage.get, wf.storage_key)
-            content = raw.decode("utf-8", "ignore")
+            if wf.kind in OFFICE_EXTRACTORS:
+                content = None
+            elif is_text_extractable(wf.kind):
+                content = raw.decode("utf-8", "ignore")
+            else:
+                content = None
         except Exception:
             content = None
 
