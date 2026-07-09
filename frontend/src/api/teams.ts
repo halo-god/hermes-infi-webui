@@ -40,8 +40,11 @@ export const teamsApi = {
   async setSharedProfiles(id: string, profileIds: string[]): Promise<TeamDetail> {
     return (await http.put<TeamDetail>(`/teams/${id}/shared-profiles`, { profile_ids: profileIds })).data;
   },
-  async listKnowledge(id: string, folderId?: string): Promise<Knowledge[]> {
-    return (await http.get<Knowledge[]>(`/teams/${id}/knowledge`, { params: folderId ? { folder_id: folderId } : {} })).data;
+  async listKnowledge(id: string, folderId?: string, recursive?: boolean): Promise<Knowledge[]> {
+    const params: Record<string, string> = {};
+    if (folderId) params.folder_id = folderId;
+    if (recursive) params.recursive = "true";
+    return (await http.get<Knowledge[]>(`/teams/${id}/knowledge`, { params })).data;
   },
   async createKnowledgeFolder(id: string, name: string, folderId?: string): Promise<Knowledge> {
     return (await http.post<Knowledge>(`/teams/${id}/knowledge/folder`, { name, folder_id: folderId || null })).data;
@@ -52,7 +55,7 @@ export const teamsApi = {
   async clearChannel(id: string): Promise<void> {
     await http.delete(`/teams/${id}/channel/messages`);
   },
-  async addKnowledge(id: string, data: { name: string; kind?: string; size_bytes?: number }): Promise<Knowledge> {
+  async addKnowledge(id: string, data: { name: string; kind?: string; size_bytes?: number; folder_id?: string | null }): Promise<Knowledge> {
     return (await http.post<Knowledge>(`/teams/${id}/knowledge`, data)).data;
   },
   async deleteKnowledge(id: string, kid: string): Promise<void> {
@@ -79,9 +82,10 @@ export const teamsApi = {
     const r = await http.post<{ content: string | null }>(`/teams/${id}/knowledge/${kid}/restore/${versionNum}`);
     return r.data.content || "";
   },
-  async uploadKnowledge(id: string, file: File): Promise<void> {
+  async uploadKnowledge(id: string, file: File, folderId?: string | null): Promise<void> {
     const fd = new FormData();
     fd.append("file", file);
+    if (folderId) fd.append("folder_id", folderId);
     await http.post(`/teams/${id}/knowledge/upload`, fd, { headers: { "Content-Type": "multipart/form-data" } });
   },
   async getChannel(id: string): Promise<{ channel: import("@/types").Conversation; channel_mode: string }> {

@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, File as FastApiFile, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File as FastApiFile, Form, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel as _BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -353,17 +353,21 @@ async def set_shared_profiles(
 async def list_knowledge(
     team_id: uuid.UUID,
     folder_id: uuid.UUID | None = Query(None),
+    recursive: bool = Query(False),
     user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
 ):
     """List knowledge items. If folder_id given, only items in that folder.
-    If folder_id is None, returns root-level items (folder_id IS NULL)."""
+    If folder_id is None, returns root-level items (folder_id IS NULL).
+    If recursive=true, folder_id is ignored and all items for the team are
+    returned flat (used by folder pickers that need the whole tree)."""
     from app.db.models.team import TeamKnowledge
     await svc.require_membership(db, team_id, user.id)
     stmt = select(TeamKnowledge).where(TeamKnowledge.team_id == team_id)
-    if folder_id is not None:
-        stmt = stmt.where(TeamKnowledge.folder_id == folder_id)
-    else:
-        stmt = stmt.where(TeamKnowledge.folder_id.is_(None))
+    if not recursive:
+        if folder_id is not None:
+            stmt = stmt.where(TeamKnowledge.folder_id == folder_id)
+        else:
+            stmt = stmt.where(TeamKnowledge.folder_id.is_(None))
     stmt = stmt.order_by(TeamKnowledge.is_folder.desc(), TeamKnowledge.sort_order, TeamKnowledge.created_at)
     rows = (await db.execute(stmt)).scalars().all()
     return [KnowledgeOut.model_validate(k) for k in rows]
@@ -542,6 +546,7 @@ async def get_knowledge_raw(
 async def upload_knowledge(
     team_id: uuid.UUID,
     file: UploadFile = FastApiFile(...),
+    folder_id: str | None = Form(None),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -589,6 +594,7 @@ async def upload_knowledge(
         kind=ext,
         size_bytes=len(raw),
         content=content,
+        folder_id=uuid.UUID(folder_id) if folder_id else None,
         uploaded_by=user.id,
         uploaded_by_name=user.name,
     )

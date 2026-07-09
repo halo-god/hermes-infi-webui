@@ -797,9 +797,10 @@ async def _collect_folder_knowledge_ids(
 async def _build_knowledge_prompt(db: AsyncSession, profile: Profile | None) -> str | None:
     """Inject the content of a Profile's bound knowledge into the prompt.
 
-    Supports both:
+    Supports:
     - knowledge_ids: individual item IDs (backward compat)
     - knowledge_folder_ids: folder IDs — all items under these folders are injected
+    - knowledge_team_ids: team IDs — every non-folder item under these teams is injected
     """
     if not profile:
         return None
@@ -820,6 +821,28 @@ async def _build_knowledge_prompt(db: AsyncSession, profile: Profile | None) -> 
     if folder_ids:
         folder_item_ids = await _collect_folder_knowledge_ids(db, folder_ids)
         all_ids.extend(folder_item_ids)
+
+    # 3. Whole-team bindings — every non-folder item under these teams
+    team_ids = getattr(profile, "knowledge_team_ids", None) or []
+    if team_ids:
+        valid_team_ids: list[uuid.UUID] = []
+        for tid in team_ids:
+            try:
+                valid_team_ids.append(uuid.UUID(str(tid)))
+            except (ValueError, TypeError):
+                continue
+        if valid_team_ids:
+            team_rows = (await db.execute(
+                select(TeamKnowledge.id).where(
+                    TeamKnowledge.team_id.in_(valid_team_ids),
+                    TeamKnowledge.is_folder.is_(False),
+                )
+            )).scalars().all()
+            all_ids.extend(team_rows)
+
+    # An item may be reachable via more than one binding (direct + folder + team) —
+    # dedup while preserving first-seen order so it isn't injected multiple times.
+    all_ids = list(dict.fromkeys(all_ids))
 
     if not all_ids:
         return None

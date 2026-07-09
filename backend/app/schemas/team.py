@@ -98,6 +98,7 @@ class KnowledgeCreate(BaseModel):
     kind: str = "doc"
     size_bytes: int = 0
     content: str | None = None
+    folder_id: uuid.UUID | None = None
 
 
 class KnowledgeUpdate(BaseModel):

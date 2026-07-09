@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /* 反馈页面 — 用户提交反馈 + 查看回复进度；管理员查看全部 + 回复管理。
    布局对齐 AdminView 的 stage + centered body 模式。 */
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute } from "vue-router";
 import Icon from "@/components/Icon.vue";
 import { useAuthStore } from "@/stores/auth";
@@ -62,8 +62,30 @@ function removeImage(idx: number) {
   attachedImages.value.splice(idx, 1);
 }
 
-function openImage(url: string) {
-  window.open(url, "_blank", "noopener,noreferrer");
+// Screenshot lightbox — feedback images are base64 data: URLs, which browsers
+// block from opening via window.open(), so this renders an in-page overlay instead.
+const lightboxImages = ref<string[]>([]);
+const lightboxIndex = ref(0);
+const lightboxOpen = computed(() => lightboxImages.value.length > 0);
+
+function openImage(images: string[], index: number) {
+  lightboxImages.value = images;
+  lightboxIndex.value = index;
+}
+function closeLightbox() {
+  lightboxImages.value = [];
+}
+function lightboxPrev() {
+  lightboxIndex.value = (lightboxIndex.value - 1 + lightboxImages.value.length) % lightboxImages.value.length;
+}
+function lightboxNext() {
+  lightboxIndex.value = (lightboxIndex.value + 1) % lightboxImages.value.length;
+}
+function onLightboxKey(e: KeyboardEvent) {
+  if (!lightboxOpen.value) return;
+  if (e.key === "Escape") closeLightbox();
+  else if (e.key === "ArrowLeft") lightboxPrev();
+  else if (e.key === "ArrowRight") lightboxNext();
 }
 
 // Admin reply form
@@ -167,10 +189,12 @@ async function saveReply() {
 }
 
 onMounted(async () => {
+  window.addEventListener("keydown", onLightboxKey);
   await loadList();
   const qid = route.query.id;
   if (qid) selectFeedback(Number(qid));
 });
+onBeforeUnmount(() => window.removeEventListener("keydown", onLightboxKey));
 </script>
 
 <template>
@@ -305,7 +329,7 @@ onMounted(async () => {
             <!-- Images gallery -->
             <div v-if="selected.images?.length" style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px">
               <div v-for="(img, i) in selected.images" :key="i" style="position: relative">
-                <img :src="img" style="max-width: 200px; max-height: 200px; object-fit: cover; border-radius: 8px; border: 1px solid var(--rule); cursor: pointer" @click="openImage(img)" />
+                <img :src="img" style="max-width: 200px; max-height: 200px; object-fit: cover; border-radius: 8px; border: 1px solid var(--rule); cursor: pointer" @click="openImage(selected!.images!, i)" />
               </div>
             </div>
             <div style="font-size: 11px; color: var(--ink-mute); margin-bottom: 16px">
@@ -347,6 +371,15 @@ onMounted(async () => {
       </div>
     </div>
   </div>
+
+  <!-- Screenshot lightbox -->
+  <div v-if="lightboxOpen" class="modal-scrim" style="align-items: center" @mousedown.self="closeLightbox">
+    <button class="modal-close" style="position: absolute; top: 20px; right: 24px; background: rgba(255,255,255,0.12); color: #fff" @click="closeLightbox"><Icon name="close" :size="18" /></button>
+    <button v-if="lightboxImages.length > 1" class="lb-nav lb-prev" @click.stop="lightboxPrev"><Icon name="back" :size="20" /></button>
+    <img :src="lightboxImages[lightboxIndex]" class="lb-image" @click.stop />
+    <button v-if="lightboxImages.length > 1" class="lb-nav lb-next" @click.stop="lightboxNext"><Icon name="forward" :size="20" /></button>
+    <div v-if="lightboxImages.length > 1" class="lb-counter">{{ lightboxIndex + 1 }} / {{ lightboxImages.length }}</div>
+  </div>
 </template>
 
 <style scoped>
@@ -363,5 +396,20 @@ onMounted(async () => {
 .fb-cat-pill, .fb-st-pill {
   font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 4px;
   border: 1px solid; background: var(--bg-canvas);
+}
+.lb-image { max-width: 90vw; max-height: 88vh; object-fit: contain; border-radius: 6px; }
+.lb-nav {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  width: 40px; height: 40px; border-radius: 50%;
+  background: rgba(255,255,255,0.12); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  border: none; cursor: pointer; transition: background 120ms;
+}
+.lb-nav:hover { background: rgba(255,255,255,0.22); }
+.lb-prev { left: 24px; }
+.lb-next { right: 24px; }
+.lb-counter {
+  position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%);
+  font-size: 12px; color: rgba(255,255,255,0.85);
 }
 </style>

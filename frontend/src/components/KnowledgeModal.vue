@@ -7,6 +7,7 @@ import { teamsApi } from "@/api/teams";
 const props = defineProps<{
   teamId: string;
   editing?: { id: string; name: string; kind: string; size_bytes: number } | null;
+  folderId?: string | null;
 }>();
 
 const emit = defineEmits<{ close: []; saved: [] }>();
@@ -53,12 +54,13 @@ async function save() {
         size_bytes: form.value.size_bytes,
       });
     } else if (selectedFile.value) {
-      await teamsApi.uploadKnowledge(props.teamId, selectedFile.value);
+      await teamsApi.uploadKnowledge(props.teamId, selectedFile.value, props.folderId);
     } else {
       await teamsApi.addKnowledge(props.teamId, {
         name: form.value.name.trim(),
         kind: form.value.kind,
         size_bytes: form.value.size_bytes || Math.round(Math.random() * 900 + 60) * 1024,
+        folder_id: props.folderId ?? null,
       });
     }
     emit("saved");
