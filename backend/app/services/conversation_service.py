@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core import redis as redis_core
-from app.core.files import confine_to_dir, safe_relative_path
+from app.core.files import confine_to_dir, safe_relative_path, OFFICE_EXTRACTORS
 from app.db.models.agent import Profile
 from app.db.models.conversation import Conversation, GroupMember, Message
 from app.db.models.workspace import WorkspaceFile, WorkspaceFileVersion
@@ -173,7 +173,8 @@ async def _resolve_attached_files(
     }
     IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"}
     TEXT_EXTS = {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
-                 "yaml", "yml", "toml", "sh", "bash", "log", "xml", "css", "diff", "patch", "pdf"}
+                 "yaml", "yml", "toml", "sh", "bash", "log", "xml", "css", "diff", "patch", "pdf",
+                 "docx", "xlsx", "pptx"}
 
     # Prepare workspace dir for the agent to access files
     ws_dir = None
@@ -203,7 +204,10 @@ async def _resolve_attached_files(
                     import asyncio
                     from app.core import object_storage
                     raw_bytes = await asyncio.to_thread(object_storage.get, f.storage_key)
-                    if is_text and ext != "pdf":
+                    if ext in OFFICE_EXTRACTORS:
+                        # Extract full HTML preview for office docs — much smaller than base64
+                        file_content = OFFICE_EXTRACTORS[ext](raw_bytes) or ""
+                    elif is_text and ext != "pdf":
                         file_content = raw_bytes.decode("utf-8", "ignore")
                     else:
                         import base64
@@ -409,8 +413,15 @@ def _build_attached_prompt(text: str, attached: list[dict]) -> str:
     refs: list[str] = []
     for f in attached:
         ws_path = f.get("workspace_path")
+        size = f.get("size_bytes", 0)
         if ws_path:
-            refs.append(f"- {f['name']} ({ws_path})")
+            # For large text/office files, suggest chunked reading
+            if size > 30000 and (f.get("is_text") or f.get("kind") in ("docx", "xlsx", "pptx")):
+                refs.append(
+                    f"- {f['name']} ({ws_path}) — 文件较大，建议使用 read_file 分段读取"
+                )
+            else:
+                refs.append(f"- {f['name']} ({ws_path})")
         elif f.get("is_image"):
             refs.append(f"- {f['name']} (image attached)")
         else:
