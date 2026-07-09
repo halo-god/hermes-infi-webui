@@ -8,8 +8,9 @@ import Icon from "@/components/Icon.vue";
 import NewProjectModal from "@/components/NewProjectModal.vue";
 import InviteMembersModal from "@/components/InviteMembersModal.vue";
 import KnowledgeModal from "@/components/KnowledgeModal.vue";
+import MoveKnowledgeModal from "@/components/MoveKnowledgeModal.vue";
 import SharedAgentsModal from "@/components/SharedAgentsModal.vue";
-import ConfirmModal from "@/components/ConfirmModal.vue";
+import ConfirmDialog from "@/components/ConfirmDialog.vue";
 import ProjectMembersModal from "@/components/ProjectMembersModal.vue";
 import WorkspacePanel from "@/components/WorkspacePanel.vue";
 import { teamsApi } from "@/api/teams";
@@ -17,7 +18,7 @@ import { profilesApi, type Profile } from "@/api/agents";
 import { projectsApi } from "@/api/projects";
 import { useChatStore } from "@/stores/chat";
 import { usePresence } from "@/composables/usePresence";
-import type { FileItem, Member, Project, TeamDetail, TeamPolicy, WsAdapter } from "@/types";
+import type { FileItem, Knowledge, Member, Project, TeamDetail, TeamPolicy, WsAdapter } from "@/types";
 
 const route = useRoute();
 const router = useRouter();
@@ -35,6 +36,13 @@ const confirmAction = ref<{ title: string; message: string; confirmText: string;
 const showKnowledgePanel = ref(false);
 const clickedKnowledgeId = ref<string | null>(null);
 const teamProfiles = ref<Profile[]>([]);
+
+// ── Knowledge folders ──
+const currentFolderId = ref<string | null>(null);
+const folderTrail = ref<{ id: string; name: string }[]>([]);
+const knowledgeItems = ref<Knowledge[]>([]);
+const loadingKnowledge = ref(false);
+const movingKnowledgeItem = ref<Knowledge | null>(null);
 
 function agentInfo(id: string) {
   const p = chat.profiles.find((pp) => pp.default_agent_id === id);
@@ -70,6 +78,8 @@ onBeforeUnmount(() => {
 watch(() => route.params.id, async (newId, oldId) => {
   if (newId && newId !== oldId) {
     tab.value = "overview";
+    currentFolderId.value = null;
+    folderTrail.value = [];
     await load();
   }
 });
@@ -101,13 +111,49 @@ async function load() {
 }
 
 const knowledgeFiles = computed<FileItem[]>(() =>
-  (detail.value?.knowledge || []).map((k) => ({
-    id: k.id,
-    name: k.name,
-    kind: k.kind,
-    size_bytes: k.size_bytes,
-  }))
+  (detail.value?.knowledge || [])
+    .filter((k) => !k.is_folder)
+    .map((k) => ({
+      id: k.id,
+      name: k.name,
+      kind: k.kind,
+      size_bytes: k.size_bytes,
+    }))
 );
+
+async function loadKnowledge() {
+  loadingKnowledge.value = true;
+  try {
+    knowledgeItems.value = await teamsApi.listKnowledge(teamId.value, currentFolderId.value || undefined);
+  } finally {
+    loadingKnowledge.value = false;
+  }
+}
+watch([tab, currentFolderId], ([t]) => {
+  if (t === "knowledge") loadKnowledge();
+});
+
+function enterFolder(f: Knowledge) {
+  folderTrail.value.push({ id: f.id, name: f.name });
+  currentFolderId.value = f.id;
+}
+function goToBreadcrumb(index: number) {
+  folderTrail.value = index < 0 ? [] : folderTrail.value.slice(0, index + 1);
+  currentFolderId.value = index < 0 ? null : folderTrail.value[index].id;
+}
+async function createFolder() {
+  const name = prompt("文件夹名称")?.trim();
+  if (!name) return;
+  await teamsApi.createKnowledgeFolder(teamId.value, name, currentFolderId.value || undefined);
+  await loadKnowledge();
+}
+function openMoveModal(item: Knowledge) {
+  movingKnowledgeItem.value = item;
+}
+async function onKnowledgeMoved() {
+  movingKnowledgeItem.value = null;
+  await loadKnowledge();
+}
 
 const kbAdapter = computed<WsAdapter>(() => ({
   getContent: (fid) => teamsApi.knowledgeContent(teamId.value, fid),
@@ -215,7 +261,6 @@ const team = computed(() => {
     sharedProfileIds: (d?.shared_profile_ids || []) as string[],
     pinned: (d?.pinned || []) as { id: string; title: string; primary_agent_id: string; updated_at: string }[],
     activity: (d?.activity || []) as { who: string; action: string; target: string; icon: string; ago: string }[],
-    knowledge: (d?.knowledge || []) as { id: string; name: string; kind: string; size_bytes: number; uploaded_by_name: string | null }[],
   };
 });
 
@@ -238,15 +283,18 @@ function editKnowledge(k: { id: string; name: string; kind: string; size_bytes: 
   editingKnowledge.value = k;
   showKnowledgeModal.value = true;
 }
-function deleteKnowledge(kid: string) {
+function deleteKnowledge(item: Knowledge) {
   confirmAction.value = {
-    title: "删除知识条目",
-    message: "确认删除该知识条目？此操作不可恢复。",
+    title: item.is_folder ? "删除文件夹" : "删除知识条目",
+    message: item.is_folder
+      ? "文件夹内的直接子项将被移动到上一级目录，文件夹本身将被删除。确认删除？"
+      : "确认删除该知识条目？此操作不可恢复。",
     confirmText: "删除",
     danger: true,
     onConfirm: async () => {
-      await teamsApi.deleteKnowledge(teamId.value, kid);
+      await teamsApi.deleteKnowledge(teamId.value, item.id);
       confirmAction.value = null;
+      await loadKnowledge();
       await load();
     },
   };
@@ -578,24 +626,39 @@ async function deleteTeam() {
       <!-- KNOWLEDGE -->
       <template v-else-if="tab === 'knowledge'">
         <div class="flex-between" style="margin-bottom:14px">
-          <div><div class="heading-serif">知识库 · {{ team.knowledge.length }}</div><div class="text-mute-sm" style="margin-top:2px">所有团队助手都能引用这些文件作为上下文。点击文件可预览内容。</div></div>
-          <button v-if="can('knowledge.upload')" class="btn primary" @click="addKnowledge"><Icon name="paperclip" /> 上传文件</button>
+          <div><div class="heading-serif">知识库 · {{ knowledgeItems.length }}</div><div class="text-mute-sm" style="margin-top:2px">所有团队助手都能引用这些文件作为上下文。点击文件夹进入，点击文件可预览内容。</div></div>
+          <div style="display:flex;gap:8px">
+            <button v-if="can('knowledge.upload')" class="btn" @click="createFolder"><Icon name="folder" /> 新建文件夹</button>
+            <button v-if="can('knowledge.upload')" class="btn primary" @click="addKnowledge"><Icon name="paperclip" /> 上传文件</button>
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:10px;font-size:12.5px;color:var(--ink-mute)">
+          <span style="cursor:pointer" :style="{ color: !folderTrail.length ? 'var(--ink)' : undefined }" @click="goToBreadcrumb(-1)">知识库</span>
+          <template v-for="(crumb, i) in folderTrail" :key="crumb.id">
+            <Icon name="chevron_right" :size="12" />
+            <span style="cursor:pointer" :style="{ color: i === folderTrail.length - 1 ? 'var(--ink)' : undefined }" @click="goToBreadcrumb(i)">{{ crumb.name }}</span>
+          </template>
         </div>
         <div class="section-card">
-          <div v-if="!team.knowledge.length" class="empty-state-lg">知识库还是空的。</div>
+          <div v-if="loadingKnowledge" class="empty-state-lg">加载中…</div>
+          <div v-else-if="!knowledgeItems.length" class="empty-state-lg">这里还是空的。</div>
           <div
-            v-for="f in team.knowledge"
+            v-for="f in knowledgeItems"
             :key="f.id"
             class="file-row has-actions"
             style="cursor: pointer"
-            @click="openKnowledgeFile(f.id)"
+            @click="f.is_folder ? enterFolder(f) : openKnowledgeFile(f.id)"
           >
-            <div class="file-ico"><Icon name="doc" /></div>
-            <div class="flex-1-min"><div class="row-title">{{ f.name }}</div><div class="file-meta">{{ fmtSize(f.size_bytes) }} · 由 {{ f.uploaded_by_name || "成员" }} 上传</div></div>
-            <span class="file-kind">{{ f.kind }}</span>
+            <div class="file-ico"><Icon :name="f.is_folder ? 'folder' : 'doc'" /></div>
+            <div class="flex-1-min">
+              <div class="row-title">{{ f.name }}</div>
+              <div class="file-meta">{{ f.is_folder ? "文件夹" : `${fmtSize(f.size_bytes)} · 由 ${f.uploaded_by_name || "成员"} 上传` }}</div>
+            </div>
+            <span v-if="!f.is_folder" class="file-kind">{{ f.kind }}</span>
             <div class="row-actions" @click.stop>
-              <button v-if="can('knowledge.upload')" class="row-act" title="编辑元数据" @click="editKnowledge(f)"><Icon name="edit" :size="13" /></button>
-              <button v-if="can('knowledge.delete')" class="row-act danger" title="删除" @click="deleteKnowledge(f.id)"><Icon name="close" :size="13" /></button>
+              <button v-if="can('knowledge.upload')" class="row-act" title="移动到" @click="openMoveModal(f)"><Icon name="folder" :size="13" /></button>
+              <button v-if="can('knowledge.upload') && !f.is_folder" class="row-act" title="编辑元数据" @click="editKnowledge(f)"><Icon name="edit" :size="13" /></button>
+              <button v-if="can('knowledge.delete')" class="row-act danger" title="删除" @click="deleteKnowledge(f)"><Icon name="close" :size="13" /></button>
             </div>
           </div>
         </div>
@@ -712,8 +775,16 @@ async function deleteTeam() {
       v-if="showKnowledgeModal"
       :team-id="teamId"
       :editing="editingKnowledge"
+      :folder-id="currentFolderId"
       @close="showKnowledgeModal = false"
-      @saved="showKnowledgeModal = false; editingKnowledge = null; load()"
+      @saved="showKnowledgeModal = false; editingKnowledge = null; loadKnowledge(); load()"
+    />
+    <MoveKnowledgeModal
+      v-if="movingKnowledgeItem"
+      :team-id="teamId"
+      :item="movingKnowledgeItem"
+      @close="movingKnowledgeItem = null"
+      @moved="onKnowledgeMoved"
     />
     <SharedAgentsModal
       v-if="showSharedAgentsModal"
@@ -722,7 +793,7 @@ async function deleteTeam() {
       @close="showSharedAgentsModal = false"
       @updated="onSharedAgentsUpdated"
     />
-    <ConfirmModal
+    <ConfirmDialog
       v-if="confirmAction"
       :title="confirmAction.title"
       :message="confirmAction.message"

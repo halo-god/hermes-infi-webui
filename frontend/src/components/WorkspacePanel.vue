@@ -576,8 +576,15 @@ function fmtDate(s: string) {
             <div
               v-else-if="fileMode(activeFile) === 'office'"
               class="md-preview office-preview"
-              v-html="officeHtml"
-            />
+            >
+              <div v-if="!officeHtml" class="ws-unknown">
+                <Icon name="doc" style="font-size: 40px; color: var(--ink-mute)" />
+                <div style="font-size: 13px; color: var(--ink-mute); margin-top: 12px">{{ activeFile.name }}</div>
+                <div style="font-size: 12px; color: var(--ink-faint); margin-top: 4px">该文档暂时无法在线预览，请下载查看</div>
+                <button class="btn" style="margin-top: 16px" @click="download">下载文件</button>
+              </div>
+              <div v-else v-html="officeHtml" />
+            </div>
             <!-- JSON -->
             <pre v-else-if="fileMode(activeFile) === 'json'" class="json-preview">{{ jsonPretty }}</pre>
             <!-- CSV table -->

@@ -353,6 +353,7 @@ async def add_knowledge(db: AsyncSession, team_id: uuid.UUID, data, user: User) 
         kind=data.kind,
         size_bytes=data.size_bytes,
         content=data.content,
+        folder_id=data.folder_id,
         uploaded_by=user.id,
         uploaded_by_name=user.name,
     )

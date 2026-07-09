@@ -584,27 +584,47 @@ const hermesVersion = ref("");
 const showProfileForm = ref(false);
 const editingProfileId = ref<string | null>(null);
 const profileForm = reactive<ProfileCreate & {
-  knowledge_ids: string[]; mcp_server_names: string[]; is_moa: boolean; moa_target_profile_ids: string[];
+  knowledge_ids: string[]; knowledge_folder_ids: string[]; knowledge_team_ids: string[];
+  mcp_server_names: string[]; is_moa: boolean; moa_target_profile_ids: string[];
 }>({
   name: "", handle: "", scope: "global", color: "#b8852a",
   icon: "sparkle", desc: "", default_model: "hermes-4", team_id: null,
-  system_prompt: null, skills: [], featured: false, knowledge_ids: [], mcp_server_names: [],
+  system_prompt: null, skills: [], featured: false,
+  knowledge_ids: [], knowledge_folder_ids: [], knowledge_team_ids: [], mcp_server_names: [],
   is_moa: false, moa_target_profile_ids: [],
 });
 // Selectable knowledge entries (team knowledge, labeled by team) for prompt injection.
 const knowledgeOptions = ref<{ id: string; label: string }[]>([]);
+const knowledgeFolderOptions = ref<{ id: string; label: string }[]>([]);
 async function loadKnowledgeOptions() {
-  const opts: { id: string; label: string }[] = [];
+  const files: { id: string; label: string }[] = [];
+  const folders: { id: string; label: string }[] = [];
   for (const t of teamsOpt.value) {
     try {
-      const ks = await teamsApi.listKnowledge(t.id);
-      for (const k of ks) opts.push({ id: k.id, label: `${t.name} · ${k.name}` });
+      const ks = await teamsApi.listKnowledge(t.id, undefined, true);
+      for (const k of ks) {
+        const entry = { id: k.id, label: `${t.name} · ${k.name}` };
+        (k.is_folder ? folders : files).push(entry);
+      }
     } catch { /* skip teams without access */ }
   }
-  knowledgeOptions.value = opts;
+  knowledgeOptions.value = files;
+  knowledgeFolderOptions.value = folders;
 }
 function toggleKnowledge(id: string) {
   const arr = profileForm.knowledge_ids;
+  const i = arr.indexOf(id);
+  if (i >= 0) arr.splice(i, 1);
+  else arr.push(id);
+}
+function toggleKnowledgeFolder(id: string) {
+  const arr = profileForm.knowledge_folder_ids;
+  const i = arr.indexOf(id);
+  if (i >= 0) arr.splice(i, 1);
+  else arr.push(id);
+}
+function toggleKnowledgeTeam(id: string) {
+  const arr = profileForm.knowledge_team_ids;
   const i = arr.indexOf(id);
   if (i >= 0) arr.splice(i, 1);
   else arr.push(id);
@@ -677,7 +697,8 @@ function openCreateProfile() {
   Object.assign(profileForm, {
     name: "", handle: "", scope: "global", color: "#b8852a",
     icon: "sparkle", desc: "", default_model: "hermes-4", team_id: null,
-    system_prompt: null, skills: [], featured: false, knowledge_ids: [], mcp_server_names: [],
+    system_prompt: null, skills: [], featured: false,
+    knowledge_ids: [], knowledge_folder_ids: [], knowledge_team_ids: [], mcp_server_names: [],
     is_moa: false, moa_target_profile_ids: [],
   });
   skillInput.value = "";
@@ -692,7 +713,8 @@ function openEditProfile(p: Profile) {
     name: p.name, handle: p.handle, scope: p.scope, color: p.color,
     icon: p.icon, desc: p.desc, default_model: p.default_model, team_id: p.team_id,
     system_prompt: p.system_prompt ?? null, skills: [...(p.skills || [])], featured: p.featured ?? false,
-    knowledge_ids: [...(p.knowledge_ids || [])], mcp_server_names: [...(p.mcp_server_names || [])],
+    knowledge_ids: [...(p.knowledge_ids || [])], knowledge_folder_ids: [...(p.knowledge_folder_ids || [])],
+    knowledge_team_ids: [...(p.knowledge_team_ids || [])], mcp_server_names: [...(p.mcp_server_names || [])],
     is_moa: p.is_moa ?? false, moa_target_profile_ids: [...(p.moa_target_profile_ids || [])],
   });
   skillInput.value = "";
@@ -722,6 +744,8 @@ async function saveProfile() {
         team_id: profileForm.team_id, system_prompt: profileForm.system_prompt,
         skills: profileForm.skills, featured: profileForm.featured,
         knowledge_ids: profileForm.knowledge_ids,
+        knowledge_folder_ids: profileForm.knowledge_folder_ids,
+        knowledge_team_ids: profileForm.knowledge_team_ids,
         mcp_server_names: profileForm.mcp_server_names,
         is_moa: profileForm.is_moa, moa_target_profile_ids: profileForm.moa_target_profile_ids,
       });
@@ -1475,6 +1499,28 @@ async function confirmImport() {
               <label v-for="k in knowledgeOptions" :key="k.id" style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;color:var(--ink)">
                 <input type="checkbox" :checked="profileForm.knowledge_ids.includes(k.id)" @change="toggleKnowledge(k.id)" style="width:13px;height:13px;cursor:pointer" />
                 {{ k.label }}
+              </label>
+            </div>
+          </label>
+          <!-- knowledge folder binding (all items under the folder are injected) -->
+          <label class="text-mute-sm" style="display:block;margin-top:12px">
+            绑定知识库文件夹（该文件夹下所有文件将被注入上下文）
+            <div v-if="!knowledgeFolderOptions.length" style="margin-top:6px;font-size:12px;color:var(--ink-mute)">暂无可绑定的文件夹。</div>
+            <div v-else style="margin-top:6px;max-height:160px;overflow-y:auto;border:1px solid var(--rule);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:4px">
+              <label v-for="k in knowledgeFolderOptions" :key="k.id" style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;color:var(--ink)">
+                <input type="checkbox" :checked="profileForm.knowledge_folder_ids.includes(k.id)" @change="toggleKnowledgeFolder(k.id)" style="width:13px;height:13px;cursor:pointer" />
+                {{ k.label }}
+              </label>
+            </div>
+          </label>
+          <!-- whole-team knowledge binding (every item under the team is injected, incl. future additions) -->
+          <label class="text-mute-sm" style="display:block;margin-top:12px">
+            绑定整个团队知识库（该团队下所有文件都将被注入上下文，含未来新增文件）
+            <div v-if="!teamsOpt.length" style="margin-top:6px;font-size:12px;color:var(--ink-mute)">暂无可绑定的团队。</div>
+            <div v-else style="margin-top:6px;max-height:160px;overflow-y:auto;border:1px solid var(--rule);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:4px">
+              <label v-for="t in teamsOpt" :key="t.id" style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;color:var(--ink)">
+                <input type="checkbox" :checked="profileForm.knowledge_team_ids.includes(t.id)" @change="toggleKnowledgeTeam(t.id)" style="width:13px;height:13px;cursor:pointer" />
+                {{ t.name }}
               </label>
             </div>
           </label>

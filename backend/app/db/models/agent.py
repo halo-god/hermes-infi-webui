@@ -49,6 +49,8 @@ class Profile(UUIDPrimaryKey, Timestamps, Base):
     knowledge_ids: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     # Bound knowledge FOLDER ids — all items under these folders are injected.
     knowledge_folder_ids: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    # Bound whole TEAM ids — every non-folder TeamKnowledge item under these teams is injected.
+    knowledge_team_ids: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     # Names of admin-registered MCP servers (system_settings.mcp_servers) this
     # profile's ACP sessions should be started with. Empty = no MCP tools.
     mcp_server_names: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)

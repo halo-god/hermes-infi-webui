@@ -700,9 +700,17 @@ async def get_file(
     content = f.content
     if content is None and f.storage_key:
         from app.core import object_storage
+        from app.core.files import is_text_extractable
 
         data = await asyncio.to_thread(object_storage.get, f.storage_key)
-        content = data.decode("utf-8", "ignore")
+        # Only decode text-extractable formats; binary files return None
+        # so the frontend falls back to raw-download instead of ZIP garbage.
+        if f.kind in OFFICE_EXTRACTORS:
+            content = None
+        elif is_text_extractable(f.kind):
+            content = data.decode("utf-8", "ignore")
+        else:
+            content = None
     return WorkspaceFileDetail(
         **WorkspaceFileOut.model_validate(f).model_dump(), content=content
     )
