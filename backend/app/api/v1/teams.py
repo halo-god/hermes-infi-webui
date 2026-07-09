@@ -947,6 +947,15 @@ async def execute_task(
     """Execute a task with the specified profile via the agent runner."""
     from app.services import conversation_service as conv_svc
     from app.db.models.team import ProjectTask
+    from app.core import ratelimit
+
+    # Rate-limit task execution to prevent runner saturation.
+    try:
+        allowed, _ = await ratelimit.hit(f"rl:task_exec:{user.id}", 10, 60)
+    except Exception:
+        allowed = False
+    if not allowed:
+        raise HTTPException(status_code=429, detail="任务执行过于频繁，请稍后再试")
 
     profile_id = payload.get("profile_id")
     if not profile_id:

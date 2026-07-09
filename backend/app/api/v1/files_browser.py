@@ -63,17 +63,19 @@ class FileItem(BaseModel):
 
 @router.get("/files", response_model=list[FileItem])
 async def list_all_files(
+    limit: int = Query(200, ge=1, le=500),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all files across the user's conversations (uploads + AI-generated)."""
-    # Get user's conversation IDs
+    """List all files across the user's conversations (uploads + AI-generated).
+    Bounded by limit to prevent OOM on users with many conversations."""
+    # Get user's conversation IDs (bounded)
     convos = (
         await db.execute(
             select(Conversation).where(
                 Conversation.owner_id == user.id,
                 Conversation.title != "__file_storage__",
-            )
+            ).limit(200)
         )
     ).scalars().all()
 
@@ -83,13 +85,13 @@ async def list_all_files(
 
     files: list[FileItem] = []
 
-    # 1. User uploaded files (from message content.files)
+    # 1. User uploaded files (from message content.files) - bounded
     msgs = (
         await db.execute(
             select(Message).where(
                 Message.conversation_id.in_(convo_map.keys()),
                 Message.role == "user",
-            )
+            ).limit(limit)
         )
     ).scalars().all()
 

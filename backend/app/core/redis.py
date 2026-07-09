@@ -84,10 +84,10 @@ async def resolve_media_ticket(token: str | None) -> str | None:
 async def token_revocation_state(jti: str | None, user_id: str) -> tuple[bool, int]:
     """One round-trip on the auth hot path: (jti blacklisted?, revoke-before epoch).
 
-    `revoke_before` is 0 when no watermark is set for the user. Fails open on a
-    Redis error (returns "not revoked") so a transient blip can't 401 every
-    request — same availability trade-off the login rate-limiter makes; access
-    tokens remain short-lived and signature-checked regardless.
+    `revoke_before` is 0 when no watermark is set for the user. Fails CLOSED
+    on a Redis error (treats the token as revoked) so a Redis outage cannot
+    revive revoked/force-logged-out tokens. The caller returns 401/503,
+    forcing the client to refresh (which also fails closed) or re-authenticate.
     """
     try:
         r = get_redis()
@@ -98,7 +98,10 @@ async def token_revocation_state(jti: str | None, user_id: str) -> tuple[bool, i
         blacklisted, revoke_before = await pipe.execute()
         return bool(blacklisted), int(revoke_before) if revoke_before else 0
     except Exception:
-        return False, 0
+        # Fail CLOSED: treat as blacklisted when Redis is unreachable.
+        # This prevents revoked tokens from being accepted during outages.
+        # The user will get a 401 and can re-login once Redis recovers.
+        return True, int(__import__("time").time())
 
 
 # ── ACP prompt queue (Redis Stream) + live event stream (per conversation) ──

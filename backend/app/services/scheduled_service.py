@@ -11,7 +11,7 @@ import logging
 from datetime import datetime, timezone
 
 from croniter import croniter
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import redis as redis_core
@@ -60,8 +60,25 @@ async def get_task(db: AsyncSession, task_id, owner_id) -> ScheduledTask | None:
     ).scalars().first()
 
 
+#: Maximum scheduled tasks per user (prevents amplification DoS).
+MAX_TASKS_PER_USER = 20
+#: Maximum tasks to enqueue per tick cycle.
+MAX_ENQUEUE_PER_TICK = 50
+
+
 async def create_task(db: AsyncSession, owner_id, payload: ScheduledTaskCreate) -> ScheduledTask:
-    # Validate cron early (raises ValueError → 400 in route).
+    # Enforce per-user quota to prevent scheduler amplification attacks.
+    count = (
+        await db.execute(
+            select(func.count()).select_from(ScheduledTask).where(
+                ScheduledTask.owner_id == owner_id
+            )
+        )
+    ).scalar() or 0
+    if count >= MAX_TASKS_PER_USER:
+        raise ValueError(f"已达到每用户 {MAX_TASKS_PER_USER} 个定时任务上限")
+
+    # Validate cron early (raises ValueError -> 400 in route).
     next_run = compute_next_run(payload.cron) if payload.enabled else None
     task = ScheduledTask(
         owner_id=owner_id,
@@ -121,14 +138,18 @@ async def toggle_task(db: AsyncSession, task_id, owner_id, enabled: bool) -> Sch
 
 # ── scheduler tick ────────────────────────────────────────────────────
 async def tick(db: AsyncSession) -> int:
-    """Find due tasks and enqueue them. Returns count of triggered tasks."""
+    """Find due tasks and enqueue them. Returns count of triggered tasks.
+
+    Bounded by MAX_ENQUEUE_PER_TICK to prevent a single tick from
+    overwhelming the runner when many tasks are due simultaneously.
+    """
     now = datetime.now(timezone.utc)
     due = (
         await db.execute(
             select(ScheduledTask).where(
                 ScheduledTask.enabled.is_(True),
                 ScheduledTask.next_run_at <= now,
-            )
+            ).limit(MAX_ENQUEUE_PER_TICK)
         )
     ).scalars().all()
 

@@ -422,10 +422,22 @@ async def share_conversation(
 @router.get("/shared/{conversation_id}", response_model=ConversationDetail)
 async def get_shared_conversation(
     conversation_id: uuid.UUID,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     from sqlalchemy import select
     from app.db.models.conversation import Conversation
+    from app.core import ratelimit
+
+    # Rate-limit per IP to prevent UUID enumeration.
+    ip = request.client.host if request.client else "unknown"
+    try:
+        allowed, _ = await ratelimit.hit(f"rl:shared:{ip}", 30, 60)
+    except Exception:
+        allowed = False  # fail-closed
+    if not allowed:
+        raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
+
     res = await db.execute(
         select(Conversation).where(
             Conversation.id == conversation_id,
@@ -435,9 +447,8 @@ async def get_shared_conversation(
     convo = res.scalar_one_or_none()
     if not convo:
         raise HTTPException(status_code=404, detail="分享链接不存在或已失效")
-    # Limit messages to prevent dumping entire conversation history to
-    # unauthenticated viewers (shared links are UUID-based, not secret tokens).
-    msgs = await svc.get_messages(db, convo.id, limit=100)
+    # Cap at 50 messages for unauthenticated viewers.
+    msgs = await svc.get_messages(db, convo.id, limit=50)
     return ConversationDetail(
         **ConversationOut.model_validate(convo).model_dump(),
         messages=[MessageOut.model_validate(m) for m in msgs],

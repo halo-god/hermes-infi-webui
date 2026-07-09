@@ -82,15 +82,54 @@ async def bulk_delete(
 async def get_conversation(
     db: AsyncSession, conversation_id: uuid.UUID, owner_id: uuid.UUID
 ) -> Conversation | None:
-    res = await db.execute(
-        select(Conversation).where(
-            Conversation.id == conversation_id,
-            (Conversation.owner_id == owner_id)
-            | Conversation.is_channel.is_(True)
-            | (Conversation.type == "group"),  # group members can access
+    """Load a conversation, verifying the caller owns it or is a group member.
+
+    For personal conversations: must be the owner.
+    For group conversations: must be the owner OR a GroupMember.
+    For team/project channels (is_channel=True): must be a GroupMember or
+      belong to the team (checked via team membership).
+    """
+    convo = (
+        await db.execute(
+            select(Conversation).where(Conversation.id == conversation_id)
         )
-    )
-    return res.scalar_one_or_none()
+    ).scalar_one_or_none()
+    if convo is None:
+        return None
+
+    # Owner always has access.
+    if convo.owner_id == owner_id:
+        return convo
+
+    # Group conversations: check GroupMember.
+    if convo.type == "group":
+        from app.db.models.conversation import GroupMember
+        member = (
+            await db.execute(
+                select(GroupMember).where(
+                    GroupMember.conversation_id == convo.id,
+                    GroupMember.user_id == owner_id,
+                )
+            )
+        ).scalars().first()
+        if member is not None:
+            return convo
+        # For team channels, also check team membership as fallback
+        # (sync_group_membership may not have run yet for new members).
+        if convo.team_id:
+            from app.db.models.team import TeamMember
+            tm = (
+                await db.execute(
+                    select(TeamMember).where(
+                        TeamMember.team_id == convo.team_id,
+                        TeamMember.user_id == owner_id,
+                    )
+                )
+            ).scalars().first()
+            if tm is not None:
+                return convo
+
+    return None
 
 
 async def get_messages(
@@ -133,6 +172,37 @@ async def create_conversation(
     team_id: uuid.UUID | None = None,
     project_id: uuid.UUID | None = None,
 ) -> Conversation:
+    # Security: verify the caller is a member of the team/project they're
+    # attaching the conversation to, preventing data injection into other teams.
+    if team_id:
+        from app.db.models.team import TeamMember
+        tm = (
+            await db.execute(
+                select(TeamMember).where(
+                    TeamMember.team_id == team_id,
+                    TeamMember.user_id == owner_id,
+                )
+            )
+        ).scalars().first()
+        if tm is None:
+            raise ValueError("无权在该团队下创建会话")
+    if project_id:
+        from app.db.models.team import Project
+        proj = await db.get(Project, project_id)
+        if proj is None:
+            raise ValueError("项目不存在")
+        if proj.team_id:
+            tm = (
+                await db.execute(
+                    select(TeamMember).where(
+                        TeamMember.team_id == proj.team_id,
+                        TeamMember.user_id == owner_id,
+                    )
+                )
+            ).scalars().first()
+            if tm is None:
+                raise ValueError("无权在该项目下创建会话")
+
     convo = Conversation(
         owner_id=owner_id,
         title=title or "新会话",
@@ -189,40 +259,44 @@ async def _resolve_attached_files(
         except ValueError:
             continue
         f = await db.get(WorkspaceFile, fid)
-        if f is not None:
-            ext = (f.kind or "").lower()
-            mime = MIME_MAP.get(ext, "application/octet-stream")
-            is_image = ext in IMAGE_EXTS
-            is_text = ext in TEXT_EXTS
-            folder = (f.folder_path or "").strip("/")
+        # Security: only allow files belonging to the current conversation
+        # to prevent cross-user/cross-conversation file content exfiltration.
+        if f is None or str(f.conversation_id) != str(conversation_id):
+            continue
+        ext = (f.kind or "").lower()
+        mime = MIME_MAP.get(ext, "application/octet-stream")
+        is_image = ext in IMAGE_EXTS
+        is_text = ext in TEXT_EXTS
+        folder = (f.folder_path or "").strip("/")
 
-            # Resolve content: storage_key wins, then inline content
-            file_content = f.content or ""
-            raw_bytes: bytes | None = None
-            if f.storage_key and not file_content:
-                try:
-                    import asyncio
-                    from app.core import object_storage
-                    raw_bytes = await asyncio.to_thread(object_storage.get, f.storage_key)
-                    if ext in OFFICE_EXTRACTORS:
-                        # Extract full HTML preview for office docs — much smaller than base64
-                        file_content = OFFICE_EXTRACTORS[ext](raw_bytes) or ""
-                    elif is_text and ext != "pdf":
-                        file_content = raw_bytes.decode("utf-8", "ignore")
-                    else:
-                        import base64
-                        file_content = base64.b64encode(raw_bytes).decode("ascii")
-                except Exception:
-                    file_content = ""
+        # Resolve content: storage_key wins, then inline content
+        file_content = f.content or ""
+        raw_bytes: bytes | None = None
+        if f.storage_key and not file_content:
+            try:
+                import asyncio
+                from app.core import object_storage
+                raw_bytes = await asyncio.to_thread(object_storage.get, f.storage_key)
+                if ext in OFFICE_EXTRACTORS:
+                    file_content = OFFICE_EXTRACTORS[ext](raw_bytes) or ""
+                elif is_text and ext != "pdf":
+                    file_content = raw_bytes.decode("utf-8", "ignore")
+                else:
+                    import base64
+                    file_content = base64.b64encode(raw_bytes).decode("ascii")
+            except Exception:
+                file_content = ""
 
-            # Build relative path preserving folder structure (e.g. "testfolder/foo.md")
-            rel_name = safe_relative_path(f.name)
-            rel_path = f"{folder}/{rel_name}" if folder else rel_name
+        # Build relative path preserving folder structure (e.g. "testfolder/foo.md")
+        rel_name = safe_relative_path(f.name)
+        rel_path = f"{folder}/{rel_name}" if folder else rel_name
 
-            # Write file content to workspace so agent can read it — confine
-            # the (possibly agent-authored) name so it can't escape ws_dir.
-            if ws_dir and file_content and not is_image:
-                fpath = confine_to_dir(ws_dir, rel_path)
+        # Write file content to workspace so agent can read it — confine
+        # the (possibly agent-authored) name so it can't escape ws_dir.
+        if ws_dir and file_content and not is_image:
+            fpath = confine_to_dir(ws_dir, rel_path)
+
+            def _write_attachment():
                 os.makedirs(os.path.dirname(fpath), exist_ok=True)
                 if raw_bytes and ext == "pdf":
                     with open(fpath, "wb") as fh:
@@ -231,15 +305,17 @@ async def _resolve_attached_files(
                     with open(fpath, "w", encoding="utf-8") as fh:
                         fh.write(file_content)
 
-            result.append({
-                "id": str(f.id), "name": f.name, "kind": f.kind,
-                "folder_path": folder,
-                "workspace_path": f"attachments/{rel_path}" if ws_dir and file_content else None,
-                "content": file_content,
-                "size_bytes": f.size_bytes or len(file_content),
-                "mime_type": mime,
-                "is_image": is_image,
-                "is_text": is_text,
+            await asyncio.to_thread(_write_attachment)
+
+        result.append({
+            "id": str(f.id), "name": f.name, "kind": f.kind,
+            "folder_path": folder,
+            "workspace_path": f"attachments/{rel_path}" if ws_dir and file_content else None,
+            "content": file_content,
+            "size_bytes": f.size_bytes or len(file_content),
+            "mime_type": mime,
+            "is_image": is_image,
+            "is_text": is_text,
             })
     return result
 

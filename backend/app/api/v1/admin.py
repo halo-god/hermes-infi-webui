@@ -424,7 +424,8 @@ async def delete_mcp_server(
 
 @router.get("/mcp-servers/{name}/status")
 async def mcp_server_status(name: str, db: AsyncSession = Depends(get_db)):
-    """Check if an MCP server is reachable (basic HTTP health check)."""
+    """Check if an MCP server is reachable (basic HTTP health check).
+    Blocks private/loopback IPs to prevent SSRF."""
     settings = await settings_service.get(db)
     servers: list[dict] = (settings.data or {}).get("mcp_servers", [])
     server = next((s for s in servers if s["name"] == name), None)
@@ -432,9 +433,28 @@ async def mcp_server_status(name: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="MCP server not found")
 
     import aiohttp
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
     url = server.get("url") or server.get("base_url", "")
     if not url:
         return {"name": name, "status": "no_url", "reachable": False}
+
+    # SSRF protection: resolve hostname and reject private/loopback/link-local IPs.
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return {"name": name, "status": "invalid_scheme", "reachable": False}
+    hostname = parsed.hostname or ""
+    try:
+        addr_info = socket.getaddrinfo(hostname, None)
+        for family, _, _, _, sockaddr in addr_info:
+            ip = ipaddress.ip_address(sockaddr[0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return {"name": name, "status": "blocked", "reachable": False,
+                        "error": "URL points to a private/loopback address"}
+    except (socket.gaierror, ValueError):
+        pass  # Let the request proceed; DNS resolution will fail naturally
 
     try:
         timeout = aiohttp.ClientTimeout(total=5)

@@ -123,8 +123,8 @@ const greeting = computed(() => {
   const timePart = hour < 6 ? "夜深了" : hour < 11 ? "早上好" : hour < 14 ? "中午好" : hour < 18 ? "下午好" : "晚上好";
   let voice = "warm";
   try { voice = JSON.parse(localStorage.getItem("hermes.tweaks") || "{}").voice || "warm"; } catch { /* noop */ }
-  if (voice === "classical") return { main: branding.tagline, sub: "Quidquid mittere vis, mihi crede." };
-  if (voice === "engineering") return { main: `> <em>${branding.shortName}</em> ready —`, sub: `agents: ${chat.activeProfiles.length} active · model: ACP · uptime: 99.9%` };
+  if (voice === "classical") return { main: escapeHtml(branding.tagline), sub: "Quidquid mittere vis, mihi crede." };
+  if (voice === "engineering") return { main: `> <em>${escapeHtml(branding.shortName)}</em> ready —`, sub: `agents: ${chat.activeProfiles.length} active · model: ACP · uptime: 99.9%` };
   return { main: `${timePart}，<em>今天有什么安排？</em>`, sub: "Ask me anything · 我会调度合适的助手为你完成。" };
 });
 

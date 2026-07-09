@@ -129,6 +129,14 @@ async def add_member(db: AsyncSession, team_id: uuid.UUID, email: str, role: str
 async def update_member_role(
     db: AsyncSession, team_id: uuid.UUID, user_id: uuid.UUID, role: str
 ) -> TeamMember:
+    # Whitelist allowed roles; reject "owner" (ownership transfer is a
+    # separate flow) and any arbitrary string that could pollute data.
+    allowed_roles = {"admin", "member", "viewer"}
+    if role not in allowed_roles:
+        raise HTTPException(
+            status_code=400,
+            detail=f"无效的角色，仅允许: {', '.join(sorted(allowed_roles))}",
+        )
     member = await get_membership(db, team_id, user_id)
     if member is None:
         raise HTTPException(status_code=404, detail="成员不存在")
