@@ -68,6 +68,12 @@ const router = createRouter({
       component: () => import("@/views/JoinTeamView.vue"),
       meta: { public: false },
     },
+    {
+      path: "/shared/:id",
+      name: "shared-conversation",
+      component: () => import("@/views/SharedConversationView.vue"),
+      meta: { public: true },
+    },
     { path: "/:pathMatch(.*)*", redirect: "/" },
   ],
 });

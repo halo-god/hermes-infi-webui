@@ -52,6 +52,9 @@ export const conversationsApi = {
   async unshare(id: string): Promise<void> {
     await http.patch(`/conversations/${id}`, { visibility: "private" });
   },
+  async getShared(id: string): Promise<ConversationDetail> {
+    return (await http.get<ConversationDetail>(`/conversations/shared/${id}`)).data;
+  },
   async send(id: string, text: string, opts?: { profileId?: string; fileIds?: string[]; skipAgent?: boolean; taskId?: string }): Promise<SendResponse> {
     const { fileIds, skipAgent, profileId, taskId, ...restOpts } = opts || {};
     return (await http.post<SendResponse>(`/conversations/${id}/messages`, {

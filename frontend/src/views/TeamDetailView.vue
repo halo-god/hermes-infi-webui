@@ -10,7 +10,7 @@ import InviteMembersModal from "@/components/InviteMembersModal.vue";
 import KnowledgeModal from "@/components/KnowledgeModal.vue";
 import MoveKnowledgeModal from "@/components/MoveKnowledgeModal.vue";
 import SharedAgentsModal from "@/components/SharedAgentsModal.vue";
-import ConfirmModal from "@/components/ConfirmModal.vue";
+import ConfirmDialog from "@/components/ConfirmDialog.vue";
 import ProjectMembersModal from "@/components/ProjectMembersModal.vue";
 import WorkspacePanel from "@/components/WorkspacePanel.vue";
 import { teamsApi } from "@/api/teams";
@@ -793,7 +793,7 @@ async function deleteTeam() {
       @close="showSharedAgentsModal = false"
       @updated="onSharedAgentsUpdated"
     />
-    <ConfirmModal
+    <ConfirmDialog
       v-if="confirmAction"
       :title="confirmAction.title"
       :message="confirmAction.message"
