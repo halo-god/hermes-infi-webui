@@ -19,6 +19,21 @@ export interface EvolveStatus {
   finished_at?: string | null;
 }
 
+export interface DatasetExample {
+  query: string;
+  skill_content_snapshot: string;
+  output_trace: string | null;
+  label: string | null;
+  source: "real" | "synthetic";
+}
+
+export interface DatasetPreview {
+  skill_id: string;
+  skill_name: string;
+  examples: DatasetExample[];
+  summary: { real_count?: number; synthetic_count?: number; earliest?: string | null; latest?: string | null };
+}
+
 export interface SkillProposal {
   id: string;
   skill_id: string;
@@ -39,6 +54,8 @@ export interface SkillProposal {
 export const skillEvolutionApi = {
   listSkills: (): Promise<AdminSkill[]> =>
     http.get("/skill-evolution/skills").then((r) => r.data),
+  previewDataset: (skillId: string): Promise<DatasetPreview> =>
+    http.get(`/skill-evolution/skills/${skillId}/preview-dataset`).then((r) => r.data),
   evolve: (skillId: string): Promise<{ status: string }> =>
     http.post(`/skill-evolution/skills/${skillId}/evolve`).then((r) => r.data),
   evolveStatus: (skillId: string): Promise<EvolveStatus> =>

@@ -208,6 +208,10 @@ class DocOut(BaseModel):
     created_at: datetime
 
 
+class DocDetail(DocOut):
+    content: str | None = None
+
+
 class DocVersionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

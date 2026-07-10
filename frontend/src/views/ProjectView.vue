@@ -6,12 +6,13 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import Icon from "@/components/Icon.vue";
 import NewProjectModal from "@/components/NewProjectModal.vue";
+import WorkspacePanel from "@/components/WorkspacePanel.vue";
 import { projectsApi } from "@/api/projects";
 import { teamsApi } from "@/api/teams";
 import { agentsApi } from "@/api/agents";
 import { useChatStore } from "@/stores/chat";
 import { useNotificationStore } from "@/stores/notifications";
-import type { Agent, Member, Project, ProjectActivity, Task } from "@/types";
+import type { Agent, Member, Project, ProjectActivity, Task, WsAdapter } from "@/types";
 
 const route = useRoute();
 const router = useRouter();
@@ -129,6 +130,24 @@ async function deleteDoc(id: string) {
   if (!confirm("删除该文件？")) return;
   await projectsApi.deleteDoc(id);
   docs.value = docs.value.filter((d) => d.id !== id);
+}
+const showDocPanel = ref(false);
+const clickedDocId = ref<string | null>(null);
+const docAdapter = computed<WsAdapter>(() => ({
+  getContent: (fid) => projectsApi.docContent(fid),
+  getRawUrl: (fid) => projectsApi.docRawUrl(fid),
+  patchContent: (fid, content) => projectsApi.updateDocContent(fid, content),
+  getVersions: (fid) => projectsApi.docVersions(fid),
+  restoreVersion: (fid, v) => projectsApi.restoreDocVersion(fid, v),
+  upload: async (file) => {
+    if (!projectId) return;
+    const doc = await projectsApi.uploadDoc(projectId, file);
+    docs.value.unshift(doc);
+  },
+}));
+function openDocFile(id: string) {
+  clickedDocId.value = id;
+  showDocPanel.value = true;
 }
 function fmtSize(b: number): string {
   return b >= 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(b / 1024)) + " KB";
@@ -494,13 +513,13 @@ async function removeProject() {
           <div class="section-card">
             <div class="section-head"><div class="section-title"><Icon name="doc" /> 项目文件</div></div>
             <div class="section-body flush">
-              <div v-for="d in docs" :key="d.id" class="file-row has-actions">
+              <div v-for="d in docs" :key="d.id" class="file-row has-actions" @click="openDocFile(d.id)">
                 <div class="file-ico"><Icon name="doc" /></div>
                 <div class="flex-1-min"><div class="row-title">{{ d.name }}</div><div class="file-meta">{{ fmtSize(d.size_bytes) }} · {{ d.created_by_name || "成员" }}</div></div>
                 <span class="file-kind">{{ d.kind }}</span>
                 <div class="row-actions">
-                  <button class="row-act accent" title="用助手分析" @click="docToAI(d.name)"><Icon name="sparkle" :size="13" /></button>
-                  <button class="row-act danger" title="删除" @click="deleteDoc(d.id)"><Icon name="close" :size="13" /></button>
+                  <button class="row-act accent" title="用助手分析" @click.stop="docToAI(d.name)"><Icon name="sparkle" :size="13" /></button>
+                  <button class="row-act danger" title="删除" @click.stop="deleteDoc(d.id)"><Icon name="close" :size="13" /></button>
                 </div>
               </div>
               <div v-if="!docs.length" class="empty-state">还没有文件。</div>
@@ -552,5 +571,15 @@ async function removeProject() {
     :project="project"
     @close="editingProject = false"
     @updated="onProjectUpdated"
+  />
+
+  <WorkspacePanel
+    v-if="showDocPanel && docs.length"
+    :files="docs"
+    :adapter="docAdapter"
+    :initial-file-id="clickedDocId || undefined"
+    title="项目文件"
+    uploadable
+    @close="showDocPanel = false"
   />
 </template>

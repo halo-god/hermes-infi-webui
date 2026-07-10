@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /* 1:1 port of the prototype history page (hermes-history.js), wired to the real
    conversations API. */
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import Icon from "@/components/Icon.vue";
 import { conversationsApi } from "@/api/conversations";
@@ -27,8 +27,13 @@ onMounted(async () => {
   await reload();
 });
 async function reload() {
-  conversations.value = await conversationsApi.list();
+  conversations.value = await conversationsApi.list({ q: q.value.trim() || undefined });
 }
+let searchTimer: ReturnType<typeof setTimeout> | null = null;
+watch(q, () => {
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(reload, 300);
+});
 
 function agentLookup(id: string) {
   const p = chat.profiles.find((pp) => pp.default_agent_id === id);
@@ -54,8 +59,6 @@ function updatedLabel(iso: string): string {
 
 const base = computed(() => {
   let list = conversations.value.slice();
-  const term = q.value.trim().toLowerCase();
-  if (term) list = list.filter((c) => c.title.toLowerCase().includes(term) || (agentLookup(c.primary_agent_id).label || "").toLowerCase().includes(term));
   if (scope.value === "pinned") list = list.filter((c) => c.pinned);
   else if (scope.value === "team") list = list.filter(() => false);
   if (sortBy.value === "name") list.sort((a, b) => a.title.localeCompare(b.title, "zh"));

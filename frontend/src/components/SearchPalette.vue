@@ -1,17 +1,36 @@
 <script setup lang="ts">
 /* 1:1 port of the prototype ⌘K search palette — searches conversations + agents. */
-import { computed, nextTick, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import Icon from "@/components/Icon.vue";
 import { useChatStore } from "@/stores/chat";
+import { conversationsApi } from "@/api/conversations";
+import type { Conversation } from "@/types";
 
 const emit = defineEmits<{ close: [] }>();
 const chat = useChatStore();
 const router = useRouter();
 const q = ref("");
 const input = ref<HTMLInputElement | null>(null);
+const convoResults = ref<Conversation[]>([]);
 
 onMounted(() => nextTick(() => input.value?.focus()));
+
+// Conversation search hits the backend (covers the full corpus, not just what's
+// already loaded into the store) while agent matching stays client-side since
+// the profile list is always fully loaded.
+let searchTimer: ReturnType<typeof setTimeout> | null = null;
+watch(q, (term) => {
+  if (searchTimer) clearTimeout(searchTimer);
+  const trimmed = term.trim();
+  if (!trimmed) {
+    convoResults.value = [];
+    return;
+  }
+  searchTimer = setTimeout(async () => {
+    convoResults.value = await conversationsApi.list({ q: trimmed, limit: 8 });
+  }, 250);
+});
 
 const matches = computed(() => {
   const term = q.value.trim().toLowerCase();
@@ -19,7 +38,7 @@ const matches = computed(() => {
     return { convos: chat.conversations.slice(0, 5), profiles: chat.profiles.filter((p) => p.is_active).slice(0, 4) };
   }
   return {
-    convos: chat.conversations.filter((c) => c.title.toLowerCase().includes(term)),
+    convos: convoResults.value,
     profiles: chat.profiles.filter((p) => p.is_active && (p.name.toLowerCase().includes(term) || (p.desc || "").toLowerCase().includes(term))),
   };
 });

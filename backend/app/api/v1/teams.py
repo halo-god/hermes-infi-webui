@@ -28,6 +28,7 @@ from app.schemas.team import (
     ConversationBrief,
     DocContentUpdate,
     DocCreate,
+    DocDetail,
     DocOut,
     DocVersionOut,
     TaskFromConversation,
@@ -435,7 +436,7 @@ async def delete_knowledge(
     await svc.delete_knowledge(db, team_id, kid)
 
 
-@router.patch("/teams/{team_id}/knowledge/{kid}", response_model=KnowledgeOut)
+@router.patch("/teams/{team_id}/knowledge/{kid}", response_model=KnowledgeDetail)
 async def update_knowledge(
     team_id: uuid.UUID, kid: uuid.UUID, payload: KnowledgeUpdate,
     user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
@@ -699,7 +700,7 @@ async def delete_doc(
     await svc.delete_doc(db, doc_id)
 
 
-@router.patch("/projects/docs/{doc_id}", response_model=DocOut)
+@router.patch("/projects/docs/{doc_id}", response_model=DocDetail)
 async def update_doc(
     doc_id: uuid.UUID, payload: DocContentUpdate,
     user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
@@ -733,7 +734,7 @@ async def list_doc_versions(
     return [DocVersionOut.model_validate(v) for v in versions]
 
 
-@router.post("/projects/docs/{doc_id}/restore/{version_num}", response_model=DocOut)
+@router.post("/projects/docs/{doc_id}/restore/{version_num}", response_model=DocDetail)
 async def restore_doc_version(
     doc_id: uuid.UUID, version_num: int,
     user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
@@ -747,6 +748,8 @@ async def restore_doc_version(
     updated = await svc.restore_doc_version(
         db, d.project_id, doc_id, version_num, author=user.name or str(user.id)
     )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="版本不存在")
     return updated
 
 
@@ -988,15 +991,65 @@ async def project_activity(
     return await svc.list_project_activity(db, project_id)
 
 
-@router.get("/projects/docs/{doc_id}/raw")
-async def get_doc_raw(
+@router.get("/projects/docs/{doc_id}", response_model=DocDetail)
+async def get_doc_content(
     doc_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
     d = await svc.get_doc(db, doc_id)
     if d is None:
         raise HTTPException(status_code=404, detail="文件不存在")
     await svc.require_membership(db, (await svc.get_project(db, d.project_id)).team_id, user.id)
-    return {"id": str(d.id), "name": d.name, "kind": d.kind, "content": d.content}
+    return d
+
+
+@router.get("/projects/docs/{doc_id}/raw")
+async def get_doc_raw(
+    doc_id: uuid.UUID,
+    request: Request,
+    ticket: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    from fastapi.responses import Response
+    from app.deps import user_from_ticket_or_header
+    user = await user_from_ticket_or_header(ticket, request, db)
+    d = await svc.get_doc(db, doc_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    await svc.require_membership(db, (await svc.get_project(db, d.project_id)).team_id, user.id)
+
+    MIME = {
+        "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+        "gif": "image/gif", "svg": "image/svg+xml", "webp": "image/webp",
+        "bmp": "image/bmp", "pdf": "application/pdf",
+        "txt": "text/plain", "md": "text/markdown", "html": "text/html",
+        "htm": "text/html", "csv": "text/csv", "json": "application/json",
+    }
+    ext = d.name.rsplit(".", 1)[-1].lower() if "." in d.name else ""
+    mime = MIME.get(ext, "application/octet-stream")
+
+    if not d.content:
+        raise HTTPException(status_code=404, detail="文件内容不存在")
+
+    import base64
+    TEXT_EXTS = {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
+                 "yaml", "yml", "toml", "sh", "log", "xml", "css", "diff", "patch"}
+    if ext in TEXT_EXTS:
+        data = d.content.encode("utf-8")
+    else:
+        try:
+            data = base64.b64decode(d.content.strip())
+        except Exception:
+            data = d.content.encode("utf-8")
+
+    from urllib.parse import quote
+    safe_name = d.name.replace('"', "_").replace("\\", "_")
+    ascii_name = safe_name.encode("ascii", "ignore").decode() or "file"
+    return Response(
+        content=data, media_type=mime,
+        headers={
+            "Content-Disposition": f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(safe_name)}"
+        },
+    )
 
 
 # ── helpers ──
