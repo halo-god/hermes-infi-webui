@@ -3,7 +3,7 @@
    editing is wired to PATCH /users/me; other tabs reproduce the structure. */
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import Icon from "@/components/Icon.vue";
-import { http } from "@/api/client";
+import { http, tokenStore } from "@/api/client";
 import { authApi } from "@/api/auth";
 import { useAuthStore } from "@/stores/auth";
 import { useNotificationStore } from "@/stores/notifications";
@@ -54,23 +54,53 @@ async function save() {
 }
 
 // ── security ──
-const twoFaEnabled = ref(false);
-const sessions = ref([
-  { id: "current", device: navigator.userAgent.includes("Mobile") ? "移动设备" : "当前浏览器", ip: "—", ts: new Date().toISOString(), current: true },
-]);
-async function revokeSession(id: string) {
-  sessions.value = sessions.value.filter((s) => s.id !== id);
-  try {
-    await http.delete(`/users/me/sessions/${id}`);
-  } catch { /* endpoint may not exist yet */ }
-  ns.toast("会话已撤销");
-}
+const currentDevice = navigator.userAgent.includes("Mobile") ? "移动设备" : "当前浏览器";
 function relTime(ts: string) {
   const diff = (Date.now() - new Date(ts).getTime()) / 1000;
   if (diff < 60) return "刚刚";
   if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
   if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
   return `${Math.floor(diff / 86400)} 天前`;
+}
+
+// ── change password ──
+const showPwForm = ref(false);
+const pwForm = reactive({ current: "", next: "", confirm: "" });
+const pwSaving = ref(false);
+const pwError = ref("");
+
+function togglePwForm() {
+  showPwForm.value = !showPwForm.value;
+  pwError.value = "";
+  pwForm.current = "";
+  pwForm.next = "";
+  pwForm.confirm = "";
+}
+
+async function submitPasswordChange() {
+  pwError.value = "";
+  if (pwForm.next.length < 8) {
+    pwError.value = "新密码至少需要 8 位";
+    return;
+  }
+  if (pwForm.next !== pwForm.confirm) {
+    pwError.value = "两次输入的新密码不一致";
+    return;
+  }
+  pwSaving.value = true;
+  try {
+    const res = await authApi.changePassword(pwForm.current, pwForm.next);
+    tokenStore.set(res.access_token, res.refresh_token);
+    showPwForm.value = false;
+    pwForm.current = "";
+    pwForm.next = "";
+    pwForm.confirm = "";
+    ns.toast("密码已修改");
+  } catch (e: any) {
+    pwError.value = e?.response?.data?.detail || "修改失败，请重试";
+  } finally {
+    pwSaving.value = false;
+  }
 }
 
 // ── Agent memory ──
@@ -487,43 +517,50 @@ async function saveNotifyPrefs() {
           <div class="section-head"><div class="section-title">两步验证 (2FA)</div></div>
           <div style="padding: 18px; display: flex; align-items: center; justify-content: space-between; gap: 12px">
             <div>
-              <div style="font-size: 13.5px; font-weight: 500; color: var(--ink)">{{ twoFaEnabled ? "已启用" : "未启用" }}</div>
+              <div style="font-size: 13.5px; font-weight: 500; color: var(--ink)">未启用</div>
               <div style="font-size: 12px; color: var(--ink-mute); margin-top: 3px">通过 TOTP 应用（Google Authenticator / Authy）保护账号。</div>
             </div>
-            <button class="btn" :class="{ primary: !twoFaEnabled }" @click="twoFaEnabled = !twoFaEnabled">
-              {{ twoFaEnabled ? "关闭 2FA" : "启用 2FA" }}
-            </button>
+            <button class="btn" disabled title="即将上线">即将上线</button>
           </div>
         </div>
 
         <div class="section-card" style="margin-top: 16px">
           <div class="section-head">
             <div class="section-title">登录会话</div>
-            <span style="font-size: 11.5px; color: var(--ink-mute)">{{ sessions.length }} 个活跃设备</span>
           </div>
           <div class="section-body flush">
-            <div v-for="s in sessions" :key="s.id" class="row-item" style="padding: 12px 16px">
+            <div class="row-item" style="padding: 12px 16px">
               <Icon name="globe" style="color: var(--ink-mute); flex-shrink: 0" />
               <div class="flex-1-min">
                 <div style="font-size: 13px; font-weight: 500; color: var(--ink)">
-                  {{ s.device }}
-                  <span v-if="s.current" style="margin-left: 6px; font-size: 10.5px; background: var(--accent-tint); color: var(--accent-deep); border-radius: 4px; padding: 1px 5px; font-weight: 600">当前</span>
+                  {{ currentDevice }}
+                  <span style="margin-left: 6px; font-size: 10.5px; background: var(--accent-tint); color: var(--accent-deep); border-radius: 4px; padding: 1px 5px; font-weight: 600">当前</span>
                 </div>
-                <div style="font-size: 11.5px; color: var(--ink-mute); margin-top: 2px">{{ s.ip }} · {{ relTime(s.ts) }}</div>
+                <div style="font-size: 11.5px; color: var(--ink-mute); margin-top: 2px">多设备会话管理即将上线</div>
               </div>
-              <button v-if="!s.current" class="btn text-danger" @click="revokeSession(s.id)">撤销</button>
             </div>
           </div>
         </div>
 
         <div class="section-card" style="margin-top: 16px; border-color: color-mix(in srgb, var(--danger) 25%, var(--rule))">
           <div class="section-head"><div class="section-title text-danger">危险操作</div></div>
-          <div style="padding: 18px; display: flex; align-items: center; justify-content: space-between; gap: 12px">
-            <div>
-              <div style="font-size: 13px; font-weight: 500; color: var(--ink)">修改密码</div>
-              <div class="text-mute-sm" style="margin-top:2px">需要验证当前密码。</div>
+          <div style="padding: 18px">
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px">
+              <div>
+                <div style="font-size: 13px; font-weight: 500; color: var(--ink)">修改密码</div>
+                <div class="text-mute-sm" style="margin-top:2px">需要验证当前密码。</div>
+              </div>
+              <button class="btn" @click="togglePwForm">{{ showPwForm ? "取消" : "修改密码" }}</button>
             </div>
-            <button class="btn">修改密码</button>
+            <div v-if="showPwForm" style="margin-top: 14px; display: flex; flex-direction: column; gap: 8px; max-width: 320px">
+              <input class="cfg-input" type="password" v-model="pwForm.current" placeholder="当前密码" autocomplete="current-password" />
+              <input class="cfg-input" type="password" v-model="pwForm.next" placeholder="新密码（至少 8 位）" autocomplete="new-password" />
+              <input class="cfg-input" type="password" v-model="pwForm.confirm" placeholder="确认新密码" autocomplete="new-password" @keyup.enter="submitPasswordChange" />
+              <div v-if="pwError" class="text-danger" style="font-size: 12px">{{ pwError }}</div>
+              <button class="btn primary" style="align-self: flex-start" :disabled="pwSaving" @click="submitPasswordChange">
+                {{ pwSaving ? "提交中…" : "确认修改" }}
+              </button>
+            </div>
           </div>
         </div>
       </template>

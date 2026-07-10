@@ -1,5 +1,7 @@
-import { http } from "./client";
-import type { Project, ProjectActivity, ProjectDetail, ProjectDoc, Task } from "@/types";
+import { http, mediaTicket } from "./client";
+import type { Project, ProjectActivity, ProjectDetail, ProjectDoc, Task, WorkspaceFileVersion } from "@/types";
+
+const API_BASE = import.meta.env.VITE_API_BASE || "/api/v1";
 
 export const projectsApi = {
   async listByTeam(teamId: string): Promise<Project[]> {
@@ -81,5 +83,23 @@ export const projectsApi = {
     return (await http.post<ProjectDoc>(`/projects/${projectId}/docs/upload`, form, {
       headers: { "Content-Type": "multipart/form-data" },
     })).data;
+  },
+  async docContent(docId: string): Promise<string> {
+    const r = await http.get<{ content: string | null }>(`/projects/docs/${docId}`);
+    return r.data.content || "";
+  },
+  docRawUrl(docId: string): string {
+    return `${API_BASE}/projects/docs/${docId}/raw?ticket=${encodeURIComponent(mediaTicket.current())}`;
+  },
+  async updateDocContent(docId: string, content: string): Promise<string> {
+    const r = await http.patch<{ content: string | null }>(`/projects/docs/${docId}`, { content });
+    return r.data.content || "";
+  },
+  async docVersions(docId: string): Promise<WorkspaceFileVersion[]> {
+    return (await http.get(`/projects/docs/${docId}/versions`)).data;
+  },
+  async restoreDocVersion(docId: string, versionNum: number): Promise<string> {
+    const r = await http.post<{ content: string | null }>(`/projects/docs/${docId}/restore/${versionNum}`);
+    return r.data.content || "";
   },
 };

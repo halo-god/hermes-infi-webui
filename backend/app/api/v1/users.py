@@ -1,11 +1,9 @@
-"""User endpoints: self-service profile + admin listing."""
+"""User endpoints: self-service profile."""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.rbac import require_admin
 from app.db.base import get_db
 from app.db.models.user import User
 from app.deps import get_current_user
@@ -30,9 +28,3 @@ async def update_me(
     await db.commit()
     await db.refresh(user)
     return user
-
-
-@router.get("", response_model=list[UserOut], dependencies=[Depends(require_admin())])
-async def list_users(db: AsyncSession = Depends(get_db)) -> list[User]:
-    res = await db.execute(select(User).order_by(User.created_at.desc()).limit(200))
-    return list(res.scalars().all())

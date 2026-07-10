@@ -36,4 +36,8 @@ export const authApi = {
     const { data } = await http.post<{ access_token: string; refresh_token: string }>("/auth/wecom/exchange", { code });
     return data;
   },
+  async changePassword(current_password: string, new_password: string): Promise<{ access_token: string; refresh_token: string }> {
+    const { data } = await http.post<{ access_token: string; refresh_token: string }>("/auth/change-password", { current_password, new_password });
+    return data;
+  },
 };

@@ -12,7 +12,7 @@ import { http } from "@/api/client";
 import { fmtDate } from "@/utils/format";
 import { agentsApi, profilesApi, type Profile, type ProfileCreate } from "@/api/agents";
 import { teamsApi } from "@/api/teams";
-import { skillEvolutionApi, type AdminSkill, type SkillProposal } from "@/api/skillEvolution";
+import { skillEvolutionApi, type AdminSkill, type DatasetPreview, type SkillProposal } from "@/api/skillEvolution";
 import { colorDiff, computeLineDiff } from "@/utils/diff";
 import { useAuthStore } from "@/stores/auth";
 import { useBrandingStore } from "@/stores/branding";
@@ -139,6 +139,9 @@ const evoDetail = ref<Record<string, string | null | undefined>>({}); // skill i
 const evoReviewing = ref<Set<string>>(new Set()); // proposal ids being approved/rejected
 const evoReviewNotes = reactive<Record<string, string>>({});
 const evoExpanded = ref<Set<string>>(new Set());
+const evoPreviewOpen = ref<Set<string>>(new Set());
+const evoPreviewLoading = ref<Set<string>>(new Set());
+const evoPreview = ref<Record<string, DatasetPreview>>({});
 let evoPollTimer: ReturnType<typeof setInterval> | null = null;
 
 async function loadEvoSkills() {
@@ -196,6 +199,29 @@ async function triggerEvolve(skillId: string) {
 function evoToggleExpand(proposalId: string) {
   if (evoExpanded.value.has(proposalId)) evoExpanded.value.delete(proposalId);
   else evoExpanded.value.add(proposalId);
+}
+function evoPreviewRangeLabel(skillId: string): string {
+  const p = evoPreview.value[skillId];
+  if (!p?.summary.earliest) return "";
+  const end = p.summary.latest || p.summary.earliest;
+  return ` · ${fmtDate(p.summary.earliest)} ~ ${fmtDate(end)}`;
+}
+async function evoTogglePreview(skillId: string) {
+  if (evoPreviewOpen.value.has(skillId)) {
+    evoPreviewOpen.value.delete(skillId);
+    return;
+  }
+  evoPreviewOpen.value.add(skillId);
+  if (evoPreview.value[skillId]) return;
+  evoPreviewLoading.value.add(skillId);
+  try {
+    evoPreview.value[skillId] = await skillEvolutionApi.previewDataset(skillId);
+  } catch (e: any) {
+    ns.toast(e?.response?.data?.detail || "预览失败", "error");
+    evoPreviewOpen.value.delete(skillId);
+  } finally {
+    evoPreviewLoading.value.delete(skillId);
+  }
 }
 async function evoReview(proposal: SkillProposal, status: "approved" | "rejected") {
   evoReviewing.value.add(proposal.id);
@@ -1808,15 +1834,36 @@ async function confirmImport() {
             暂无技能。
           </div>
           <div v-else class="section-body flush">
-            <div v-for="s in evoSkills" :key="s.id" class="row-item" style="padding: 12px 16px; gap: 12px; align-items: flex-start">
-              <div style="flex: 1; min-width: 0">
-                <div style="font-size: 13.5px; font-weight: 600; color: var(--ink)">{{ s.name }}</div>
-                <div style="font-size: 11.5px; color: var(--ink-mute); margin-top: 3px">{{ s.description || "（无描述）" }}</div>
-                <div v-if="evoDetail[s.id]" style="font-size: 11px; color: var(--ink-mute); margin-top: 4px">最近结果：{{ evoDetail[s.id] }}</div>
+            <div v-for="s in evoSkills" :key="s.id" style="border-bottom: 1px solid var(--rule)">
+              <div class="row-item" style="padding: 12px 16px; gap: 12px; align-items: flex-start">
+                <div style="flex: 1; min-width: 0">
+                  <div style="font-size: 13.5px; font-weight: 600; color: var(--ink)">{{ s.name }}</div>
+                  <div style="font-size: 11.5px; color: var(--ink-mute); margin-top: 3px">{{ s.description || "（无描述）" }}</div>
+                  <div v-if="evoDetail[s.id]" style="font-size: 11px; color: var(--ink-mute); margin-top: 4px">最近结果：{{ evoDetail[s.id] }}</div>
+                </div>
+                <button class="btn" style="font-size: 11px; flex-shrink: 0" :disabled="evoPreviewLoading.has(s.id)" @click="evoTogglePreview(s.id)">
+                  {{ evoPreviewLoading.has(s.id) ? "加载中…" : (evoPreviewOpen.has(s.id) ? "收起数据集" : "预览数据集") }}
+                </button>
+                <button class="btn primary" style="font-size: 11px; flex-shrink: 0" :disabled="evoRunning.has(s.id)" @click="triggerEvolve(s.id)">
+                  {{ evoRunning.has(s.id) ? "演化中…" : "触发演化" }}
+                </button>
               </div>
-              <button class="btn primary" style="font-size: 11px; flex-shrink: 0" :disabled="evoRunning.has(s.id)" @click="triggerEvolve(s.id)">
-                {{ evoRunning.has(s.id) ? "演化中…" : "触发演化" }}
-              </button>
+              <div v-if="evoPreviewOpen.has(s.id) && evoPreview[s.id]" style="padding: 0 16px 14px 16px">
+                <div style="font-size: 11.5px; color: var(--ink-mute); margin-bottom: 8px">
+                  真实样本 {{ evoPreview[s.id].summary.real_count ?? 0 }} · 合成样本 {{ evoPreview[s.id].summary.synthetic_count ?? 0 }}{{ evoPreviewRangeLabel(s.id) }}
+                </div>
+                <div v-if="!evoPreview[s.id].examples.length" style="font-size: 12px; color: var(--ink-mute)">暂无样本。</div>
+                <div v-else style="display: flex; flex-direction: column; gap: 8px">
+                  <div v-for="(ex, i) in evoPreview[s.id].examples.slice(0, 5)" :key="i" style="background: var(--bg-hover); border-radius: 6px; padding: 8px 10px; font-size: 11.5px">
+                    <div style="display:flex; gap:6px; align-items:center; margin-bottom:4px">
+                      <span class="fb-cat-pill" :style="{ color: ex.source === 'real' ? 'var(--ok)' : 'var(--accent-deep)', borderColor: (ex.source === 'real' ? 'var(--ok)' : 'var(--accent-deep)') + '44' }">{{ ex.source === 'real' ? '真实' : '合成' }}</span>
+                      <span v-if="ex.label" class="text-mute-sm">{{ ex.label }}</span>
+                    </div>
+                    <div style="color: var(--ink)">{{ ex.query }}</div>
+                  </div>
+                  <div v-if="evoPreview[s.id].examples.length > 5" class="text-mute-sm">还有 {{ evoPreview[s.id].examples.length - 5 }} 条…</div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
