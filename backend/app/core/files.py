@@ -23,20 +23,67 @@ def extract_pdf_text(data: bytes) -> str | None:
         return None
 
 
-def extract_docx_html(raw: bytes) -> str | None:
-    """Convert a .docx file's paragraphs/tables to sanitized preview HTML.
+_DOCX_NS = {
+    "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    "wp": "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+    "pic": "http://schemas.openxmlformats.org/drawingml/2006/picture",
+}
 
-    Every text node is escaped before being wrapped in a tag — document
-    content can never inject raw HTML/scripts into what's ultimately
-    rendered via v-html, matching markdown-it's html:false posture.
+
+def _extract_images_from_drawing(
+    drawing_elem,
+    image_map: dict[str, str],
+    text_runs: list[str],
+) -> None:
+    """Find all <a:blip r:embed="rId..."> inside a <w:drawing> and append
+    base64 <img> tags to text_runs."""
+    for blip in drawing_elem.iter():
+        tag = blip.tag.split("}")[-1] if "}" in blip.tag else blip.tag
+        if tag != "blip":
+            continue
+        embed_attr = None
+        for attr_name, attr_val in blip.attrib.items():
+            if attr_name.endswith("}embed") or attr_name == "embed":
+                embed_attr = attr_val
+                break
+        if embed_attr and embed_attr in image_map:
+            text_runs.append(
+                f'<img src="{image_map[embed_attr]}" style="max-width:100%;height:auto;border-radius:6px;margin:6px 0" />'
+            )
+
+
+def extract_docx_html(raw: bytes) -> str | None:
+    """Convert a .docx file to sanitized preview HTML.
+
+    Iterates the document body in true document order (paragraphs AND tables
+    interleaved via XML iteration, not separate loops). Extracts embedded
+    images as base64 data URIs. Every text node is escaped before being
+    wrapped in a tag - document content can never inject raw HTML/scripts.
     """
     try:
         import io
+        import base64
         from html import escape
 
         from docx import Document
+        from docx.oxml.ns import qn
 
         doc = Document(io.BytesIO(raw))
+        body = doc.element.body
+
+        # Collect image relationship IDs -> base64 data URIs
+        image_map: dict[str, str] = {}
+        for rel_id, rel in doc.part.rels.items():
+            if "image" in rel.reltype:
+                try:
+                    image_data = rel.target_part.blob
+                    content_type = rel.target_part.content_type
+                    b64 = base64.b64encode(image_data).decode("ascii")
+                    image_map[rel_id] = f"data:{content_type};base64,{b64}"
+                except Exception:
+                    pass
+
         parts: list[str] = []
         list_buf: list[str] = []
         list_tag: str | None = None
@@ -50,23 +97,38 @@ def extract_docx_html(raw: bytes) -> str | None:
 
         heading_map = {f"Heading {i}": f"h{min(i, 6)}" for i in range(1, 7)}
 
-        for para in doc.paragraphs:
+        def process_paragraph(p_elem) -> None:
+            """Process a single <w:p> element, extracting text runs + images."""
+            # Find the corresponding python-docx Paragraph object
+            para = None
+            for dp in doc.paragraphs:
+                if dp._element is p_elem:
+                    para = dp
+                    break
+            if para is None:
+                return
+
             style_name = (para.style.name if para.style else "") or ""
             text_runs = []
+
+            # Walk all runs, extracting both text and inline images
             for run in para.runs:
+                # Check for inline images in this run's XML
+                for drawing in run._element.findall(qn("w:drawing")):
+                    _extract_images_from_drawing(drawing, image_map, text_runs)
                 t = escape(run.text or "")
-                if not t:
-                    continue
-                if run.bold:
-                    t = f"<strong>{t}</strong>"
-                if run.italic:
-                    t = f"<em>{t}</em>"
-                if run.underline:
-                    t = f"<u>{t}</u>"
-                text_runs.append(t)
+                if t:
+                    if run.bold:
+                        t = f"<strong>{t}</strong>"
+                    if run.italic:
+                        t = f"<em>{t}</em>"
+                    if run.underline:
+                        t = f"<u>{t}</u>"
+                    text_runs.append(t)
+
             text = "".join(text_runs) or escape(para.text or "")
             if not text.strip():
-                continue
+                return
 
             if style_name in heading_map:
                 flush_list()
@@ -85,15 +147,39 @@ def extract_docx_html(raw: bytes) -> str | None:
             else:
                 flush_list()
                 parts.append(f"<p>{text}</p>")
-        flush_list()
 
-        for table in doc.tables:
+        def process_table(tbl_elem) -> None:
+            """Process a <w:tbl> element into an HTML table."""
+            flush_list()
             rows_html = []
-            for i, row in enumerate(table.rows):
+            for i, row in enumerate(tbl_elem.findall(qn("w:tr"))):
                 cell_tag = "th" if i == 0 else "td"
-                cells = "".join(f"<{cell_tag}>{escape(c.text)}</{cell_tag}>" for c in row.cells)
-                rows_html.append(f"<tr>{cells}</tr>")
-            parts.append("<table>" + "".join(rows_html) + "</table>")
+                cells_xml = row.findall(qn("w:tc"))
+                cell_parts = []
+                for tc in cells_xml:
+                    cell_text_parts = []
+                    # Extract text from all paragraphs in the cell
+                    for p in tc.findall(qn("w:p")):
+                        p_texts = []
+                        for r in p.findall(qn("w:r")):
+                            for t in r.findall(qn("w:t")):
+                                if t.text:
+                                    p_texts.append(escape(t.text))
+                        if p_texts:
+                            cell_text_parts.append(" ".join(p_texts))
+                    cell_parts.append(f"<{cell_tag}>{'<br/>'.join(cell_text_parts) or ''}</{cell_tag}>")
+                rows_html.append(f"<tr>{''.join(cell_parts)}</tr>")
+            if rows_html:
+                parts.append("<table>" + "".join(rows_html) + "</table>")
+
+        # Iterate body children in document order (paragraphs + tables interleaved)
+        for child in body:
+            tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+            if tag == "p":
+                process_paragraph(child)
+            elif tag == "tbl":
+                process_table(child)
+        flush_list()
 
         return "\n".join(parts) if parts else "<p><em>(空文档)</em></p>"
     except Exception:
