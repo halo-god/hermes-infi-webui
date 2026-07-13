@@ -714,10 +714,9 @@ async def get_file(
         from app.core.files import is_text_extractable
 
         data = await asyncio.to_thread(object_storage.get, f.storage_key)
-        # Only decode text-extractable formats; binary files return None
-        # so the frontend falls back to raw-download instead of ZIP garbage.
         if f.kind in OFFICE_EXTRACTORS:
-            content = None
+            # Re-extract HTML from the stored original bytes.
+            content = OFFICE_EXTRACTORS[f.kind](data) or None
         elif is_text_extractable(f.kind):
             content = data.decode("utf-8", "ignore")
         else:

@@ -131,13 +131,13 @@ function fileMode(f: FileItem | null): string {
   const e = fileExt(f);
   if (e === "md") return "md";
   // AI-written files are markdown text saved with a .docx label (a UX
-  // workaround, not a real binary document) — keep rendering those as
+  // workaround, not a real binary document) - keep rendering those as
   // markdown. A genuinely uploaded .docx has no created_by_agent and gets
   // the formatted office preview instead.
   if (e === "docx") return f.created_by_agent ? "md" : "office";
-  if (e === "xlsx" || e === "pptx") return "office";
-  if (e === "json") return "json";
+  if (e === "xlsx" || e === "pptx" || e === "rtf") return "office";
   if (e === "csv") return "csv";
+  if (e === "json") return "json";
   if (e === "html" || e === "htm") return "html";
   if (e === "pdf") return "pdf";
   if (IMAGE_EXTS.has(e)) return "image";

@@ -585,7 +585,8 @@ async def get_file_content(
         try:
             raw = await asyncio.to_thread(object_storage.get, wf.storage_key)
             if wf.kind in OFFICE_EXTRACTORS:
-                content = None
+                # Re-extract HTML from the stored original bytes.
+                content = OFFICE_EXTRACTORS[wf.kind](raw) or None
             elif is_text_extractable(wf.kind):
                 content = raw.decode("utf-8", "ignore")
             else:

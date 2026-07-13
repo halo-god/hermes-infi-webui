@@ -165,10 +165,58 @@ def extract_pptx_html(raw: bytes) -> str | None:
         return None
 
 
+def extract_csv_html(raw: bytes) -> str | None:
+    """Convert CSV bytes to an HTML table preview (first 200 rows)."""
+    try:
+        import io
+        import csv
+        from html import escape
+
+        text = raw.decode("utf-8", "ignore")
+        reader = csv.reader(io.StringIO(text))
+        parts: list[str] = ["<table>"]
+        row_count = 0
+        for row in reader:
+            if row_count >= 200:
+                parts.append("<p><em>(仅显示前 200 行，已截断)</em></p>")
+                break
+            tag = "th" if row_count == 0 else "td"
+            cells = "".join(f"<{tag}>{escape(c)}</{tag}>" for c in row)
+            parts.append(f"<tr>{cells}</tr>")
+            row_count += 1
+        parts.append("</table>")
+        return "\n".join(parts) if row_count > 0 else None
+    except Exception:
+        return None
+
+
+def extract_rtf_html(raw: bytes) -> str | None:
+    """Extract plain text from RTF and wrap in <p> tags."""
+    try:
+        import re
+        text = raw.decode("utf-8", "ignore")
+        # Strip RTF control words and groups
+        text = re.sub(r"\\'[0-9a-fA-F]{2}", "", text)
+        text = re.sub(r"\\[a-zA-Z]+-?\d*\s?", "", text)
+        text = re.sub(r"[{}]", "", text)
+        text = re.sub(r"\\\*", "", text)
+        text = re.sub(r"\\\n", "\n", text)
+        text = text.strip()
+        if not text:
+            return None
+        from html import escape
+        paragraphs = [f"<p>{escape(p)}</p>" for p in text.split("\n\n") if p.strip()]
+        return "\n".join(paragraphs) if paragraphs else None
+    except Exception:
+        return None
+
+
 OFFICE_EXTRACTORS = {
     "docx": extract_docx_html,
     "xlsx": extract_xlsx_html,
     "pptx": extract_pptx_html,
+    "csv": extract_csv_html,
+    "rtf": extract_rtf_html,
 }
 
 
@@ -177,7 +225,7 @@ def is_text_extractable(kind: str) -> bool:
     return kind.lower() in {
         "md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
         "yaml", "yml", "toml", "sh", "bash", "log", "xml", "css", "diff", "patch", "pdf",
-        "docx", "xlsx", "pptx",
+        "docx", "xlsx", "pptx", "rtf",
     }
 
 
