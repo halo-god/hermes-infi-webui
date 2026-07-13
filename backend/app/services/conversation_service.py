@@ -293,8 +293,12 @@ async def _resolve_attached_files(
 
         # Write file content to workspace so agent can read it — confine
         # the (possibly agent-authored) name so it can't escape ws_dir.
+        # Write file content to workspace so agent can read it.
+        # For office HTML: write the HTML AND a .txt plain-text version
+        # so read_file gets clean text, not raw HTML tags.
         if ws_dir and file_content and not is_image:
             fpath = confine_to_dir(ws_dir, rel_path)
+            is_office_html = ext in OFFICE_EXTRACTORS and "<" in file_content
 
             def _write_attachment():
                 os.makedirs(os.path.dirname(fpath), exist_ok=True)
@@ -304,6 +308,11 @@ async def _resolve_attached_files(
                 else:
                     with open(fpath, "w", encoding="utf-8") as fh:
                         fh.write(file_content)
+                if is_office_html:
+                    txt_path = fpath.rsplit(".", 1)[0] + ".txt"
+                    plain = _html_to_plain_text(file_content)
+                    with open(txt_path, "w", encoding="utf-8") as fh:
+                        fh.write(plain)
 
             await asyncio.to_thread(_write_attachment)
 
@@ -806,8 +815,29 @@ async def _build_skills_prompt(
     return prompt, [s.id for s in skills]
 
 
+import re as _re_for_html  # noqa: E402
+
 _KNOWLEDGE_PER_ITEM = 2000   # chars per bound knowledge entry
 _KNOWLEDGE_TOTAL = 8000      # chars across all entries
+
+
+def _html_to_plain_text(html: str) -> str:
+    """Convert office-extracted HTML to clean plain text for AI prompt injection.
+
+    The same docx that produces 15KB of <table>/<tr>/<td> HTML for human
+    preview becomes ~2KB of readable text for the AI - no token waste.
+    """
+    # Block-level tags -> newlines
+    text = _re_for_html.sub(r"<\s*/?(p|div|h[1-6]|br|tr|li|table)[^>]*>", "\n", html, flags=_re_for_html.IGNORECASE)
+    # Table cells -> tab separator
+    text = _re_for_html.sub(r"<\s*/?t[dh][^>]*>", "\t", text, flags=_re_for_html.IGNORECASE)
+    # Strip all remaining tags
+    text = _re_for_html.sub(r"<[^>]+>", "", text)
+    # Decode common entities
+    text = text.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
+    # Collapse whitespace per line, trim empty lines
+    lines = [_re_for_html.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
+    return "\n".join(line for line in lines if line)
 
 
 async def _collect_folder_knowledge_ids(
@@ -929,7 +959,12 @@ async def _build_knowledge_prompt(db: AsyncSession, profile: Profile | None) -> 
         entry = await db.get(TeamKnowledge, kid) or await db.get(ProjectDoc, kid)
         if entry is None or not getattr(entry, "content", None):
             continue
-        body = entry.content[:_KNOWLEDGE_PER_ITEM]
+        # Office HTML is for human preview only. For AI prompt injection,
+        # convert to plain text to avoid massive tag overhead token waste.
+        content = entry.content
+        if "<" in content and ">" in content:
+            content = _html_to_plain_text(content)
+        body = content[:_KNOWLEDGE_PER_ITEM]
         if used + len(body) > _KNOWLEDGE_TOTAL:
             body = body[: max(0, _KNOWLEDGE_TOTAL - used)]
         if not body:
@@ -955,9 +990,18 @@ async def dispatch(
     skip_agent: bool = False,
     profile_id_override: str | None = None,
     task_id: uuid.UUID | None = None,
+    agent_id_override: str | None = None,
 ) -> tuple[Message, Message | None]:
-    """Route to single or roundtable based on the conversation's active agents."""
-    agents = list(convo.active_agent_ids or [convo.primary_agent_id])
+    """Route to single or roundtable based on the conversation's active agents.
+
+    When agent_id_override is set (group chat @-mention targeting a specific
+    agent), force single-agent mode with that agent - do NOT fall into the
+    roundtable branch based on the conversation's full active_agent_ids.
+    """
+    if agent_id_override:
+        agents = [agent_id_override]
+    else:
+        agents = list(convo.active_agent_ids or [convo.primary_agent_id])
     if skip_agent:
         return await send_user_only(
             db, convo, text, attached_file_ids=attached_file_ids, owner_id=owner_id, task_id=task_id
@@ -1698,6 +1742,7 @@ async def dispatch_group(
             mcp_servers=mcp_servers,
             agent_id_override=target_agent_id,
             profile_id=effective_profile_id,
+            task_id=task_id,
         )
         return user_msg, agent_msg
 
