@@ -138,6 +138,8 @@ class GroupMember(UUIDPrimaryKey, Timestamps, Base):
     agent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     role: Mapped[str] = mapped_column(String(16), default="member", nullable=False)
     # "admin" = 群主, "member" = 普通成员
+    # 仅对 AI 成员有意义：开启后即使没被 @ 也会参与应答（与 @提及 是"或"关系）。
+    auto_reply: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     joined_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

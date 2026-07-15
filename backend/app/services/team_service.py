@@ -526,6 +526,7 @@ async def add_doc(db: AsyncSession, project_id: uuid.UUID, data, user: User) -> 
         project_id=project_id, name=data.name, kind=data.kind,
         size_bytes=data.size_bytes, created_by_name=user.name, created_by=user.id,
         content=getattr(data, "content", None),
+        storage_key=getattr(data, "storage_key", None),
         source_conversation_id=getattr(data, "source_conversation_id", None),
         source_message_id=getattr(data, "source_message_id", None),
     )

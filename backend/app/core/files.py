@@ -1,7 +1,11 @@
 """File-safety helpers: bounded upload reads + path-traversal confinement."""
 from __future__ import annotations
 
+import asyncio
+import base64
 import os
+import uuid
+from dataclasses import dataclass
 
 from fastapi import HTTPException, UploadFile
 
@@ -306,13 +310,88 @@ OFFICE_EXTRACTORS = {
 }
 
 
+PLAIN_TEXT_EXTS = frozenset({
+    "md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
+    "yaml", "yml", "toml", "sh", "bash", "log", "xml", "css", "diff", "patch",
+})
+
+
 def is_text_extractable(kind: str) -> bool:
     """Return True for file kinds we can extract human-readable text from."""
-    return kind.lower() in {
-        "md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
-        "yaml", "yml", "toml", "sh", "bash", "log", "xml", "css", "diff", "patch", "pdf",
-        "docx", "xlsx", "pptx", "rtf",
-    }
+    kind = kind.lower()
+    return kind in PLAIN_TEXT_EXTS or kind == "pdf" or kind in OFFICE_EXTRACTORS
+
+
+@dataclass
+class ProcessedUpload:
+    content: str | None
+    storage_key: str | None
+    size_bytes: int
+
+
+async def process_upload(
+    raw: bytes,
+    ext: str,
+    storage_key_prefix: str,
+    name: str,
+    content_type: str | None = None,
+) -> ProcessedUpload:
+    """Decide how to store + extract an uploaded file's bytes.
+
+    Single source of truth for "large vs. small file" handling, shared by
+    every upload endpoint (conversation attachments, personal file storage,
+    team knowledge base, project docs) so they no longer each reinvent (and
+    subtly diverge on) this decision:
+
+    - Office docs (docx/xlsx/pptx/csv/rtf): `content` holds extracted preview
+      HTML, not the raw bytes, so the raw bytes always go to object storage
+      regardless of size — otherwise the "download original" route would
+      have nothing but HTML to serve back.
+    - Anything else bigger than settings.file_offload_threshold_kb, or when
+      the storage backend is minio: raw bytes go to object storage; text or
+      PDF content is still extracted (best-effort) for prompt injection.
+    - Everything else (small, non-office): inlined directly — text types
+      decoded as-is, PDFs text-extracted, everything else base64.
+
+    `storage_key_prefix` is the caller's namespace (e.g. "conversations/{id}"
+    or "team-knowledge/{id}"); the object key becomes
+    "{storage_key_prefix}/{uuid}/{name}" so the original filename/extension
+    stays visible when browsing the bucket directly.
+    """
+    from app.config import settings
+    from app.core import object_storage
+
+    ext = ext.lower()
+    ctype = content_type or "application/octet-stream"
+    threshold_bytes = settings.file_offload_threshold_kb * 1024
+    storage_key: str | None = None
+    content: str | None = None
+
+    if ext in OFFICE_EXTRACTORS:
+        storage_key = f"{storage_key_prefix}/{uuid.uuid4().hex}/{name}"
+        try:
+            await asyncio.to_thread(object_storage.put, storage_key, raw, ctype)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503, detail="文件预览服务不可用，请检查对象存储配置"
+            ) from exc
+        content = OFFICE_EXTRACTORS[ext](raw) or "<p><em>(无法解析文档内容)</em></p>"
+    elif len(raw) > threshold_bytes or settings.storage_backend == "minio":
+        storage_key = f"{storage_key_prefix}/{uuid.uuid4().hex}/{name}"
+        await asyncio.to_thread(object_storage.put, storage_key, raw, ctype)
+        if ext == "pdf":
+            content = extract_pdf_text(raw)
+        elif ext in PLAIN_TEXT_EXTS:
+            content = raw.decode("utf-8", "ignore")
+    else:
+        if ext in PLAIN_TEXT_EXTS:
+            content = raw.decode("utf-8", "ignore")
+        elif ext == "pdf":
+            content = extract_pdf_text(raw)
+        else:
+            content = base64.b64encode(raw).decode("ascii")
+
+    return ProcessedUpload(content=content, storage_key=storage_key, size_bytes=len(raw))
 
 
 async def read_upload_capped(file: UploadFile, max_bytes: int) -> bytes:

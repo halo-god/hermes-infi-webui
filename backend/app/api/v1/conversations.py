@@ -25,7 +25,7 @@ from app.core import metrics, ratelimit
 from app.core import redis as redis_core
 from app.core.files import (
     read_upload_capped,
-    extract_pdf_text,
+    process_upload,
     is_text_extractable,
     OFFICE_EXTRACTORS,
 )
@@ -49,6 +49,7 @@ from app.schemas.conversation import (
     GroupCreate,
     AddMemberRequest,
     GroupMemberOut,
+    MemberUpdateRequest,
     MarkReadResponse,
     MessageOut,
     ReactionRequest,
@@ -488,7 +489,6 @@ async def send_message(
             knowledge_ids=payload.knowledge_ids,
             owner_id=user.id,
             skip_agent=payload.skip_agent,
-            profile_id_override=payload.profile_id,
             reply_to_id=payload.reply_to_id,
             task_id=payload.task_id,
         )
@@ -662,6 +662,7 @@ async def conversation_ws(
                         )
                         continue
                     file_ids = payload.get("attached_file_ids") or []
+                    knowledge_ids = payload.get("knowledge_ids") or []
                     p_id = payload.get("profileId") or payload.get("profile_id") or None
                     mentions = payload.get("mentions") or []
                     reply_raw = payload.get("reply_to_id")
@@ -684,15 +685,20 @@ async def conversation_ws(
                         c = await svc.get_conversation(msg_db, conversation_id, user_id)
                         if c and c.type == "group":
                             # Group: route via @mentions (human↔human / human↔AI / roundtable).
+                            # profileId is a personal-chat concept (the Composer's default
+                            # assistant) and must never override who a group @-mention
+                            # resolved to — deliberately not forwarded here.
                             await svc.dispatch_group(
                                 msg_db, c, text, mentions,
-                                attached_file_ids=file_ids, owner_id=user_id,
-                                profile_id_override=p_id, reply_to_id=reply_to_id,
+                                attached_file_ids=file_ids, knowledge_ids=knowledge_ids,
+                                owner_id=user_id,
+                                reply_to_id=reply_to_id,
                                 task_id=task_id,
                             )
                         elif c:
                             await svc.dispatch(
-                                msg_db, c, text, attached_file_ids=file_ids, owner_id=user_id,
+                                msg_db, c, text, attached_file_ids=file_ids,
+                                knowledge_ids=knowledge_ids, owner_id=user_id,
                                 profile_id_override=p_id, task_id=task_id,
                             )
             elif action == "cancel":
@@ -726,9 +732,6 @@ async def get_file(
         raise HTTPException(status_code=404, detail="文件不存在")
     content = f.content
     if content is None and f.storage_key:
-        from app.core import object_storage
-        from app.core.files import is_text_extractable
-
         data = await asyncio.to_thread(object_storage.get, f.storage_key)
         if f.kind in OFFICE_EXTRACTORS:
             # Re-extract HTML from the stored original bytes.
@@ -769,7 +772,6 @@ async def get_file_raw(
     data: bytes
     if f.storage_key:
         try:
-            from app.core import object_storage
             data = await asyncio.to_thread(object_storage.get, f.storage_key)
         except Exception:
             raise HTTPException(status_code=503, detail="存储不可用")
@@ -865,61 +867,17 @@ async def upload_file(
     name = re.sub(r"[^\w.\-\u4e00-\u9fff]", "_", file.filename or "upload").strip("_. ") or "upload"
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"
 
-    # Threshold: files > 256 KB always go to object storage (never inline base64 in DB)
-    OFFLOAD_THRESHOLD = 256 * 1024  # 256 KiB
-    content: str | None = None
-    storage_key: str | None = None
-
-    # Office docs (docx/xlsx/pptx): `content` holds extracted preview HTML,
-    # not the raw bytes — so the ORIGINAL file must always live in object
-    # storage (regardless of size) for the raw-download route to serve the
-    # true original rather than base64 of HTML text. If object storage is
-    # unreachable, fail loudly rather than silently serving the wrong bytes.
-    if ext in OFFICE_EXTRACTORS:
-        storage_key = f"conversations/{convo.id}/{uuid.uuid4().hex}/{name}"
-        try:
-            await asyncio.to_thread(
-                object_storage.put,
-                storage_key,
-                raw,
-                file.content_type or "application/octet-stream",
-            )
-        except Exception:
-            raise HTTPException(status_code=503, detail="文件预览服务不可用，请检查对象存储配置")
-        content = OFFICE_EXTRACTORS[ext](raw) or "<p><em>(无法解析文档内容)</em></p>"
-    # 1. If large OR backend is minio → offload binary to object storage
-    elif len(raw) > OFFLOAD_THRESHOLD or settings.storage_backend == "minio":
-        storage_key = f"conversations/{convo.id}/{uuid.uuid4().hex}/{name}"
-        await asyncio.to_thread(
-            object_storage.put,
-            storage_key,
-            raw,
-            file.content_type or "application/octet-stream",
-        )
-        # For text-extractable files (inc. PDF), also extract text for agent consumption
-        if is_text_extractable(ext):
-            if ext == "pdf":
-                content = extract_pdf_text(raw)
-            else:
-                content = raw.decode("utf-8", "ignore")
-    else:
-        # Small files → inline in Postgres as before
-        if ext in {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
-                   "yaml", "yml", "toml", "sh", "bash", "log", "xml", "css", "diff", "patch"}:
-            content = raw.decode("utf-8", "ignore")
-        elif ext == "pdf":
-            content = extract_pdf_text(raw)
-        else:
-            import base64
-            content = base64.b64encode(raw).decode("ascii")
+    processed = await process_upload(
+        raw, ext, f"conversations/{convo.id}", name, content_type=file.content_type,
+    )
 
     wf = WorkspaceFile(
         conversation_id=convo.id,
         name=name,
         kind=ext,
-        content=content,
-        storage_key=storage_key,
-        size_bytes=len(raw),
+        content=processed.content,
+        storage_key=processed.storage_key,
+        size_bytes=processed.size_bytes,
         created_by_agent=None,
     )
     db.add(wf)
@@ -1262,6 +1220,28 @@ async def remove_member(
             raise HTTPException(status_code=403, detail="只有群管理员可以移除其他成员")
     # member_id could be user_id — try removing by user_id
     await svc.remove_group_member(db, conversation_id, user_id=member_id)
+
+
+@router.patch("/{conversation_id}/members/{member_id}", response_model=GroupMemberOut)
+async def update_member(
+    conversation_id: uuid.UUID,
+    member_id: uuid.UUID,
+    payload: MemberUpdateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """更新群成员设置（目前仅 auto_reply，即该 AI 是否在未被 @ 时也自动应答）。"""
+    convo = await _require_convo(db, conversation_id, user)
+    if convo.type != "group":
+        raise HTTPException(status_code=400, detail="该会话不是群聊")
+    if payload.auto_reply is not None:
+        member = await svc.set_member_auto_reply(
+            db, conversation_id, member_id, payload.auto_reply
+        )
+        if member is None:
+            raise HTTPException(status_code=404, detail="成员不存在或不是 AI 助手")
+        return GroupMemberOut.model_validate(member)
+    raise HTTPException(status_code=422, detail="没有可更新的字段")
 
 
 # ── Read state · message edit / recall / reactions ──────────────────────────

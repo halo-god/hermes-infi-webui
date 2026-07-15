@@ -18,7 +18,13 @@ from app.db.models.user import User
 from app.db.models.workspace import WorkspaceFile
 from app.deps import get_current_user, get_db, user_from_ticket_or_header
 from app.core import object_storage
-from app.core.files import read_upload_capped, extract_pdf_text, is_text_extractable, OFFICE_EXTRACTORS
+from app.core.files import (
+    read_upload_capped,
+    process_upload,
+    extract_pdf_text,
+    is_text_extractable,
+    OFFICE_EXTRACTORS,
+)
 from app.config import settings
 
 router = APIRouter()
@@ -362,41 +368,11 @@ async def upload_standalone_file(
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"
 
     raw = await read_upload_capped(file, settings.max_upload_bytes)
-    OFFLOAD_THRESHOLD = 256 * 1024  # 256 KiB
-    content: str | None = None
-    storage_key: str | None = None
-
-    # Large files or minio backend → offload binary; extract text when possible
-    if len(raw) > OFFLOAD_THRESHOLD or settings.storage_backend == "minio":
-        storage_key = f"standalone/{user.id}/{uuid.uuid4().hex}/{name}"
-        await asyncio.to_thread(
-            object_storage.put,
-            storage_key,
-            raw,
-            file.content_type or "application/octet-stream",
-        )
-        if ext in OFFICE_EXTRACTORS:
-            content = OFFICE_EXTRACTORS[ext](raw) or "<p><em>(无法解析文档内容)</em></p>"
-        elif is_text_extractable(ext):
-            if ext == "pdf":
-                content = extract_pdf_text(raw)
-            elif ext in {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
-                       "yaml", "yml", "toml", "sh", "bash", "log", "xml", "css", "diff", "patch"}:
-                content = raw.decode("utf-8", "ignore")
-            else:
-                content = None
-    else:
-        # Small files → inline
-        if ext in OFFICE_EXTRACTORS:
-            content = OFFICE_EXTRACTORS[ext](raw) or "<p><em>(无法解析文档内容)</em></p>"
-        elif ext in {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
-                   "yaml", "yml", "toml", "sh", "bash", "log", "xml", "css", "diff", "patch"}:
-            content = raw.decode("utf-8", "ignore")
-        elif ext == "pdf":
-            content = extract_pdf_text(raw)
-        else:
-            import base64
-            content = base64.b64encode(raw).decode("ascii")
+    processed = await process_upload(
+        raw, ext, f"standalone/{user.id}", name, content_type=file.content_type,
+    )
+    content = processed.content
+    storage_key = processed.storage_key
 
     # Create a "virtual" conversation for standalone files if not exists
     # Actually, let's use a special conversation_id = NULL approach
@@ -587,6 +563,8 @@ async def get_file_content(
             if wf.kind in OFFICE_EXTRACTORS:
                 # Re-extract HTML from the stored original bytes.
                 content = OFFICE_EXTRACTORS[wf.kind](raw) or None
+            elif wf.kind == "pdf":
+                content = extract_pdf_text(raw)
             elif is_text_extractable(wf.kind):
                 content = raw.decode("utf-8", "ignore")
             else:
