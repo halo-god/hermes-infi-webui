@@ -36,7 +36,16 @@ export interface SendOptions {
   replyToId?: string;
 }
 
-const emit = defineEmits<{ "update:modelValue": [string]; send: [SendOptions]; cancel: []; command: [string]; typing: []; "cancel-reply": [] }>();
+export interface SendPayload {
+  profileId?: string;
+  stagedFiles?: File[];
+  knowledgeIds?: string[];
+  attachedFileIds?: string[];
+  mentions?: string[];
+  replyToId?: string;
+}
+
+const emit = defineEmits<{ "update:modelValue": [string]; send: [SendPayload]; cancel: []; command: [string]; typing: []; "cancel-reply": [] }>();
 
 const ta = ref<HTMLTextAreaElement | null>(null);
 const wrap = ref<HTMLElement | null>(null);

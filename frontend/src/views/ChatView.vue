@@ -521,30 +521,6 @@ async function onSend(opts?: SendOptions) {
   if (chat.isActivelyStreaming(chat.activeId || "")) return;
   draft.value = "";
   if (opts?.stagedFiles?.length) showWorkspace.value = true;
-  // Prepend knowledge content inline
-  console.log('[onSend] knowledgeIds:', opts?.knowledgeIds, 'team_id:', activeConvo.value?.team_id, 'teamKnowledge:', teamKnowledge.value.length);
-  if (opts?.knowledgeIds?.length && activeConvo.value?.team_id) {
-    const tid = activeConvo.value.team_id;
-    const blocks: string[] = [];
-    for (const kid of opts.knowledgeIds) {
-      try {
-        const content = await teamsApi.knowledgeContent(tid, kid);
-        const item = teamKnowledge.value.find((k) => k.id === kid);
-        console.log('[onSend] knowledge', kid, 'content length:', content?.length, 'name:', item?.name);
-        if (content) blocks.push(`【知识库: ${item?.name || kid}】\n${content}`);
-      } catch (e) { console.error('[onSend] knowledge fetch failed:', kid, e); }
-    }
-    if (blocks.length) {
-      // Wrap knowledge content in markers so it can be hidden in display but sent to AI
-      const knowledgeBlock = blocks.map(b => `<knowledge>${b}</knowledge>`).join("\n\n");
-      text = knowledgeBlock + "\n\n" + text;
-      console.log('[onSend] final text length:', text.length);
-    }
-  }
-  // File references are handled via attached_file_ids in the API payload.
-  // We do NOT inline file content into the text — the backend resolves
-  // attachments and tells the agent where they are in the workspace.
-  // This avoids 422 (text too large) and keeps bubbles clean.
   await chat.send(text, landingProfile.value?.default_agent_id || "hermes", {
     ...opts,
     taskId: discussTask.value?.id,
@@ -556,6 +532,10 @@ async function onSend(opts?: SendOptions) {
 function openFile(fid: string) {
   openFileId.value = fid;
   showWorkspace.value = true;
+}
+function knowledgeName(kid: string): string {
+  const item = teamKnowledge.value.find((k) => k.id === kid);
+  return item?.name || kid.slice(0, 8);
 }
 
 // ── Message actions ──
@@ -734,16 +714,6 @@ async function onChannelModeChange(mode: string) {
   }
 }
 
-// ── Knowledge reference display filter ──
-function extractKnowledgeRefs(text: string): string[] {
-  const refs: string[] = [];
-  const regex = /<knowledge>[\s\S]*?【知识库:\s*([^】]+)】[\s\S]*?<\/knowledge>/g;
-  let m;
-  while ((m = regex.exec(text)) !== null) {
-    refs.push(m[1].trim());
-  }
-  return refs;
-}
 function displayText(text: string): string {
   // Remove <knowledge>...</knowledge> blocks, keep the rest
   return text.replace(/<knowledge>[\s\S]*?<\/knowledge>\s*/g, "").trim();
@@ -1114,11 +1084,10 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                     </div>
                     <div v-if="chat.messages[row.index].deleted_at" class="recalled-msg">该消息已撤回</div>
                     <div v-else-if="displayText(chat.messages[row.index].content.text)" class="md-body" v-html="highlightMentions(displayHtml(chat.messages[row.index].content.text))"></div>
-                    <div v-if="displayText(chat.messages[row.index].content.text) && extractKnowledgeRefs(chat.messages[row.index].content.text).length" class="knowledge-refs-badge">
-                      <Icon name="doc" :size="11" /> 引用了知识库: {{ extractKnowledgeRefs(chat.messages[row.index].content.text).join(', ') }}
-                    </div>
-                    <div v-if="!displayText(chat.messages[row.index].content.text) && extractKnowledgeRefs(chat.messages[row.index].content.text).length" class="knowledge-refs-badge standalone">
-                      <Icon name="doc" :size="11" /> 已发送知识库: {{ extractKnowledgeRefs(chat.messages[row.index].content.text).join(', ') }}
+                    <div v-if="chat.messages[row.index].content.knowledge_refs?.length" class="msg-files">
+                      <button v-for="k in chat.messages[row.index].content.knowledge_refs" :key="k.id" class="msg-file-chip knowledge-chip">
+                        <Icon name="book" :size="11" /> {{ k.name || knowledgeName(k.id) }}
+                      </button>
                     </div>
                     <div v-if="chat.messages[row.index].content.files?.length" class="msg-files">
                       <button v-for="f in chat.messages[row.index].content.files" :key="f.id" class="msg-file-chip" @click="openFile(f.id)">
