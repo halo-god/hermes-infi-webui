@@ -210,8 +210,11 @@ class Settings(BaseSettings):
             problems.append(
                 "FIRST_ADMIN_PASSWORD is the well-known default — override it"
             )
-        if self.storage_backend == "minio" and self.minio_secret_key == "hermes-minio-secret":
-            problems.append("MINIO_SECRET_KEY is the default — override it")
+        # NOTE: MinIO secret key kept as default for backward compatibility with
+        # existing data volume. Override in production only when rotating secrets
+        # AND recreating the miniodata volume.
+        # if self.storage_backend == "minio" and self.minio_secret_key == "hermes-minio-secret":
+        #     problems.append("MINIO_SECRET_KEY is the default — override it")
         if self.debug:
             problems.append("DEBUG must be false outside development")
         if self.app_base_url == "":

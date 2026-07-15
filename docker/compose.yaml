@@ -28,17 +28,18 @@ services:
 
   redis:
     image: docker.m.daocloud.io/library/redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
     restart: unless-stopped
     volumes:
       - redisdata:/data
+      - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "InfiLed@Hermes_redis", "-p", "1979", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
     ports:
-      - "6379:6379"
+      - "127.0.0.1:1979:1979"
     deploy:
       resources:
         limits:
@@ -76,7 +77,7 @@ services:
       DEBUG: ${DEBUG:-false}
       SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-hermes}:${POSTGRES_PASSWORD:-hermes}@postgres:5432/${POSTGRES_DB:-hermes}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:InfiLed%40Hermes_redis@redis:1979/0
       CORS_ORIGINS: '["http://localhost:8080","http://localhost:5173"]'
       APP_BASE_URL: ""
       FIRST_ADMIN_PASSWORD: ${FIRST_ADMIN_PASSWORD:-Hermes@2026}
@@ -126,7 +127,7 @@ services:
     image: hermes-agent-runner:latest
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-hermes}:${POSTGRES_PASSWORD:-hermes}@postgres:5432/${POSTGRES_DB:-hermes}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:InfiLed%40Hermes_redis@redis:1979/0
       SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
       WORKSPACE_ROOT: /var/hermes/workspaces
       HERMES_BIN: ${HERMES_BIN:-hermes}
@@ -265,7 +266,7 @@ services:
   redis-exporter:
     image: oliver006/redis_exporter:latest
     environment:
-      REDIS_ADDR: "redis://redis:6379"
+      REDIS_ADDR: "redis://:InfiLed@Hermes_redis@redis:1979"
     ports:
       - "9121:9121"
     depends_on:
