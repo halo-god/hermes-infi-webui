@@ -1,6 +1,8 @@
 """Conversation + message persistence and the send→enqueue hot path."""
 from __future__ import annotations
 
+import asyncio
+import base64
 import os
 import re
 import uuid
@@ -220,6 +222,7 @@ async def create_conversation(
 
 async def _resolve_attached_files(
     db: AsyncSession, file_ids: list[str], conversation_id: str | None = None,
+    owner_id: uuid.UUID | None = None,
 ) -> list[dict]:
     """Look up workspace files by id, write to agent workspace dir, return metadata + content.
 
@@ -252,6 +255,21 @@ async def _resolve_attached_files(
         ws_dir = os.path.join(settings.workspace_root, conversation_id, "attachments")
         os.makedirs(ws_dir, exist_ok=True)
 
+    # Cache the user's file-storage conversation id for cross-conv file refs.
+    file_storage_convo_id: uuid.UUID | None = None
+    if owner_id:
+        from app.db.models.conversation import Conversation
+        storage_convo = (
+            await db.execute(
+                select(Conversation).where(
+                    Conversation.owner_id == owner_id,
+                    Conversation.title == "__file_storage__",
+                )
+            )
+        ).scalars().first()
+        if storage_convo:
+            file_storage_convo_id = storage_convo.id
+
     result = []
     for raw_id in file_ids:
         try:
@@ -259,33 +277,56 @@ async def _resolve_attached_files(
         except ValueError:
             continue
         f = await db.get(WorkspaceFile, fid)
-        # Security: only allow files belonging to the current conversation
-        # to prevent cross-user/cross-conversation file content exfiltration.
-        if f is None or str(f.conversation_id) != str(conversation_id):
+        # Security: only allow files belonging to the current conversation,
+        # OR the user's global __file_storage__ conversation, to prevent
+        # cross-user/cross-conversation file content exfiltration.
+        if f is None:
             continue
+        f_conv_id = f.conversation_id
+        if str(f_conv_id) != str(conversation_id):
+            if file_storage_convo_id is None or f_conv_id != file_storage_convo_id:
+                continue
         ext = (f.kind or "").lower()
         mime = MIME_MAP.get(ext, "application/octet-stream")
         is_image = ext in IMAGE_EXTS
         is_text = ext in TEXT_EXTS
         folder = (f.folder_path or "").strip("/")
 
-        # Resolve content: storage_key wins, then inline content
+        # Resolve content: storage_key wins, then inline content.
+        # For large files (>100KB) truncate inline content — the agent should
+        # read the workspace file in chunks via read_file.
+        MAX_INLINE_BYTES = 100_000
         file_content = f.content or ""
         raw_bytes: bytes | None = None
+        truncated = False
         if f.storage_key and not file_content:
             try:
-                import asyncio
                 from app.core import object_storage
                 raw_bytes = await asyncio.to_thread(object_storage.get, f.storage_key)
-                if ext in OFFICE_EXTRACTORS:
-                    file_content = OFFICE_EXTRACTORS[ext](raw_bytes) or ""
-                elif is_text and ext != "pdf":
-                    file_content = raw_bytes.decode("utf-8", "ignore")
+                if len(raw_bytes) > MAX_INLINE_BYTES:
+                    truncated = True
+                    if ext in OFFICE_EXTRACTORS:
+                        file_content = OFFICE_EXTRACTORS[ext](raw_bytes) or ""
+                        if len(file_content) > MAX_INLINE_BYTES:
+                            file_content = file_content[:MAX_INLINE_BYTES] + "\n\n... [内容已截断，文件较大，请使用 read_file 工具分段读取]"
+                    elif is_text and ext != "pdf":
+                        file_content = raw_bytes.decode("utf-8", "ignore")
+                        if len(file_content) > MAX_INLINE_BYTES:
+                            file_content = file_content[:MAX_INLINE_BYTES] + "\n\n... [内容已截断，文件较大，请使用 read_file 工具分段读取]"
+                    else:
+                        file_content = ""
                 else:
-                    import base64
-                    file_content = base64.b64encode(raw_bytes).decode("ascii")
+                    if ext in OFFICE_EXTRACTORS:
+                        file_content = OFFICE_EXTRACTORS[ext](raw_bytes) or ""
+                    elif is_text and ext != "pdf":
+                        file_content = raw_bytes.decode("utf-8", "ignore")
+                    else:
+                        file_content = base64.b64encode(raw_bytes).decode("ascii")
             except Exception:
                 file_content = ""
+        elif file_content and len(file_content) > MAX_INLINE_BYTES:
+            truncated = True
+            file_content = file_content[:MAX_INLINE_BYTES] + "\n\n... [内容已截断，文件较大，请使用 read_file 工具分段读取]"
 
         # Build relative path preserving folder structure (e.g. "testfolder/foo.md")
         rel_name = safe_relative_path(f.name)
@@ -546,7 +587,7 @@ async def send_message(
     is_first_turn = convo.acp_session_id is None
     reply_agent_id = agent_id_override or convo.primary_agent_id
 
-    attached = await _resolve_attached_files(db, attached_file_ids or [], conversation_id=str(convo.id))
+    attached = await _resolve_attached_files(db, attached_file_ids or [], conversation_id=str(convo.id), owner_id=owner_id)
     if existing_user_msg is None:
         user_content: dict = {"text": text}
         if attached:
@@ -671,7 +712,7 @@ async def send_roundtable(
     explicit multi-agent/group roundtable, so the frontend can render it as a
     single synthesized answer instead of a side-by-side compare.
     """
-    attached = await _resolve_attached_files(db, attached_file_ids or [], conversation_id=str(convo.id))
+    attached = await _resolve_attached_files(db, attached_file_ids or [], conversation_id=str(convo.id), owner_id=owner_id)
     if existing_user_msg is None:
         user_content: dict = {"text": text}
         if attached:
@@ -1633,10 +1674,18 @@ async def _persist_group_user_msg(
     task_id: uuid.UUID | None = None,
 ) -> Message:
     """持久化群聊用户消息（统一入口，附带文件 + 回复引用）。"""
-    attached = await _resolve_attached_files(db, attached_file_ids or [], conversation_id=str(convo.id))
+    MAX_MSG_BYTES = 50_000
+    if len(text) > MAX_MSG_BYTES:
+        text = text[:MAX_MSG_BYTES] + "\n\n... [消息内容已截断，超过50KB]"
+
+    attached = await _resolve_attached_files(db, attached_file_ids or [], conversation_id=str(convo.id), owner_id=owner_id)
     content: dict = {"text": text}
     if attached:
-        content["files"] = attached
+        # Only persist lightweight metadata for files, never full content
+        content["files"] = [
+            {"id": f["id"], "name": f["name"], "kind": f.get("kind"), "workspace_path": f.get("workspace_path")}
+            for f in attached
+        ]
     user_msg = Message(
         conversation_id=convo.id,
         owner_id=owner_id,
