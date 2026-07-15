@@ -372,6 +372,30 @@ async def _resolve_attached_files(
 
 # ── Prompt directives (single source — these used to be duplicated inline) ──
 
+# Maximum inline knowledge block size (chars). Anything larger is truncated
+# with a hint so the agent can read the file via workspace tools.
+_MAX_KNOWLEDGE_INLINE = 5_000
+
+
+def _truncate_inline_knowledge(text: str, max_chars: int = _MAX_KNOWLEDGE_INLINE) -> str:
+    """Clamp oversized <knowledge> blocks inside user text to prevent context explosion."""
+    if not text or len(text) <= max_chars:
+        return text
+    import re
+    pattern = re.compile(r"<knowledge>.*?</knowledge>", re.DOTALL)
+
+    def _clamp(m: re.Match) -> str:
+        block = m.group(0)
+        if len(block) <= max_chars:
+            return block
+        # Preserve the opening tag and title line, truncate body
+        head = block[:300]
+        tail = block[-50:] if "</knowledge>" in block else "</knowledge>"
+        return head + f"\n\n... [内容已截断，文件较大，请使用 read_file 工具分段读取]\n\n" + tail
+
+    return pattern.sub(_clamp, text)
+
+
 _FILE_WRITE_PREAMBLE = (
     "【文件写入规范】当你需要为用户创建、生成或导出文件时，"
     "必须使用 write_file 工具将文件写入当前工作目录（cwd）。"

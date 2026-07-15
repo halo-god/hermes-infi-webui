@@ -5,7 +5,6 @@ import asyncio
 import json
 import re
 import uuid
-
 from fastapi import (
     APIRouter,
     Depends,
@@ -130,6 +129,17 @@ async def _require_convo(db, conversation_id: uuid.UUID, user: User):
         raise HTTPException(status_code=404, detail="会话不存在")
     return convo
 
+
+
+
+def _truncate_knowledge_blocks(text: str, max_block: int = 50_000) -> str:
+    """Truncate oversized <knowledge> blocks to prevent context length explosion."""
+    def _repl(m):
+        block = m.group(0)
+        if len(block) > max_block:
+            return block[:max_block] + "\n\n... [知识库内容已截断，请使用 read_file 工具分段读取]\n</knowledge>"
+        return block
+    return re.sub(r"<knowledge>.*?</knowledge>", _repl, text, flags=re.DOTALL)
 
 @router.get("", response_model=list[ConversationOut])
 async def list_conversations(
@@ -469,8 +479,11 @@ async def send_message(
 
     # Group chat: route via @mentions
     if convo.type == "group":
+        # Truncate oversized <knowledge> blocks injected by the frontend
+        # to prevent context length explosion (max 50KB per knowledge block).
+        text = _truncate_knowledge_blocks(payload.text)
         user_msg, agent_msg = await svc.dispatch_group(
-            db, convo, payload.text, payload.mentions,
+            db, convo, text, payload.mentions,
             attached_file_ids=payload.attached_file_ids,
             owner_id=user.id,
             skip_agent=payload.skip_agent,
@@ -479,8 +492,9 @@ async def send_message(
             task_id=payload.task_id,
         )
     else:
+        text = _truncate_knowledge_blocks(payload.text)
         user_msg, agent_msg = await svc.dispatch(
-            db, convo, payload.text,
+            db, convo, text,
             attached_file_ids=payload.attached_file_ids,
             owner_id=user.id,
             skip_agent=payload.skip_agent,
