@@ -143,6 +143,7 @@ class ConversationDetail(ConversationOut):
 class SendMessageRequest(BaseModel):
     text: str = Field(min_length=1, max_length=100000)
     attached_file_ids: list[str] = Field(default_factory=list)
+    knowledge_ids: list[str] = Field(default_factory=list)  # 引用知识库文件ID列表
     skip_agent: bool = False
     mentions: list[str] = Field(default_factory=list)
     profile_id: str | None = None  # override conversation's default profile

@@ -132,12 +132,12 @@ async def _require_convo(db, conversation_id: uuid.UUID, user: User):
 
 
 
-def _truncate_knowledge_blocks(text: str, max_block: int = 50_000) -> str:
+def _truncate_knowledge_blocks(text: str, max_block: int = 100_000) -> str:
     """Truncate oversized <knowledge> blocks to prevent context length explosion."""
     def _repl(m):
         block = m.group(0)
         if len(block) > max_block:
-            return block[:max_block] + "\n\n... [知识库内容已截断，请使用 read_file 工具分段读取]\n</knowledge>"
+            return block[:max_block] + "\n\n... [内容已截断，文件较大，请使用 read_file 工具分段读取]\n</knowledge>"
         return block
     return re.sub(r"<knowledge>.*?</knowledge>", _repl, text, flags=re.DOTALL)
 
