@@ -480,11 +480,12 @@ async def send_message(
     # Group chat: route via @mentions
     if convo.type == "group":
         # Truncate oversized <knowledge> blocks injected by the frontend
-        # to prevent context length explosion (max 50KB per knowledge block).
+        # to prevent context length explosion (max 100KB per knowledge block).
         text = _truncate_knowledge_blocks(payload.text)
         user_msg, agent_msg = await svc.dispatch_group(
             db, convo, text, payload.mentions,
             attached_file_ids=payload.attached_file_ids,
+            knowledge_ids=payload.knowledge_ids,
             owner_id=user.id,
             skip_agent=payload.skip_agent,
             profile_id_override=payload.profile_id,
@@ -496,6 +497,7 @@ async def send_message(
         user_msg, agent_msg = await svc.dispatch(
             db, convo, text,
             attached_file_ids=payload.attached_file_ids,
+            knowledge_ids=payload.knowledge_ids,
             owner_id=user.id,
             skip_agent=payload.skip_agent,
             profile_id_override=payload.profile_id,

@@ -533,6 +533,10 @@ function openFile(fid: string) {
   openFileId.value = fid;
   showWorkspace.value = true;
 }
+function knowledgeName(kid: string): string {
+  const item = teamKnowledge.value.find((k) => k.id === kid);
+  return item?.name || kid.slice(0, 8);
+}
 
 // ── Message actions ──
 async function copyMessage(text: string) {
@@ -710,16 +714,6 @@ async function onChannelModeChange(mode: string) {
   }
 }
 
-// ── Knowledge reference display filter ──
-function extractKnowledgeRefs(text: string): string[] {
-  const refs: string[] = [];
-  const regex = /<knowledge>[\s\S]*?【知识库:\s*([^】]+)】[\s\S]*?<\/knowledge>/g;
-  let m;
-  while ((m = regex.exec(text)) !== null) {
-    refs.push(m[1].trim());
-  }
-  return refs;
-}
 function displayText(text: string): string {
   // Remove <knowledge>...</knowledge> blocks, keep the rest
   return text.replace(/<knowledge>[\s\S]*?<\/knowledge>\s*/g, "").trim();
@@ -1090,11 +1084,10 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                     </div>
                     <div v-if="chat.messages[row.index].deleted_at" class="recalled-msg">该消息已撤回</div>
                     <div v-else-if="displayText(chat.messages[row.index].content.text)" class="md-body" v-html="highlightMentions(displayHtml(chat.messages[row.index].content.text))"></div>
-                    <div v-if="displayText(chat.messages[row.index].content.text) && extractKnowledgeRefs(chat.messages[row.index].content.text).length" class="knowledge-refs-badge">
-                      <Icon name="doc" :size="11" /> 引用了知识库: {{ extractKnowledgeRefs(chat.messages[row.index].content.text).join(', ') }}
-                    </div>
-                    <div v-if="!displayText(chat.messages[row.index].content.text) && extractKnowledgeRefs(chat.messages[row.index].content.text).length" class="knowledge-refs-badge standalone">
-                      <Icon name="doc" :size="11" /> 已发送知识库: {{ extractKnowledgeRefs(chat.messages[row.index].content.text).join(', ') }}
+                    <div v-if="chat.messages[row.index].content.knowledge_refs?.length" class="msg-files">
+                      <button v-for="k in chat.messages[row.index].content.knowledge_refs" :key="k.id" class="msg-file-chip knowledge-chip">
+                        <Icon name="book" :size="11" /> {{ k.name || knowledgeName(k.id) }}
+                      </button>
                     </div>
                     <div v-if="chat.messages[row.index].content.files?.length" class="msg-files">
                       <button v-for="f in chat.messages[row.index].content.files" :key="f.id" class="msg-file-chip" @click="openFile(f.id)">

@@ -586,6 +586,7 @@ async def send_message(
     convo: Conversation,
     text: str,
     attached_file_ids: list[str] | None = None,
+    knowledge_ids: list[str] | None = None,
     owner_id: uuid.UUID | None = None,
     system_prompt: str | None = None,
     existing_user_msg: Message | None = None,
@@ -621,6 +622,8 @@ async def send_message(
                 {"id": f["id"], "name": f["name"], "kind": f.get("kind")}
                 for f in attached
             ]
+        if knowledge_ids:
+            user_content["knowledge_refs"] = [{"id": kid} for kid in knowledge_ids]
         user_msg = Message(
             conversation_id=convo.id,
             owner_id=owner_id,
@@ -714,6 +717,7 @@ async def send_roundtable(
     text: str,
     targets: list[dict],
     attached_file_ids: list[str] | None = None,
+    knowledge_ids: list[str] | None = None,
     owner_id: uuid.UUID | None = None,
     mentions: list[str] | None = None,
     existing_user_msg: Message | None = None,
@@ -1046,11 +1050,48 @@ async def _build_knowledge_prompt(db: AsyncSession, profile: Profile | None) -> 
     )
 
 
+async def _build_request_knowledge_prompt(db: AsyncSession, knowledge_ids: list[str]) -> str | None:
+    """Build knowledge prompt from request-level knowledge_ids (user-selected knowledge refs)."""
+    if not knowledge_ids:
+        return None
+    from app.db.models.team import ProjectDoc, TeamKnowledge
+
+    parts: list[str] = []
+    used = 0
+    _MAX_KNOWLEDGE_PER_ITEM = 2000
+    _MAX_KNOWLEDGE_TOTAL = 8000
+
+    for kid_str in knowledge_ids:
+        try:
+            kid = uuid.UUID(str(kid_str))
+        except (ValueError, TypeError):
+            continue
+        entry = await db.get(TeamKnowledge, kid) or await db.get(ProjectDoc, kid)
+        if entry is None or not getattr(entry, "content", None):
+            continue
+        content = entry.content
+        if "<" in content and ">" in content:
+            content = _html_to_plain_text(content)
+        body = content[:_MAX_KNOWLEDGE_PER_ITEM]
+        if used + len(body) > _MAX_KNOWLEDGE_TOTAL:
+            body = body[: max(0, _MAX_KNOWLEDGE_TOTAL - used)]
+            parts.append(f"<knowledge>【知识库: {entry.name}】\n{body}\n... [内容已截断，请使用 read_file 工具分段读取]</knowledge>")
+            used = _MAX_KNOWLEDGE_TOTAL
+            break
+        parts.append(f"<knowledge>【知识库: {entry.name}】\n{body}</knowledge>")
+        used += len(body)
+        if used >= _MAX_KNOWLEDGE_TOTAL:
+            break
+
+    return "\n\n".join(parts) if parts else None
+
+
 async def dispatch(
     db: AsyncSession,
     convo: Conversation,
     text: str,
     attached_file_ids: list[str] | None = None,
+    knowledge_ids: list[str] | None = None,
     owner_id: uuid.UUID | None = None,
     skip_agent: bool = False,
     profile_id_override: str | None = None,
@@ -1091,6 +1132,14 @@ async def dispatch(
                     f"{system_prompt}\n\n{knowledge_prompt}" if system_prompt else knowledge_prompt
                 )
 
+    # Inject request-level knowledge references (user-selected knowledge items).
+    if knowledge_ids:
+        request_knowledge_prompt = await _build_request_knowledge_prompt(db, knowledge_ids)
+        if request_knowledge_prompt:
+            system_prompt = (
+                f"{system_prompt}\n\n{request_knowledge_prompt}" if system_prompt else request_knowledge_prompt
+            )
+
     # Inject the user's long-term agent memory into system_prompt
     memory_prompt = await _build_memory_prompt(db, owner_id)
     if memory_prompt:
@@ -1117,7 +1166,8 @@ async def dispatch(
         if moa_targets:
             return await send_roundtable(
                 db, convo, text, moa_targets,
-                attached_file_ids=attached_file_ids, owner_id=owner_id, task_id=task_id, moa=True,
+                attached_file_ids=attached_file_ids, knowledge_ids=knowledge_ids,
+                owner_id=owner_id, task_id=task_id, moa=True,
             )
 
     # Anti-clarify guidance only on follow-up turns — the first turn carries the
@@ -1138,11 +1188,12 @@ async def dispatch(
         ]
         return await send_roundtable(
             db, convo, text, targets,
-            attached_file_ids=attached_file_ids, owner_id=owner_id, task_id=task_id,
+            attached_file_ids=attached_file_ids, knowledge_ids=knowledge_ids,
+            owner_id=owner_id, task_id=task_id,
         )
     return await send_message(
         db, convo, text,
-        attached_file_ids=attached_file_ids, owner_id=owner_id,
+        attached_file_ids=attached_file_ids, knowledge_ids=knowledge_ids, owner_id=owner_id,
         system_prompt=system_prompt, profile_dir=profile_dir, mcp_servers=mcp_servers,
         task_id=task_id, profile_id=effective_profile_id, matched_skill_ids=matched_skill_ids,
     )
@@ -1694,6 +1745,7 @@ async def _persist_group_user_msg(
     owner_id: uuid.UUID | None,
     *,
     attached_file_ids: list[str] | None = None,
+    knowledge_ids: list[str] | None = None,
     reply_to_id: uuid.UUID | None = None,
     task_id: uuid.UUID | None = None,
 ) -> Message:
@@ -1710,6 +1762,8 @@ async def _persist_group_user_msg(
             {"id": f["id"], "name": f["name"], "kind": f.get("kind"), "workspace_path": f.get("workspace_path")}
             for f in attached
         ]
+    if knowledge_ids:
+        content["knowledge_refs"] = [{"id": kid} for kid in knowledge_ids]
     user_msg = Message(
         conversation_id=convo.id,
         owner_id=owner_id,
@@ -1734,6 +1788,7 @@ async def dispatch_group(
     text: str,
     mentions: list[str],
     attached_file_ids: list[str] | None = None,
+    knowledge_ids: list[str] | None = None,
     owner_id: uuid.UUID | None = None,
     skip_agent: bool = False,
     profile_id_override: str | None = None,
@@ -1764,7 +1819,8 @@ async def dispatch_group(
     # 始终先落库 + 广播人类消息
     user_msg = await _persist_group_user_msg(
         db, convo, text, mentions, owner_id,
-        attached_file_ids=attached_file_ids, reply_to_id=reply_to_id, task_id=task_id,
+        attached_file_ids=attached_file_ids, knowledge_ids=knowledge_ids,
+        reply_to_id=reply_to_id, task_id=task_id,
     )
     await _publish_user_message(db, convo, user_msg, resolved)
 
@@ -1808,6 +1864,7 @@ async def dispatch_group(
         _, agent_msg = await send_message(
             db, convo, text,
             attached_file_ids=attached_file_ids,
+            knowledge_ids=knowledge_ids,
             owner_id=owner_id,
             system_prompt=system_prompt,
             existing_user_msg=user_msg,
@@ -1847,6 +1904,7 @@ async def dispatch_group(
     return await send_roundtable(
         db, convo, text, targets,
         attached_file_ids=attached_file_ids,
+        knowledge_ids=knowledge_ids,
         owner_id=owner_id,
         mentions=mentions,
         existing_user_msg=user_msg,
