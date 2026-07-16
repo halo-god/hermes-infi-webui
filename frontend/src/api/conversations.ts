@@ -55,13 +55,14 @@ export const conversationsApi = {
   async getShared(id: string): Promise<ConversationDetail> {
     return (await http.get<ConversationDetail>(`/conversations/shared/${id}`)).data;
   },
-  async send(id: string, text: string, opts?: { profileId?: string; fileIds?: string[]; skipAgent?: boolean; taskId?: string }): Promise<SendResponse> {
-    const { fileIds, skipAgent, profileId, taskId, ...restOpts } = opts || {};
+  async send(id: string, text: string, opts?: { profileId?: string; fileIds?: string[]; knowledgeIds?: string[]; skipAgent?: boolean; taskId?: string }): Promise<SendResponse> {
+    const { fileIds, knowledgeIds, skipAgent, profileId, taskId, ...restOpts } = opts || {};
     return (await http.post<SendResponse>(`/conversations/${id}/messages`, {
       text,
       ...restOpts,
       profile_id: profileId || null,
       attached_file_ids: fileIds || [],
+      knowledge_ids: knowledgeIds || [],
       skip_agent: skipAgent || false,
       task_id: taskId || null,
     })).data;
@@ -168,6 +169,11 @@ export const conversationsApi = {
   },
   async removeMember(id: string, memberId: string): Promise<void> {
     await http.delete(`/conversations/${id}/members/${memberId}`);
+  },
+  async updateMember(id: string, memberId: string, opts: { autoReply?: boolean }): Promise<GroupMember> {
+    return (await http.patch<GroupMember>(`/conversations/${id}/members/${memberId}`, {
+      auto_reply: opts.autoReply,
+    })).data;
   },
   async sendWithMentions(id: string, text: string, mentions: string[], fileIds?: string[], profileId?: string): Promise<SendResponse> {
     return (await http.post<SendResponse>(`/conversations/${id}/messages`, {

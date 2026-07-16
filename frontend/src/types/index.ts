@@ -269,6 +269,7 @@ export interface GroupMember {
   profile_color?: string;
   agent_id: string | null;
   role: "admin" | "member";
+  auto_reply?: boolean;
   joined_at: string;
   last_read_at?: string | null;
   presence?: string | null;

@@ -154,6 +154,12 @@ class Settings(BaseSettings):
 
     # ── Uploads ──
     max_upload_mb: int = 25  # reject uploads larger than this (per file)
+    # Shared across every upload endpoint (conversation attachments, personal
+    # file storage, team knowledge base, project docs): non-office files
+    # bigger than this offload to object storage instead of inlining in
+    # Postgres. Office docs (docx/xlsx/pptx/csv/rtf) always offload regardless
+    # of size — see app.core.files.process_upload.
+    file_offload_threshold_kb: int = 256
 
     # ── Agent sandbox (P5) ──
     sandbox_enabled: bool = False         # apply POSIX rlimits to agent subprocesses

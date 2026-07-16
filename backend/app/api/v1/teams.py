@@ -486,9 +486,20 @@ async def get_knowledge_content(
     k = await db.get(TeamKnowledge, kid)
     if k is None or k.team_id != team_id:
         raise HTTPException(status_code=404, detail="知识条目不存在")
+    content = k.content
+    if content is None and k.storage_key:
+        import asyncio
+        from app.core import object_storage
+        from app.core.files import OFFICE_EXTRACTORS, is_text_extractable
+
+        data = await asyncio.to_thread(object_storage.get, k.storage_key)
+        if k.kind in OFFICE_EXTRACTORS:
+            content = OFFICE_EXTRACTORS[k.kind](data) or None
+        elif is_text_extractable(k.kind):
+            content = data.decode("utf-8", "ignore")
     return KnowledgeDetail(
         **KnowledgeOut.model_validate(k).model_dump(),
-        content=k.content,
+        content=content,
     )
 
 
@@ -518,19 +529,26 @@ async def get_knowledge_raw(
     ext = k.name.rsplit(".", 1)[-1].lower() if "." in k.name else ""
     mime = MIME.get(ext, "application/octet-stream")
 
-    if not k.content:
-        raise HTTPException(status_code=404, detail="文件内容不存在")
-
-    import base64
-    TEXT_EXTS = {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
-                 "yaml", "yml", "toml", "sh", "log", "xml", "css", "diff", "patch"}
-    if ext in TEXT_EXTS:
-        data = k.content.encode("utf-8")
-    else:
+    data: bytes
+    if k.storage_key:
+        import asyncio
+        from app.core import object_storage
         try:
-            data = base64.b64decode(k.content.strip())
+            data = await asyncio.to_thread(object_storage.get, k.storage_key)
         except Exception:
+            raise HTTPException(status_code=503, detail="存储不可用")
+    elif k.content:
+        import base64
+        from app.core.files import PLAIN_TEXT_EXTS
+        if ext in PLAIN_TEXT_EXTS:
             data = k.content.encode("utf-8")
+        else:
+            try:
+                data = base64.b64decode(k.content.strip())
+            except Exception:
+                data = k.content.encode("utf-8")
+    else:
+        raise HTTPException(status_code=404, detail="文件内容不存在")
 
     from urllib.parse import quote
     safe_name = k.name.replace('"', "_").replace("\\", "_")
@@ -552,49 +570,23 @@ async def upload_knowledge(
     db: AsyncSession = Depends(get_db),
 ):
     from app.db.models.team import TeamKnowledge
+    from app.core.files import process_upload
     await svc.require_permission(db, team_id, user.id, "knowledge.upload")
     raw = await read_upload_capped(file, settings.max_upload_bytes)
     import re as _re
     name = _re.sub(r"[^\w.\-\u4e00-\u9fff]", "_", file.filename or "upload").strip("_. ") or "upload"
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"
-    from app.core.files import OFFICE_EXTRACTORS
-    TEXT_EXTS = {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
-                 "yaml", "yml", "toml", "sh", "log", "xml", "css", "diff", "patch"}
-    if ext in OFFICE_EXTRACTORS:
-        content = OFFICE_EXTRACTORS[ext](raw) or "<p><em>(\u65e0\u6cd5\u89e3\u6790\u6587\u6863\u5185\u5bb9)</em></p>"
-    elif ext in TEXT_EXTS:
-        content = raw.decode("utf-8", "ignore")
-    elif ext == "pdf":
-        try:
-            import fitz
-            doc = fitz.open(stream=raw, filetype="pdf")
-            content = "\n".join(str(page.get_text()) for page in doc)
-            doc.close()
-        except Exception:
-            import base64
-            content = base64.b64encode(raw).decode("ascii")
-    elif ext in ("xlsx", "xls"):
-        try:
-            import io
-            import pandas as pd
-            dfs = pd.read_excel(io.BytesIO(raw), sheet_name=None)
-            parts = []
-            for sheet_name, df in dfs.items():
-                parts.append(f"[Sheet: {sheet_name}]\n{df.to_string(index=False)}")
-            content = "\n\n".join(parts)
-        except Exception:
-            import base64
-            content = base64.b64encode(raw).decode("ascii")
-    else:
-        import base64
-        content = base64.b64encode(raw).decode("ascii")
+    processed = await process_upload(
+        raw, ext, f"team-knowledge/{team_id}", name, content_type=file.content_type,
+    )
 
     k = TeamKnowledge(
         team_id=team_id,
         name=name,
         kind=ext,
-        size_bytes=len(raw),
-        content=content,
+        size_bytes=processed.size_bytes,
+        content=processed.content,
+        storage_key=processed.storage_key,
         folder_id=uuid.UUID(folder_id) if folder_id else None,
         uploaded_by=user.id,
         uploaded_by_name=user.name,
@@ -667,24 +659,24 @@ async def upload_doc(
     user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
 ):
     """Upload a real file as a project document."""
+    import re as _re
+    from app.core.files import process_upload
+
     await _project_with_perm(db, project_id, user, "project.edit")
-    content = await read_upload_capped(file, settings.max_upload_bytes)
-    kind = (file.filename or "doc").rsplit(".", 1)[-1] if "." in (file.filename or "") else "doc"
-    payload = DocCreate(
-        name=file.filename or "upload",
-        kind=kind,
-        size_bytes=len(content),
+    raw = await read_upload_capped(file, settings.max_upload_bytes)
+    name = _re.sub(r"[^\w.\-一-鿿]", "_", file.filename or "upload").strip("_. ") or "upload"
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"
+    processed = await process_upload(
+        raw, ext, f"project-docs/{project_id}", name, content_type=file.content_type,
     )
-    doc = await svc.add_doc(db, project_id, payload, user)
-    # Store file content in object storage if available
-    try:
-        import asyncio
-        from app.core import object_storage
-        storage_key = f"project-docs/{doc.id}/{file.filename}"
-        await asyncio.to_thread(object_storage.put, storage_key, content)
-    except Exception:
-        pass  # Graceful degradation: metadata saved even if storage fails
-    return doc
+    payload = DocCreate(
+        name=name,
+        kind=ext,
+        size_bytes=processed.size_bytes,
+        content=processed.content,
+        storage_key=processed.storage_key,
+    )
+    return await svc.add_doc(db, project_id, payload, user)
 
 
 @router.delete("/projects/docs/{doc_id}", status_code=204)
@@ -999,7 +991,18 @@ async def get_doc_content(
     if d is None:
         raise HTTPException(status_code=404, detail="文件不存在")
     await svc.require_membership(db, (await svc.get_project(db, d.project_id)).team_id, user.id)
-    return d
+    content = d.content
+    if content is None and d.storage_key:
+        import asyncio
+        from app.core import object_storage
+        from app.core.files import OFFICE_EXTRACTORS, is_text_extractable
+
+        data = await asyncio.to_thread(object_storage.get, d.storage_key)
+        if d.kind in OFFICE_EXTRACTORS:
+            content = OFFICE_EXTRACTORS[d.kind](data) or None
+        elif is_text_extractable(d.kind):
+            content = data.decode("utf-8", "ignore")
+    return DocDetail(**DocOut.model_validate(d).model_dump(), content=content)
 
 
 @router.get("/projects/docs/{doc_id}/raw")
@@ -1027,19 +1030,26 @@ async def get_doc_raw(
     ext = d.name.rsplit(".", 1)[-1].lower() if "." in d.name else ""
     mime = MIME.get(ext, "application/octet-stream")
 
-    if not d.content:
-        raise HTTPException(status_code=404, detail="文件内容不存在")
-
-    import base64
-    TEXT_EXTS = {"md", "txt", "json", "csv", "html", "htm", "js", "ts", "py", "go", "rs",
-                 "yaml", "yml", "toml", "sh", "log", "xml", "css", "diff", "patch"}
-    if ext in TEXT_EXTS:
-        data = d.content.encode("utf-8")
-    else:
+    data: bytes
+    if d.storage_key:
+        import asyncio
+        from app.core import object_storage
         try:
-            data = base64.b64decode(d.content.strip())
+            data = await asyncio.to_thread(object_storage.get, d.storage_key)
         except Exception:
+            raise HTTPException(status_code=503, detail="存储不可用")
+    elif d.content:
+        import base64
+        from app.core.files import PLAIN_TEXT_EXTS
+        if ext in PLAIN_TEXT_EXTS:
             data = d.content.encode("utf-8")
+        else:
+            try:
+                data = base64.b64decode(d.content.strip())
+            except Exception:
+                data = d.content.encode("utf-8")
+    else:
+        raise HTTPException(status_code=404, detail="文件内容不存在")
 
     from urllib.parse import quote
     safe_name = d.name.replace('"', "_").replace("\\", "_")

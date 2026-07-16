@@ -140,7 +140,8 @@ function onResizeEnd() {
 // @mention state
 const showMentionPicker = ref(false);
 const mentionQuery = ref("");
-const mentionMentions = ref<string[]>([]); // collected agent_ids from @mentions
+const mentionIdx = ref(0); // keyboard-highlighted row in the mention picker
+const mentionMentions = ref<{ key: string; name: string }[]>([]); // collected mentions, keyed by stable id + the display name inserted into the text
 
 const filteredAgents = computed(() => {
   if (!props.groupAgents && !props.groupMembers) return [];
@@ -238,6 +239,7 @@ function onInput(e: Event) {
     if (atMatch) {
       showMentionPicker.value = true;
       mentionQuery.value = atMatch[1];
+      mentionIdx.value = 0;
     } else {
       showMentionPicker.value = false;
       mentionQuery.value = "";
@@ -253,6 +255,15 @@ function onInput(e: Event) {
 
 let _lastTyping = 0;
 function onKey(e: KeyboardEvent) {
+  // @mention picker navigation — must win over the plain-Enter-sends-message
+  // path below, otherwise pressing Enter right after typing "@name" sends the
+  // message with unregistered "@name" text instead of confirming the mention.
+  if (showMentionPicker.value && filteredAgents.value.length) {
+    if (e.key === "ArrowDown") { e.preventDefault(); mentionIdx.value = (mentionIdx.value + 1) % filteredAgents.value.length; return; }
+    if (e.key === "ArrowUp") { e.preventDefault(); mentionIdx.value = (mentionIdx.value - 1 + filteredAgents.value.length) % filteredAgents.value.length; return; }
+    if (e.key === "Tab" || (e.key === "Enter" && !e.isComposing)) { e.preventDefault(); selectMention(filteredAgents.value[mentionIdx.value]); return; }
+    if (e.key === "Escape") { e.preventDefault(); showMentionPicker.value = false; return; }
+  }
   // Slash command navigation
   if (showSlashMenu.value && slashFiltered.value.length) {
     if (e.key === "ArrowDown") { e.preventDefault(); slashIdx.value = (slashIdx.value + 1) % slashFiltered.value.length; return; }
@@ -275,8 +286,12 @@ function doSend() {
   const kIds = stagedKnowledge.value.length ? stagedKnowledge.value.map((k) => k.id) : undefined;
   const fIds = stagedFileRefs.value.length ? stagedFileRefs.value.map((f) => f.id) : undefined;
 
-  // Extract @mentions from text
-  const mentions = [...mentionMentions.value];
+  // Only keep mentions whose "@name" text the user hasn't since deleted —
+  // selecting a mention and then backspacing it out of the visible text must
+  // not silently keep routing to that assistant.
+  const mentions = mentionMentions.value
+    .filter((m) => props.modelValue.includes(`@${m.name}`))
+    .map((m) => m.key);
   mentionMentions.value = [];
 
   stagedFiles.value = [];
@@ -287,7 +302,11 @@ function doSend() {
   // Clear saved draft on send
   if (props.conversationId) localStorage.removeItem(`draft:${props.conversationId}`);
 
-  emit("send", { profileId: selected.value?.id, stagedFiles: files, knowledgeIds: kIds, attachedFileIds: fIds, mentions, replyToId: props.replyTo?.id });
+  // The profile pill is a personal-chat concept (the conversation's default
+  // assistant). In group chat, who answers is decided purely by @mentions /
+  // auto_reply — never forward it there, or it silently overrides @mentions.
+  const profileId = props.isGroup ? undefined : selected.value?.id;
+  emit("send", { profileId, stagedFiles: files, knowledgeIds: kIds, attachedFileIds: fIds, mentions, replyToId: props.replyTo?.id });
 }
 
 function selectMention(agent: { agent_id: string; name: string; profile_id?: string | null }) {
@@ -309,11 +328,11 @@ function selectMention(agent: { agent_id: string; name: string; profile_id?: str
   // disambiguates which one is actually being addressed.
   const mentionKey = agent.profile_id ? `profile:${agent.profile_id}` : agent.agent_id;
   if (agent.agent_id === "__all_agents__") {
-    mentionMentions.value = ["__all_agents__"];
+    mentionMentions.value = [{ key: "__all_agents__", name: agent.name }];
   } else if (agent.agent_id === "__all_humans__") {
-    mentionMentions.value = ["__all_humans__"];
-  } else if (!mentionMentions.value.includes(mentionKey)) {
-    mentionMentions.value.push(mentionKey);
+    mentionMentions.value = [{ key: "__all_humans__", name: agent.name }];
+  } else if (!mentionMentions.value.some((m) => m.key === mentionKey)) {
+    mentionMentions.value.push({ key: mentionKey, name: agent.name });
   }
 
   // Restore focus
@@ -501,10 +520,12 @@ function isImageFile(f: File) {
       <!-- @mention picker -->
       <div v-if="showMentionPicker && filteredAgents.length" class="mention-picker">
         <button
-          v-for="a in filteredAgents"
+          v-for="(a, i) in filteredAgents"
           :key="a.agent_id"
           class="mention-item"
+          :class="{ active: i === mentionIdx }"
           @mousedown.prevent="selectMention(a)"
+          @mouseenter="mentionIdx = i"
         >
           <span class="mention-avatar" :style="{ background: a.color }"><Icon :name="a.icon" :size="11" /></span>
           <span class="mention-name">{{ a.name }}</span>
@@ -755,7 +776,8 @@ function isImageFile(f: File) {
   text-align: left;
   transition: background 120ms;
 }
-.mention-item:hover {
+.mention-item:hover,
+.mention-item.active {
   background: var(--accent-tint);
 }
 .mention-avatar {

@@ -33,6 +33,7 @@ class GroupMemberOut(BaseModel):
     profile_id: uuid.UUID | None = None
     agent_id: str | None = None
     role: str
+    auto_reply: bool = False
     joined_at: datetime
     user_name: str | None = None
     profile_name: str | None = None  # resolved from Profile
@@ -46,6 +47,10 @@ class AddMemberRequest(BaseModel):
     user_id: uuid.UUID | None = None
     agent_id: str | None = None
     role: str = "member"
+
+
+class MemberUpdateRequest(BaseModel):
+    auto_reply: bool | None = None
 
 
 class ConversationUpdate(BaseModel):

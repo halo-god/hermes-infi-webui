@@ -275,10 +275,15 @@ function safeColor(color: string | null | undefined): string {
 }
 function highlightMentions(html: string): string {
   if (!isGroup.value) return html;
-  return html.replace(/@([\w-]+)/g, (_match, agentId) => {
-    const profile = chat.profiles.find(p => p.default_agent_id === agentId);
-    const name = profile?.name || agentId;
-    const color = safeColor(profile?.color);
+  // The @name inserted by the composer is the assistant's/member's *display*
+  // name (e.g. "@代码助手"), not its agent_id slug — match against that, and
+  // allow CJK characters (\w alone is ASCII-only and never matches Chinese
+  // assistant names).
+  return html.replace(/@([\w一-鿿-]+)/g, (match, name: string) => {
+    const profile = chat.profiles.find((p) => p.name === name);
+    const member = !profile ? groupMembers.value.find((m) => m.user_name === name) : null;
+    if (!profile && !member) return match; // not a recognized mention — leave as plain text
+    const color = safeColor(profile?.color || (member?.user_id ? colorForId(member.user_id) : undefined));
     return `<span class="mention-tag" style="background:${color}22;color:${color};border:1px solid ${color}44">@${escapeHtml(name)}</span>`;
   });
 }
@@ -1188,8 +1193,8 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
           v-model="draft"
           placeholder="继续对话…"
           :agent="{ label: primaryProfile?.name, color: primaryProfile?.color, model: primaryProfile?.default_model || 'ACP' }"
-          :profile-id="primaryProfile?.id"
-          :profile-locked="true"
+          :profile-id="isGroup ? undefined : primaryProfile?.id"
+          :profile-locked="!isGroup"
           :streaming="chat.isActivelyStreaming(chat.activeId || '')"
           :conversation-id="chat.activeId || undefined"
           :knowledge-items="teamKnowledge.length ? teamKnowledge : undefined"

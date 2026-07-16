@@ -33,19 +33,39 @@ function toggleSection(key: string) {
 }
 
 const humanMembers = computed(() => members.value.filter((m) => m.user_id));
+// Source of truth is the actual GroupMember roster (members.value), not
+// props.agents (derived from Conversation.active_profile_ids) — the two can
+// drift apart, and only members.value carries the real per-member auto_reply
+// flag and the stable member id needed to toggle it.
 const aiMembers = computed(() => {
-  const fromProps = props.agents.map((a) => ({
-    id: a.agent_id,
-    name: a.name,
-    color: a.color,
-    icon: a.icon,
-  }));
-  return fromProps;
+  return members.value
+    .filter((m) => m.agent_id)
+    .map((m) => {
+      const fallback = props.agents.find((a) => a.agent_id === m.agent_id);
+      return {
+        id: m.id,
+        agentId: m.agent_id!,
+        name: m.profile_name || fallback?.name || m.agent_id!,
+        color: m.profile_color || fallback?.color || '#b8852a',
+        icon: m.profile_icon || fallback?.icon || 'sparkle',
+        autoReply: !!m.auto_reply,
+      };
+    });
 });
 
+async function toggleAutoReply(m: { id: string; autoReply: boolean }) {
+  const next = !m.autoReply;
+  const member = members.value.find((mm) => mm.id === m.id);
+  if (member) member.auto_reply = next; // optimistic
+  try {
+    await conversationsApi.updateMember(props.conversationId, m.id, { autoReply: next });
+  } catch {
+    if (member) member.auto_reply = !next; // revert on failure
+  }
+}
+
 const channelModeOptions = [
-  { value: 'always', label: '自动回复', desc: 'AI 回复每条消息' },
-  { value: 'mention', label: '@ 触发', desc: '仅 @AI 时回复' },
+  { value: 'mention', label: '@ 触发', desc: '被 @ 或已开启"自动回复"的助手才会回复' },
   { value: 'off', label: '关闭', desc: '仅人工对话' },
 ];
 
@@ -105,8 +125,16 @@ watch(() => props.conversationId, load);
               </div>
               <div class="mp-info">
                 <div class="mp-name">{{ a.name }}</div>
-                <div class="mp-sub">{{ getProfileForAgent(a.id)?.desc || 'AI 助手' }}</div>
+                <div class="mp-sub">{{ getProfileForAgent(a.agentId)?.desc || 'AI 助手' }}</div>
               </div>
+              <button
+                class="mp-auto-reply-toggle"
+                :class="{ on: a.autoReply }"
+                :title="a.autoReply ? '已开启自动回复（未被 @ 也会应答）' : '开启后即使没被 @ 也会应答'"
+                @click="toggleAutoReply(a)"
+              >
+                <span class="mp-toggle-knob" />
+              </button>
             </div>
             <div v-if="!aiMembers.length" class="mp-empty-sm">暂无 AI 助手</div>
           </template>
@@ -296,6 +324,34 @@ watch(() => props.conversationId, load);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Auto-reply toggle — per-AI-member switch */
+.mp-auto-reply-toggle {
+  flex-shrink: 0;
+  width: 28px;
+  height: 16px;
+  border-radius: 8px;
+  background: rgba(29,26,20,0.14);
+  position: relative;
+  transition: background 150ms;
+}
+.mp-auto-reply-toggle.on {
+  background: var(--accent, #b8852a);
+}
+.mp-toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.25);
+  transition: transform 150ms;
+}
+.mp-auto-reply-toggle.on .mp-toggle-knob {
+  transform: translateX(12px);
 }
 
 /* Divider */
