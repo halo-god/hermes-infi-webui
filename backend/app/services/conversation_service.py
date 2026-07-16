@@ -304,7 +304,7 @@ async def _resolve_attached_files(
                 from app.core import object_storage
                 raw_bytes = await asyncio.to_thread(object_storage.get, f.storage_key)
                 if len(raw_bytes) > MAX_INLINE_BYTES:
-                    truncated = True
+
                     if ext in OFFICE_EXTRACTORS:
                         file_content = OFFICE_EXTRACTORS[ext](raw_bytes) or ""
                         if len(file_content) > MAX_INLINE_BYTES:
@@ -325,7 +325,7 @@ async def _resolve_attached_files(
             except Exception:
                 file_content = ""
         elif file_content and len(file_content) > MAX_INLINE_BYTES:
-            truncated = True
+
             file_content = file_content[:MAX_INLINE_BYTES] + "\n\n... [内容已截断，文件较大，请使用 read_file 工具分段读取]"
 
         # Build relative path preserving folder structure (e.g. "testfolder/foo.md")
@@ -356,6 +356,25 @@ async def _resolve_attached_files(
                         fh.write(plain)
 
             await asyncio.to_thread(_write_attachment)
+        elif ws_dir and file_content and is_image:
+            # Images previously only reached the model as an inline base64
+            # ImageContentBlock (single-agent chat only) — group/roundtable
+            # chat never builds those blocks, so an attached image there was
+            # a complete dead end (not even a path reference). Writing the
+            # decoded bytes to the workspace gives every mode a path to fall
+            # back on, matching how every other attachment kind behaves.
+            fpath = confine_to_dir(ws_dir, rel_path)
+
+            def _write_image():
+                os.makedirs(os.path.dirname(fpath), exist_ok=True)
+                try:
+                    img_bytes = raw_bytes if raw_bytes is not None else base64.b64decode(file_content)
+                except Exception:
+                    return
+                with open(fpath, "wb") as fh:
+                    fh.write(img_bytes)
+
+            await asyncio.to_thread(_write_image)
 
         result.append({
             "id": str(f.id), "name": f.name, "kind": f.kind,
@@ -391,7 +410,8 @@ def _truncate_inline_knowledge(text: str, max_chars: int = _MAX_KNOWLEDGE_INLINE
         # Preserve the opening tag and title line, truncate body
         head = block[:300]
         tail = block[-50:] if "</knowledge>" in block else "</knowledge>"
-        return head + f"\n\n... [内容已截断，文件较大，请使用 read_file 工具分段读取]\n\n" + tail
+        return head + "\n\n... [内容已截断，文件较大，请使用 read_file 工具分段读取]\n\n" + tail
+
 
     return pattern.sub(_clamp, text)
 
@@ -581,6 +601,37 @@ def _build_attached_prompt(text: str, attached: list[dict]) -> str:
     return text
 
 
+def _build_attachment_content_blocks(convo: Conversation, attached: list[dict]) -> list[dict]:
+    """Resource-link + image ACP content blocks for attached files.
+
+    Shared by send_message (single-agent) and send_roundtable so group/
+    roundtable chat gets the same structured attachment handling as 1:1
+    chat — previously roundtable only got a plain-text filename mention
+    (_build_attached_prompt) and images had no representation there at all.
+    """
+    blocks: list[dict] = []
+    for f in attached:
+        ws_path = f.get("workspace_path")
+        if ws_path and not f.get("is_image"):
+            cwd = os.path.join(settings.workspace_root, str(convo.id))
+            abs_path = os.path.join(cwd, ws_path)
+            blocks.append({
+                "type": "resource_link",
+                "uri": f"file://{abs_path}",
+                "name": f["name"],
+                "mimeType": f.get("mime_type", "application/octet-stream"),
+                "size": f.get("size_bytes", 0),
+            })
+    for f in attached:
+        if f.get("is_image") and f.get("content"):
+            blocks.append({
+                "type": "image",
+                "mimeType": f.get("mime_type", "image/png"),
+                "data": f["content"],  # already base64 from upload
+            })
+    return blocks
+
+
 async def send_message(
     db: AsyncSession,
     convo: Conversation,
@@ -669,28 +720,10 @@ async def send_message(
     full_text = f"{_FILE_WRITE_PREAMBLE}{_clarify_directives(is_first_turn, text)}\n\n{prompt_text}"
     prompt_blocks.append({"type": "text", "text": full_text})
 
-    # Add Resource Link blocks for attached files (agent can read from workspace)
-    for f in attached:
-        ws_path = f.get("workspace_path")
-        if ws_path and not f.get("is_image"):
-            cwd = os.path.join(settings.workspace_root, str(convo.id))
-            abs_path = os.path.join(cwd, ws_path)
-            prompt_blocks.append({
-                "type": "resource_link",
-                "uri": f"file://{abs_path}",
-                "name": f["name"],
-                "mimeType": f.get("mime_type", "application/octet-stream"),
-                "size": f.get("size_bytes", 0),
-            })
-
-    # Add ImageContentBlock for image attachments
-    for f in attached:
-        if f.get("is_image") and f.get("content"):
-            prompt_blocks.append({
-                "type": "image",
-                "mimeType": f.get("mime_type", "image/png"),
-                "data": f["content"],  # already base64 from upload
-            })
+    # Resource Link blocks (agent reads from workspace) + ImageContentBlocks —
+    # shared with send_roundtable so group/roundtable chat gets the same
+    # structured attachment handling as 1:1 chat.
+    prompt_blocks.extend(_build_attachment_content_blocks(convo, attached))
 
     await redis_core.clear_cancel(str(convo.id))
     await redis_core.enqueue_prompt(
@@ -790,6 +823,10 @@ async def send_roundtable(
     # runner_roundtable.py) — this preamble alone is advisory, not enforced.
     prompt_text = f"{_FILE_WRITE_PREAMBLE}{_NO_CLARIFY_ROUNDTABLE}\n\n{prompt_text}"
 
+    # Same resource_link/image content blocks single-agent chat gets — the
+    # runner wraps each target's own persona text and re-attaches these.
+    attachment_blocks = _build_attachment_content_blocks(convo, attached)
+
     await redis_core.clear_cancel(str(convo.id))
     await redis_core.enqueue_prompt(
         {
@@ -798,6 +835,7 @@ async def send_roundtable(
             "message_id": str(rt_msg.id),
             "targets": targets,
             "text": prompt_text,
+            "content_blocks": attachment_blocks or None,
             "moa": moa,
         }
     )
@@ -1058,8 +1096,7 @@ async def _build_request_knowledge_prompt(db: AsyncSession, knowledge_ids: list[
 
     parts: list[str] = []
     used = 0
-    _MAX_KNOWLEDGE_PER_ITEM = 2000
-    _MAX_KNOWLEDGE_TOTAL = 8000
+
 
     for kid_str in knowledge_ids:
         try:
@@ -1072,15 +1109,16 @@ async def _build_request_knowledge_prompt(db: AsyncSession, knowledge_ids: list[
         content = entry.content
         if "<" in content and ">" in content:
             content = _html_to_plain_text(content)
-        body = content[:_MAX_KNOWLEDGE_PER_ITEM]
-        if used + len(body) > _MAX_KNOWLEDGE_TOTAL:
-            body = body[: max(0, _MAX_KNOWLEDGE_TOTAL - used)]
+        body = content[:_KNOWLEDGE_PER_ITEM]
+        if used + len(body) > _KNOWLEDGE_TOTAL:
+            body = body[: max(0, _KNOWLEDGE_TOTAL - used)]
             parts.append(f"<knowledge>【知识库: {entry.name}】\n{body}\n... [内容已截断，请使用 read_file 工具分段读取]</knowledge>")
-            used = _MAX_KNOWLEDGE_TOTAL
+            used = _KNOWLEDGE_TOTAL
             break
         parts.append(f"<knowledge>【知识库: {entry.name}】\n{body}</knowledge>")
         used += len(body)
-        if used >= _MAX_KNOWLEDGE_TOTAL:
+        if used >= _KNOWLEDGE_TOTAL:
+
             break
 
     return "\n\n".join(parts) if parts else None
@@ -1524,6 +1562,22 @@ async def remove_group_member(
         await db.commit()
 
 
+async def set_member_auto_reply(
+    db: AsyncSession,
+    conversation_id: uuid.UUID,
+    member_id: uuid.UUID,
+    auto_reply: bool,
+) -> GroupMember | None:
+    """开关某个 AI 群成员的"自动回复"——开启后即使没被 @ 也会参与应答。"""
+    member = await db.get(GroupMember, member_id)
+    if member is None or member.conversation_id != conversation_id or not member.agent_id:
+        return None
+    member.auto_reply = auto_reply
+    await db.commit()
+    await db.refresh(member)
+    return member
+
+
 async def list_group_conversations(
     db: AsyncSession,
     user_id: uuid.UUID,
@@ -1791,11 +1845,16 @@ async def dispatch_group(
     knowledge_ids: list[str] | None = None,
     owner_id: uuid.UUID | None = None,
     skip_agent: bool = False,
-    profile_id_override: str | None = None,
     reply_to_id: uuid.UUID | None = None,
     task_id: uuid.UUID | None = None,
 ) -> tuple[Message, Message | None]:
     """群聊消息路由：按 channel_mode + mentions 决定走人→人 / 人→机 / 圆桌。
+
+    群聊里"回答者是谁"完全由 @提及 / auto_reply 决定，不接受个人会话式的
+    profile 覆盖参数——调用方不应也不能像 dispatch() 那样传入一个"默认
+    助手"来顶替 @提及 解析出的目标（历史上这里曾经接受一个
+    profile_id_override，导致群聊回复被聊天框里锁定的个人默认助手顶替，
+    而不是真正被 @ 到的那个人设）。
 
     无论是否触发 AI，人类消息总是先持久化并实时广播给全体成员（含发送者回显）。
     """
@@ -1804,13 +1863,21 @@ async def dispatch_group(
 
     # 计算 Agent 目标：(profile_id, agent_id) 二元组，绝不按 agent_id 去重——
     # 多个 Profile 可能共用同一个底层 agent_id（例如两个基于同一 CLI 的人设）。
+    # 参与规则：被 @ 到 ∪ 自己开启了 auto_reply；channel_mode="off" 是总闸，
+    # 关闭时谁都不会自动应答。不再有"always → 不分青红皂白拉全部成员"的
+    # 特例——auto_reply 是逐成员的，channel_mode 的 mention/always 两态在
+    # 参与判定上已等价（区别只剩历史遗留的存量数据，迁移时已批量置位）。
     agent_targets: list[tuple[str | None, str]] = list(resolved.agent_targets)
-    if mode == "always" and not agent_targets and not resolved.all_humans and not skip_agent:
+    if mode != "off" and not resolved.all_humans and not skip_agent:
+        existing_keys = {(pid, aid) for pid, aid in agent_targets}
         members = await get_group_members(db, convo.id)
-        agent_targets = [
-            (str(m.profile_id) if m.profile_id else None, m.agent_id)
-            for m in members if m.agent_id
-        ]
+        for m in members:
+            if not m.agent_id or not m.auto_reply:
+                continue
+            key = (str(m.profile_id) if m.profile_id else None, m.agent_id)
+            if key not in existing_keys:
+                agent_targets.append(key)
+                existing_keys.add(key)
 
     save_only = (
         mode == "off" or skip_agent or resolved.all_humans or not agent_targets
@@ -1833,11 +1900,21 @@ async def dispatch_group(
         system_prompt = None
         profile_dir = None
         mcp_servers: list[dict] = []
-        # 优先级：该成员绑定的 Profile（来自 @mention）> 显式 profile_id_override > 按 agent_id 尽力匹配
+        # 优先级：该成员实际绑定的 Profile > 按 agent_id 尽力匹配。
         # 绝不 fallback 到 convo.profile_id，否则 @某个助手 会实际使用会话默认助手。
-        effective_profile_id = target_profile_id or profile_id_override
-        if not effective_profile_id and target_agent_id:
+        effective_profile_id = target_profile_id
+        if not target_profile_id:
             # 该成员没有绑定具体 Profile（历史数据或裸 agent）：退化为按 agent_id 尽力匹配
+            res_p = await db.execute(
+                select(Profile).where(
+                    Profile.default_agent_id == target_agent_id,
+                    Profile.is_active.is_(True),
+                ).limit(1)
+            )
+            agent_profile = res_p.scalars().first()
+            if agent_profile:
+                effective_profile_id = str(agent_profile.id)
+
             res_p = await db.execute(
                 select(Profile).where(
                     Profile.default_agent_id == target_agent_id,
@@ -1857,6 +1934,12 @@ async def dispatch_group(
         memory_prompt = await _build_memory_prompt(db, owner_id)
         if memory_prompt:
             system_prompt = f"{system_prompt}\n\n{memory_prompt}" if system_prompt else memory_prompt
+        if knowledge_ids:
+            request_knowledge_prompt = await _build_request_knowledge_prompt(db, knowledge_ids)
+            if request_knowledge_prompt:
+                system_prompt = (
+                    f"{system_prompt}\n\n{request_knowledge_prompt}" if system_prompt else request_knowledge_prompt
+                )
         if convo.acp_session_id:
             system_prompt = f"{system_prompt}\n\n{_ANTI_CLARIFY}" if system_prompt else _ANTI_CLARIFY
 
@@ -1880,6 +1963,9 @@ async def dispatch_group(
     # 圆桌模式：多 Agent 并行 — 每个目标独立解析自己绑定的 Profile 人设/工作目录，
     # 不再用单一会话级 Profile 覆盖全部参与者（这正是此前"圆桌形同虚设"的根因）。
     memory_prompt = await _build_memory_prompt(db, owner_id)
+    request_knowledge_prompt = (
+        await _build_request_knowledge_prompt(db, knowledge_ids) if knowledge_ids else None
+    )
     targets: list[dict] = []
     for target_profile_id, target_agent_id in agent_targets:
         t_system_prompt = None
@@ -1906,6 +1992,10 @@ async def dispatch_group(
                 t_mcp_servers = await _resolve_mcp_servers(db, profile)
         if memory_prompt:
             t_system_prompt = f"{t_system_prompt}\n\n{memory_prompt}" if t_system_prompt else memory_prompt
+        if request_knowledge_prompt:
+            t_system_prompt = (
+                f"{t_system_prompt}\n\n{request_knowledge_prompt}" if t_system_prompt else request_knowledge_prompt
+            )
         targets.append({
             "agent_id": target_agent_id,
             "profile_id": target_profile_id,

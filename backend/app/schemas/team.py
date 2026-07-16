@@ -233,6 +233,7 @@ class DocCreate(BaseModel):
     kind: str = "doc"
     size_bytes: int = 0
     content: str | None = None
+    storage_key: str | None = None
     source_conversation_id: uuid.UUID | None = None
     source_message_id: uuid.UUID | None = None
 

@@ -233,3 +233,179 @@ async def test_edit_recall_reaction(db):
     # message_update events were published for each change
     events = await redis_core.read_events(str(group.id), "0-0", block_ms=200)
     assert sum(1 for _id, data in events if '"type": "message_update"' in data) >= 3
+
+
+@pytest.mark.asyncio
+async def test_mention_targets_own_profile_not_conversation_default(db):
+    """Regression: a group's Conversation.profile_id (the personal-chat-style
+    "default assistant") must never override which Profile answers a single
+    @-mention — only the mentioned GroupMember's own bound Profile may. This
+    used to leak in via a profile_id_override parameter that outranked the
+    resolved mention target.
+    """
+    from app.db.models.agent import Profile
+
+    owner = await _mk_user(db, "o8@h.io")
+    team = await _mk_team_with_members(db, owner, [])
+
+    default_p = Profile(
+        id=uuid.uuid4(), name="默认助手", handle="p-default",
+        default_agent_id="hermes", system_prompt="我是默认助手", is_active=True,
+    )
+    coder_p = Profile(
+        id=uuid.uuid4(), name="代码助手", handle="p-coder",
+        default_agent_id="coder", system_prompt="我是代码助手", is_active=True,
+    )
+    db.add_all([default_p, coder_p])
+    await db.flush()
+    team.shared_profile_ids = [str(default_p.id)]
+    await db.flush()
+
+    group = await svc.get_or_create_team_group(db, team, owner.id)
+    # Simulate a stray conversation-level "default profile" sitting on the
+    # group — the historical leak vector.
+    group.profile_id = str(default_p.id)
+    await db.flush()
+
+    await svc.add_group_member(db, group.id, agent_id="coder")
+    members = await svc.get_group_members(db, group.id)
+    coder_member = next(m for m in members if m.agent_id == "coder")
+    coder_member.profile_id = coder_p.id
+    await db.flush()
+
+    _, agent_msg = await svc.dispatch_group(
+        db, group, "@代码助手 帮我看看这段代码", [f"profile:{coder_p.id}"], owner_id=owner.id,
+    )
+    assert agent_msg is not None
+    assert agent_msg.profile_id == coder_p.id
+    assert agent_msg.agent_id == "coder"
+
+
+@pytest.mark.asyncio
+async def test_auto_reply_member_participates_without_mention(db):
+    """A GroupMember with auto_reply=True answers even when nobody @-mentioned
+    it, purely under channel_mode="mention" — no group-wide "always" needed.
+    A member that neither opted into auto_reply nor was mentioned must not
+    be targeted at all.
+    """
+    owner = await _mk_user(db, "o9@h.io")
+    team = await _mk_team_with_members(db, owner, [])
+    group = await svc.get_or_create_team_group(db, team, owner.id)  # channel_mode="mention"
+
+    await svc.add_group_member(db, group.id, agent_id="coder")
+    await svc.add_group_member(db, group.id, agent_id="writer")
+    members = await svc.get_group_members(db, group.id)
+    coder_member = next(m for m in members if m.agent_id == "coder")
+    coder_member.auto_reply = True
+    await db.flush()
+
+    _, reply = await svc.dispatch_group(db, group, "大家好", [], owner_id=owner.id)
+    assert reply is not None
+    assert reply.role == "agent"  # single target => single-agent branch, not roundtable
+    assert reply.agent_id == "coder"
+
+
+@pytest.mark.asyncio
+async def test_group_single_mention_injects_request_knowledge(db):
+    """Message-level "reference this knowledge item" picker must actually
+    reach the model's system_prompt in group chat, not just get stored as
+    display-only content.knowledge_refs metadata.
+    """
+    import json as _json
+
+    from app.config import settings
+    from app.db.models.team import TeamKnowledge
+
+    owner = await _mk_user(db, "o10@h.io")
+    team = await _mk_team_with_members(db, owner, [])
+    group = await svc.get_or_create_team_group(db, team, owner.id)
+    await svc.add_group_member(db, group.id, agent_id="coder")
+
+    k = TeamKnowledge(
+        team_id=team.id, name="设计文档.md", kind="md",
+        content="关键决策：使用 PostgreSQL", size_bytes=10,
+    )
+    db.add(k)
+    await db.flush()
+
+    await svc.dispatch_group(
+        db, group, "@coder 参考一下", ["coder"], owner_id=owner.id,
+        knowledge_ids=[str(k.id)],
+    )
+
+    entries = await redis_core.get_redis().xrange(settings.acp_stream, "-", "+")
+    task = _json.loads(entries[-1][1]["data"])
+    assert task["type"] == "single"
+    assert "关键决策：使用 PostgreSQL" in (task["system_prompt"] or "")
+
+
+@pytest.mark.asyncio
+async def test_group_roundtable_injects_request_knowledge(db):
+    """Same as above but for the roundtable (multi-target) branch."""
+    import json as _json
+
+    from app.config import settings
+    from app.db.models.team import TeamKnowledge
+
+    owner = await _mk_user(db, "o11@h.io")
+    team = await _mk_team_with_members(db, owner, [])
+    group = await svc.get_or_create_team_group(db, team, owner.id)
+    await svc.add_group_member(db, group.id, agent_id="coder")
+    await svc.add_group_member(db, group.id, agent_id="writer")
+
+    k = TeamKnowledge(
+        team_id=team.id, name="设计文档.md", kind="md",
+        content="关键决策：使用 PostgreSQL", size_bytes=10,
+    )
+    db.add(k)
+    await db.flush()
+
+    await svc.dispatch_group(
+        db, group, "大家怎么看？", ["__all_agents__"], owner_id=owner.id,
+        knowledge_ids=[str(k.id)],
+    )
+
+    entries = await redis_core.get_redis().xrange(settings.acp_stream, "-", "+")
+    task = _json.loads(entries[-1][1]["data"])
+    assert task["type"] == "roundtable"
+    assert all(
+        "关键决策：使用 PostgreSQL" in (t["system_prompt"] or "") for t in task["targets"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_group_roundtable_attachment_gets_content_blocks(db):
+    """Regression: an attachment in a roundtable/group turn must reach the
+    runner as structured ACP content blocks (resource_link), not just a
+    plain-text filename mention — this is what lets a roundtable agent
+    actually read the file via read_file, and is required for images (which
+    have no other representation in group chat) to reach the model at all.
+    """
+    import json as _json
+
+    from app.config import settings
+    from app.db.models.workspace import WorkspaceFile
+
+    owner = await _mk_user(db, "o12@h.io")
+    team = await _mk_team_with_members(db, owner, [])
+    group = await svc.get_or_create_team_group(db, team, owner.id)
+    await svc.add_group_member(db, group.id, agent_id="coder")
+    await svc.add_group_member(db, group.id, agent_id="writer")
+
+    wf = WorkspaceFile(
+        conversation_id=group.id, name="notes.md", kind="md",
+        content="# 项目笔记", size_bytes=10,
+    )
+    db.add(wf)
+    await db.flush()
+
+    await svc.dispatch_group(
+        db, group, "大家看看这份笔记", ["__all_agents__"], owner_id=owner.id,
+        attached_file_ids=[str(wf.id)],
+    )
+
+    entries = await redis_core.get_redis().xrange(settings.acp_stream, "-", "+")
+    task = _json.loads(entries[-1][1]["data"])
+    assert task["type"] == "roundtable"
+    blocks = task.get("content_blocks") or []
+    assert any(b.get("type") == "resource_link" and b.get("name") == "notes.md" for b in blocks)

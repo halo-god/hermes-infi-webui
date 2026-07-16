@@ -53,15 +53,18 @@ def wrap_persona_prompt(text: str, system_prompt: str | None) -> str:
 
 
 async def run_prompt_with_clarify_guard(
-    client: ACPClient, clarify_sid: str, prompt_text: str, label: str,
+    client: ACPClient, clarify_sid: str, prompt_content: str | list[dict], label: str,
 ) -> None:
     """Run one prompt to completion, auto-declining any clarify request the
     agent raises mid-turn — nobody can answer an interactive confirmation
     modal for a parallel/background persona. This is a hard backstop; any
     "don't call clarify" prompt preamble asking the agent to behave is
     advisory only and can't be trusted on its own.
+
+    `prompt_content` may be plain text or a list of ACP content blocks (text
+    + resource_link/image) — ACPClient.prompt() accepts both.
     """
-    prompt_task = asyncio.create_task(client.prompt(prompt_text))
+    prompt_task = asyncio.create_task(client.prompt(prompt_content))
     while not prompt_task.done():
         try:
             await asyncio.wait_for(asyncio.shield(prompt_task), timeout=1.0)

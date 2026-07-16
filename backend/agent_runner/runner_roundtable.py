@@ -37,6 +37,10 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
     targets: list[dict] = task["targets"]
     text = task["text"]
     moa = bool(task.get("moa", False))
+    # Resource_link/image blocks for attached files — same structured
+    # attachment handling single-agent chat gets. Re-attached to every
+    # target's own persona-wrapped text block below.
+    attachment_blocks: list[dict] = task.get("content_blocks") or []
 
     cwd = os.path.join(settings.workspace_root, conversation_id)
     os.makedirs(cwd, exist_ok=True)
@@ -63,6 +67,12 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
         buf = {"text": ""}
         reply_status = "complete"
         prompt_text = wrap_persona_prompt(text, target.get("system_prompt"))
+        # Each target keeps its own persona-wrapped text block but shares the
+        # same attachment blocks (a file doesn't change per-participant).
+        prompt_content: str | list[dict] = (
+            [{"type": "text", "text": prompt_text}, *attachment_blocks]
+            if attachment_blocks else prompt_text
+        )
 
         async def on_update(update: dict) -> None:
             if update.get("sessionUpdate") == "agent_message_chunk":
@@ -98,7 +108,7 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
             # Hard backstop; the prompt preamble asking agents not to call
             # clarify is advisory only and can't be trusted on its own.
             clarify_sid = session_id or conversation_id
-            await run_prompt_with_clarify_guard(client, clarify_sid, prompt_text, aid)
+            await run_prompt_with_clarify_guard(client, clarify_sid, prompt_content, aid)
         except ACPTimeout as exc:
             logger.error("roundtable timeout (%s): %s", aid, exc)
             reply_status = "timeout"
