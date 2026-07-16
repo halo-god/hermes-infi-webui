@@ -1833,10 +1833,11 @@ async def dispatch_group(
         system_prompt = None
         profile_dir = None
         mcp_servers: list[dict] = []
-        # 优先级：显式 profile_id_override > 该成员绑定的 Profile > 会话默认
-        effective_profile_id = profile_id_override or target_profile_id or convo.profile_id
-        if not profile_id_override and not target_profile_id:
-            # 该成员没有绑定具体 Profile（历史数据）：退化为按 agent_id 尽力匹配
+        # 优先级：该成员绑定的 Profile（来自 @mention）> 显式 profile_id_override > 按 agent_id 尽力匹配
+        # 绝不 fallback 到 convo.profile_id，否则 @某个助手 会实际使用会话默认助手。
+        effective_profile_id = target_profile_id or profile_id_override
+        if not effective_profile_id and target_agent_id:
+            # 该成员没有绑定具体 Profile（历史数据或裸 agent）：退化为按 agent_id 尽力匹配
             res_p = await db.execute(
                 select(Profile).where(
                     Profile.default_agent_id == target_agent_id,
@@ -1884,7 +1885,19 @@ async def dispatch_group(
         t_system_prompt = None
         t_profile_dir = None
         t_mcp_servers: list[dict] = []
-        eff_pid = target_profile_id or convo.profile_id
+        # 绝不 fallback 到 convo.profile_id，每个目标仅使用自己绑定的 Profile。
+        eff_pid = target_profile_id
+        if not eff_pid and target_agent_id:
+            # 退化为按 agent_id 尽力匹配
+            res_p = await db.execute(
+                select(Profile).where(
+                    Profile.default_agent_id == target_agent_id,
+                    Profile.is_active.is_(True),
+                ).limit(1)
+            )
+            ap = res_p.scalars().first()
+            if ap:
+                eff_pid = str(ap.id)
         if eff_pid:
             profile = await db.get(Profile, eff_pid)
             if profile:
