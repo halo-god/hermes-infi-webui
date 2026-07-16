@@ -439,7 +439,12 @@ function onFileSelected(e: Event) {
     reader.onload = () => stagedPreviews.value.set(idx, reader.result as string);
     reader.readAsDataURL(file);
   }
-  ns.toast(`已添加 ${file.name}`);
+  const sizeKB = (file.size / 1024).toFixed(1);
+  if (file.size > 100_000) {
+    ns.toast(`已添加 ${file.name} (${sizeKB}KB) — 文件较大，AI 将通过工具分段读取`);
+  } else {
+    ns.toast(`已添加 ${file.name} (${sizeKB}KB)`);
+  }
   if (fileInput.value) fileInput.value.value = "";
 }
 

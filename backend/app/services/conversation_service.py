@@ -293,40 +293,51 @@ async def _resolve_attached_files(
         folder = (f.folder_path or "").strip("/")
 
         # Resolve content: storage_key wins, then inline content.
-        # For large files (>100KB) truncate inline content — the agent should
-        # read the workspace file in chunks via read_file.
+        # Tiered strategy:
+        #   < 30KB  -> full inline
+        #   30-100KB -> truncated inline with hint
+        #   > 100KB  -> metadata only, agent reads via read_file tool
+        FULL_INLINE_BYTES = 30_000
         MAX_INLINE_BYTES = 100_000
+        _TRUNCATE_HINT = "\n\n... [truncated, use read_file tool to read in chunks]"
         file_content = f.content or ""
         raw_bytes: bytes | None = None
-        truncated = False
         if f.storage_key and not file_content:
             try:
                 from app.core import object_storage
                 raw_bytes = await asyncio.to_thread(object_storage.get, f.storage_key)
-                if len(raw_bytes) > MAX_INLINE_BYTES:
-
-                    if ext in OFFICE_EXTRACTORS:
-                        file_content = OFFICE_EXTRACTORS[ext](raw_bytes) or ""
-                        if len(file_content) > MAX_INLINE_BYTES:
-                            file_content = file_content[:MAX_INLINE_BYTES] + "\n\n... [内容已截断，文件较大，请使用 read_file 工具分段读取]"
-                    elif is_text and ext != "pdf":
-                        file_content = raw_bytes.decode("utf-8", "ignore")
-                        if len(file_content) > MAX_INLINE_BYTES:
-                            file_content = file_content[:MAX_INLINE_BYTES] + "\n\n... [内容已截断，文件较大，请使用 read_file 工具分段读取]"
-                    else:
-                        file_content = ""
-                else:
+                size = len(raw_bytes)
+                if size <= FULL_INLINE_BYTES:
+                    # Small file: full inline
                     if ext in OFFICE_EXTRACTORS:
                         file_content = OFFICE_EXTRACTORS[ext](raw_bytes) or ""
                     elif is_text and ext != "pdf":
                         file_content = raw_bytes.decode("utf-8", "ignore")
                     else:
                         file_content = base64.b64encode(raw_bytes).decode("ascii")
+                elif size <= MAX_INLINE_BYTES:
+                    # Medium file: truncated inline
+                    if ext in OFFICE_EXTRACTORS:
+                        file_content = OFFICE_EXTRACTORS[ext](raw_bytes) or ""
+                        if len(file_content) > MAX_INLINE_BYTES:
+                            file_content = file_content[:MAX_INLINE_BYTES] + _TRUNCATE_HINT
+                    elif is_text and ext != "pdf":
+                        file_content = raw_bytes.decode("utf-8", "ignore")
+                        if len(file_content) > MAX_INLINE_BYTES:
+                            file_content = file_content[:MAX_INLINE_BYTES] + _TRUNCATE_HINT
+                    else:
+                        file_content = ""
+                else:
+                    # Large file: metadata only
+                    file_content = ""
             except Exception:
                 file_content = ""
         elif file_content and len(file_content) > MAX_INLINE_BYTES:
-
-            file_content = file_content[:MAX_INLINE_BYTES] + "\n\n... [内容已截断，文件较大，请使用 read_file 工具分段读取]"
+            # Existing inline content too large
+            file_content = file_content[:MAX_INLINE_BYTES] + _TRUNCATE_HINT
+        elif file_content and len(file_content) > FULL_INLINE_BYTES:
+            # Existing inline content in medium tier, already truncated or within limit
+            pass
 
         # Build relative path preserving folder structure (e.g. "testfolder/foo.md")
         rel_name = safe_relative_path(f.name)
