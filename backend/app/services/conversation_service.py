@@ -674,7 +674,8 @@ async def send_message(
                 for f in attached
             ]
         if knowledge_ids:
-            user_content["knowledge_refs"] = [{"id": kid} for kid in knowledge_ids]
+            _knames = await _resolve_knowledge_names(db, knowledge_ids)
+            user_content["knowledge_refs"] = [{"id": kid, "name": _knames.get(kid, kid[:8])} for kid in knowledge_ids]
         user_msg = Message(
             conversation_id=convo.id,
             owner_id=owner_id,
@@ -781,6 +782,9 @@ async def send_roundtable(
                 {"id": f["id"], "name": f["name"], "kind": f.get("kind")}
                 for f in attached
             ]
+        if knowledge_ids:
+            _knames = await _resolve_knowledge_names(db, knowledge_ids)
+            user_content["knowledge_refs"] = [{"id": kid, "name": _knames.get(kid, kid[:8])} for kid in knowledge_ids]
         user_msg = Message(
             conversation_id=convo.id, owner_id=owner_id, role="user", content=user_content, mentions=mentions or [], status="complete", task_id=task_id
         )
@@ -1122,6 +1126,21 @@ async def _build_request_knowledge_prompt(db: AsyncSession, knowledge_ids: list[
             break
 
     return "\n\n".join(parts) if parts else None
+
+
+async def _resolve_knowledge_names(db, knowledge_ids: list[str]) -> dict[str, str]:
+    """Map knowledge IDs to their display names for persisting in message metadata."""
+    from app.db.models.team import ProjectDoc, TeamKnowledge
+    out: dict[str, str] = {}
+    for kid_str in knowledge_ids:
+        try:
+            kid = uuid.UUID(str(kid_str))
+        except (ValueError, TypeError):
+            continue
+        entry = await db.get(TeamKnowledge, kid) or await db.get(ProjectDoc, kid)
+        if entry:
+            out[kid_str] = getattr(entry, "name", "") or kid_str[:8]
+    return out
 
 
 async def dispatch(
@@ -1817,7 +1836,8 @@ async def _persist_group_user_msg(
             for f in attached
         ]
     if knowledge_ids:
-        content["knowledge_refs"] = [{"id": kid} for kid in knowledge_ids]
+        _knames = await _resolve_knowledge_names(db, knowledge_ids)
+        content["knowledge_refs"] = [{"id": kid, "name": _knames.get(kid, kid[:8])} for kid in knowledge_ids]
     user_msg = Message(
         conversation_id=convo.id,
         owner_id=owner_id,

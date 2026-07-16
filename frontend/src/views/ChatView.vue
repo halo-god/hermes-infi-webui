@@ -538,11 +538,6 @@ function openFile(fid: string) {
   openFileId.value = fid;
   showWorkspace.value = true;
 }
-function knowledgeName(kid: string): string {
-  const item = teamKnowledge.value.find((k) => k.id === kid);
-  return item?.name || kid.slice(0, 8);
-}
-
 // ── Message actions ──
 async function copyMessage(text: string) {
   try {
@@ -1091,7 +1086,7 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                     <div v-else-if="displayText(chat.messages[row.index].content.text)" class="md-body" v-html="highlightMentions(displayHtml(chat.messages[row.index].content.text))"></div>
                     <div v-if="chat.messages[row.index].content.knowledge_refs?.length" class="msg-files">
                       <button v-for="k in chat.messages[row.index].content.knowledge_refs" :key="k.id" class="msg-file-chip knowledge-chip">
-                        <Icon name="book" :size="11" /> {{ k.name || knowledgeName(k.id) }}
+                        <Icon name="book" :size="11" /> {{ k.name }}
                       </button>
                     </div>
                     <div v-if="chat.messages[row.index].content.files?.length" class="msg-files">

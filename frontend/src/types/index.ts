@@ -169,7 +169,7 @@ export interface Agent {
 export interface MessageContent {
   text: string;
   files?: Array<{ id: string; name: string; kind: string; diff?: string | null }>;
-  knowledge_refs?: Array<{ id: string; name?: string }>;
+  knowledge_refs?: Array<{ id: string; name: string }>;
   [k: string]: unknown;
 }
 
