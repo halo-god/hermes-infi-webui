@@ -372,30 +372,6 @@ async def _resolve_attached_files(
 
 # ── Prompt directives (single source — these used to be duplicated inline) ──
 
-# Maximum inline knowledge block size (chars). Anything larger is truncated
-# with a hint so the agent can read the file via workspace tools.
-_MAX_KNOWLEDGE_INLINE = 5_000
-
-
-def _truncate_inline_knowledge(text: str, max_chars: int = _MAX_KNOWLEDGE_INLINE) -> str:
-    """Clamp oversized <knowledge> blocks inside user text to prevent context explosion."""
-    if not text or len(text) <= max_chars:
-        return text
-    import re
-    pattern = re.compile(r"<knowledge>.*?</knowledge>", re.DOTALL)
-
-    def _clamp(m: re.Match) -> str:
-        block = m.group(0)
-        if len(block) <= max_chars:
-            return block
-        # Preserve the opening tag and title line, truncate body
-        head = block[:300]
-        tail = block[-50:] if "</knowledge>" in block else "</knowledge>"
-        return head + f"\n\n... [内容已截断，文件较大，请使用 read_file 工具分段读取]\n\n" + tail
-
-    return pattern.sub(_clamp, text)
-
-
 _FILE_WRITE_PREAMBLE = (
     "【文件写入规范】当你需要为用户创建、生成或导出文件时，"
     "必须使用 write_file 工具将文件写入当前工作目录（cwd）。"
@@ -887,7 +863,25 @@ async def _build_skills_prompt(
 import re as _re_for_html  # noqa: E402
 
 _KNOWLEDGE_PER_ITEM = 2000   # chars per bound knowledge entry
-_KNOWLEDGE_TOTAL = 8000      # chars across all entries
+_KNOWLEDGE_TOTAL = 8000      # aggregate chars across all knowledge entries in one turn
+# Knowledge entries live in team_knowledge/project_docs, not the agent's
+# workspace — unlike a truncated attachment, there is no read_file/tool the
+# agent can call to fetch the rest, so the hint must not imply one exists.
+_KNOWLEDGE_TRUNC_HINT = "\n... [内容较长，此处已截断，如信息不足请如实告知用户]"
+
+
+def _clip_knowledge_body(content: str, remaining_budget: int) -> tuple[str, bool]:
+    """Clip one knowledge entry to at most _KNOWLEDGE_PER_ITEM chars and to
+    whatever remains of the turn's aggregate budget.
+
+    Shared by both the Profile-bound and request-level knowledge builders so
+    a truncation is *always* flagged with a hint — previously the per-item
+    cap silently dropped content with no indication to the agent.
+    """
+    cap = min(_KNOWLEDGE_PER_ITEM, max(0, remaining_budget))
+    if len(content) <= cap:
+        return content, False
+    return content[:cap], True
 
 
 def _html_to_plain_text(html: str) -> str:
@@ -1025,6 +1019,8 @@ async def _build_knowledge_prompt(db: AsyncSession, profile: Profile | None) -> 
     parts: list[str] = []
     used = 0
     for kid in all_ids:
+        if used >= _KNOWLEDGE_TOTAL:
+            break
         entry = await db.get(TeamKnowledge, kid) or await db.get(ProjectDoc, kid)
         if entry is None or not getattr(entry, "content", None):
             continue
@@ -1033,15 +1029,13 @@ async def _build_knowledge_prompt(db: AsyncSession, profile: Profile | None) -> 
         content = entry.content
         if "<" in content and ">" in content:
             content = _html_to_plain_text(content)
-        body = content[:_KNOWLEDGE_PER_ITEM]
-        if used + len(body) > _KNOWLEDGE_TOTAL:
-            body = body[: max(0, _KNOWLEDGE_TOTAL - used)]
+        body, truncated = _clip_knowledge_body(content, _KNOWLEDGE_TOTAL - used)
         if not body:
             break
+        if truncated:
+            body += _KNOWLEDGE_TRUNC_HINT
         parts.append(f"[{entry.name}]\n{body}")
         used += len(body)
-        if used >= _KNOWLEDGE_TOTAL:
-            break
     if not parts:
         return None
     return (
@@ -1051,17 +1045,22 @@ async def _build_knowledge_prompt(db: AsyncSession, profile: Profile | None) -> 
 
 
 async def _build_request_knowledge_prompt(db: AsyncSession, knowledge_ids: list[str]) -> str | None:
-    """Build knowledge prompt from request-level knowledge_ids (user-selected knowledge refs)."""
+    """Build knowledge prompt from request-level knowledge_ids (user-selected knowledge refs).
+
+    Uses the same per-item/aggregate budget and truncation-hint behavior as
+    _build_knowledge_prompt (Profile-bound knowledge) so a knowledge reference
+    behaves identically regardless of whether it came from a Profile binding
+    or the composer's per-message knowledge picker.
+    """
     if not knowledge_ids:
         return None
     from app.db.models.team import ProjectDoc, TeamKnowledge
 
     parts: list[str] = []
     used = 0
-    _MAX_KNOWLEDGE_PER_ITEM = 2000
-    _MAX_KNOWLEDGE_TOTAL = 8000
-
     for kid_str in knowledge_ids:
+        if used >= _KNOWLEDGE_TOTAL:
+            break
         try:
             kid = uuid.UUID(str(kid_str))
         except (ValueError, TypeError):
@@ -1072,16 +1071,13 @@ async def _build_request_knowledge_prompt(db: AsyncSession, knowledge_ids: list[
         content = entry.content
         if "<" in content and ">" in content:
             content = _html_to_plain_text(content)
-        body = content[:_MAX_KNOWLEDGE_PER_ITEM]
-        if used + len(body) > _MAX_KNOWLEDGE_TOTAL:
-            body = body[: max(0, _MAX_KNOWLEDGE_TOTAL - used)]
-            parts.append(f"<knowledge>【知识库: {entry.name}】\n{body}\n... [内容已截断，请使用 read_file 工具分段读取]</knowledge>")
-            used = _MAX_KNOWLEDGE_TOTAL
+        body, truncated = _clip_knowledge_body(content, _KNOWLEDGE_TOTAL - used)
+        if not body:
             break
+        if truncated:
+            body += _KNOWLEDGE_TRUNC_HINT
         parts.append(f"<knowledge>【知识库: {entry.name}】\n{body}</knowledge>")
         used += len(body)
-        if used >= _MAX_KNOWLEDGE_TOTAL:
-            break
 
     return "\n\n".join(parts) if parts else None
 
@@ -1782,6 +1778,30 @@ async def _persist_group_user_msg(
     return user_msg
 
 
+async def _resolve_group_member_profile_id(
+    db: AsyncSession, target_profile_id: str | None, target_agent_id: str,
+) -> str | None:
+    """Resolve which Profile answers for one @-mentioned/auto-reply group target.
+
+    Group chat must NEVER fall back to the conversation's single-agent default
+    (`convo.profile_id`) or to a request-level override — that's the personal
+    1:1-conversation concept of "currently selected assistant", and leaking it
+    here is what caused a reply to carry the wrong persona regardless of which
+    agent was actually @-mentioned. The only fallback allowed is a best-effort
+    match by `default_agent_id`, for legacy group members with no Profile bound.
+    """
+    if target_profile_id:
+        return target_profile_id
+    res_p = await db.execute(
+        select(Profile).where(
+            Profile.default_agent_id == target_agent_id,
+            Profile.is_active.is_(True),
+        ).limit(1)
+    )
+    agent_profile = res_p.scalars().first()
+    return str(agent_profile.id) if agent_profile else None
+
+
 async def dispatch_group(
     db: AsyncSession,
     convo: Conversation,
@@ -1791,13 +1811,17 @@ async def dispatch_group(
     knowledge_ids: list[str] | None = None,
     owner_id: uuid.UUID | None = None,
     skip_agent: bool = False,
-    profile_id_override: str | None = None,
     reply_to_id: uuid.UUID | None = None,
     task_id: uuid.UUID | None = None,
 ) -> tuple[Message, Message | None]:
     """群聊消息路由：按 channel_mode + mentions 决定走人→人 / 人→机 / 圆桌。
 
     无论是否触发 AI，人类消息总是先持久化并实时广播给全体成员（含发送者回显）。
+
+    谁来作答只由两件事决定：@提及解析出的目标（resolve_mentions），或
+    channel_mode == "always" 时的全员自动回复——绝不采用请求方传入的
+    profile 覆盖，也绝不回退到会话级 convo.profile_id（那是单人会话"当前
+    默认助手"的概念，混进群聊会导致回复人设与 @ 的目标对不上）。
     """
     resolved = await resolve_mentions(db, convo.id, mentions)
     mode = getattr(convo, "channel_mode", "mention") or "mention"
@@ -1827,31 +1851,40 @@ async def dispatch_group(
     if save_only:
         return user_msg, None
 
+    # 请求级知识库引用（用户在群聊输入框知识库选择器里挑的条目）——与个人会话
+    # dispatch() 一致，注入到每个作答目标的 system_prompt，而不仅仅是持久化
+    # 一个徽章元数据给人看。
+    request_knowledge_prompt = (
+        await _build_request_knowledge_prompt(db, knowledge_ids) if knowledge_ids else None
+    )
+
     if len(agent_targets) == 1:
         # 人→机模式：单 Agent
         target_profile_id, target_agent_id = agent_targets[0]
         system_prompt = None
         profile_dir = None
         mcp_servers: list[dict] = []
-        # 优先级：显式 profile_id_override > 该成员绑定的 Profile > 会话默认
-        effective_profile_id = profile_id_override or target_profile_id or convo.profile_id
-        if not profile_id_override and not target_profile_id:
-            # 该成员没有绑定具体 Profile（历史数据）：退化为按 agent_id 尽力匹配
-            res_p = await db.execute(
-                select(Profile).where(
-                    Profile.default_agent_id == target_agent_id,
-                    Profile.is_active.is_(True),
-                ).limit(1)
-            )
-            agent_profile = res_p.scalars().first()
-            if agent_profile:
-                effective_profile_id = str(agent_profile.id)
+        effective_profile_id = await _resolve_group_member_profile_id(
+            db, target_profile_id, target_agent_id
+        )
         if effective_profile_id:
             profile = await db.get(Profile, effective_profile_id)
             if profile:
                 system_prompt = profile.system_prompt or None
                 profile_dir = _profile_dir(profile)
                 mcp_servers = await _resolve_mcp_servers(db, profile)
+                # 该成员绑定的团队/项目知识库——与个人会话 dispatch() 保持一致，
+                # 此前群聊完全没有注入这块内容。
+                knowledge_prompt = await _build_knowledge_prompt(db, profile)
+                if knowledge_prompt:
+                    system_prompt = (
+                        f"{system_prompt}\n\n{knowledge_prompt}" if system_prompt else knowledge_prompt
+                    )
+
+        if request_knowledge_prompt:
+            system_prompt = (
+                f"{system_prompt}\n\n{request_knowledge_prompt}" if system_prompt else request_knowledge_prompt
+            )
 
         memory_prompt = await _build_memory_prompt(db, owner_id)
         if memory_prompt:
@@ -1876,21 +1909,31 @@ async def dispatch_group(
         )
         return user_msg, agent_msg
 
-    # 圆桌模式：多 Agent 并行 — 每个目标独立解析自己绑定的 Profile 人设/工作目录，
-    # 不再用单一会话级 Profile 覆盖全部参与者（这正是此前"圆桌形同虚设"的根因）。
+    # 圆桌模式：多 Agent 并行 — 每个目标独立解析自己绑定的 Profile 人设/工作目录/
+    # 知识库，不再用单一会话级 Profile 覆盖全部参与者（这正是此前"圆桌形同虚设"
+    # 的根因）。
     memory_prompt = await _build_memory_prompt(db, owner_id)
     targets: list[dict] = []
     for target_profile_id, target_agent_id in agent_targets:
         t_system_prompt = None
         t_profile_dir = None
         t_mcp_servers: list[dict] = []
-        eff_pid = target_profile_id or convo.profile_id
+        eff_pid = await _resolve_group_member_profile_id(db, target_profile_id, target_agent_id)
         if eff_pid:
             profile = await db.get(Profile, eff_pid)
             if profile:
                 t_system_prompt = profile.system_prompt or None
                 t_profile_dir = _profile_dir(profile)
                 t_mcp_servers = await _resolve_mcp_servers(db, profile)
+                knowledge_prompt = await _build_knowledge_prompt(db, profile)
+                if knowledge_prompt:
+                    t_system_prompt = (
+                        f"{t_system_prompt}\n\n{knowledge_prompt}" if t_system_prompt else knowledge_prompt
+                    )
+        if request_knowledge_prompt:
+            t_system_prompt = (
+                f"{t_system_prompt}\n\n{request_knowledge_prompt}" if t_system_prompt else request_knowledge_prompt
+            )
         if memory_prompt:
             t_system_prompt = f"{t_system_prompt}\n\n{memory_prompt}" if t_system_prompt else memory_prompt
         targets.append({

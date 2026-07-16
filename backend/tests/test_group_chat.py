@@ -210,6 +210,133 @@ async def test_roundtable_keeps_distinct_profiles_sharing_agent_id(db):
 
 
 @pytest.mark.asyncio
+async def test_group_dispatch_ignores_conversation_default_profile(db):
+    """Regression test: a group conversation must route purely by @mention,
+    never by the conversation's single-chat "default assistant" (profile_id)
+    or by a request-level override — that was the bug where @-ing one agent
+    still answered with a different agent's persona.
+    """
+    from app.db.models.agent import Profile
+
+    owner = await _mk_user(db, "o8@h.io")
+    team = await _mk_team_with_members(db, owner, [])
+
+    mentioned = Profile(
+        id=uuid.uuid4(), name="被@助手", handle="p8-target",
+        default_agent_id="coder", system_prompt="你是被@的助手", is_active=True,
+    )
+    decoy = Profile(
+        id=uuid.uuid4(), name="会话默认助手", handle="p8-decoy",
+        default_agent_id="hermes", system_prompt="你是会话默认助手（不应被使用）", is_active=True,
+    )
+    db.add_all([mentioned, decoy])
+    await db.flush()
+    team.shared_profile_ids = [str(mentioned.id)]
+    await db.flush()
+
+    group = await svc.get_or_create_team_group(db, team, owner.id)
+    # Simulate the leftover "personal conversation default profile" leaking
+    # onto the group's own profile_id column.
+    group.profile_id = str(decoy.id)
+    await db.flush()
+
+    user_msg, agent_msg = await svc.dispatch_group(
+        db, group, "@被@助手 你好", ["coder"], owner_id=owner.id,
+    )
+    assert agent_msg is not None
+    assert agent_msg.agent_id == "coder"
+    assert agent_msg.profile_id == mentioned.id
+
+    import json as _json
+
+    from app.config import settings
+
+    entries = await redis_core.get_redis().xrange(settings.acp_stream, "-", "+")
+    task = _json.loads(entries[-1][1]["data"])
+    assert task["type"] == "single"
+    assert task["system_prompt"] and "你是被@的助手" in task["system_prompt"]
+    assert "不应被使用" not in (task["system_prompt"] or "")
+
+
+@pytest.mark.asyncio
+async def test_group_dispatch_injects_member_knowledge_base(db):
+    """Group chat must inject a mentioned member's bound team knowledge —
+    previously dispatch_group() built system_prompt from profile.system_prompt
+    only, silently dropping the knowledge base personal 1:1 chat already injects.
+    """
+    from app.db.models.agent import Profile
+    from app.db.models.team import TeamKnowledge
+
+    owner = await _mk_user(db, "o9@h.io")
+    team = await _mk_team_with_members(db, owner, [])
+
+    tk = TeamKnowledge(
+        id=uuid.uuid4(), team_id=team.id, name="产品手册.md",
+        content="本产品的核心特性是 ACME-KNOWLEDGE-MARKER。",
+    )
+    db.add(tk)
+    await db.flush()
+
+    profile = Profile(
+        id=uuid.uuid4(), name="产品助手", handle="p9-product",
+        default_agent_id="hermes", is_active=True,
+        knowledge_ids=[str(tk.id)],
+    )
+    db.add(profile)
+    await db.flush()
+    team.shared_profile_ids = [str(profile.id)]
+    await db.flush()
+
+    group = await svc.get_or_create_team_group(db, team, owner.id)
+    _, agent_msg = await svc.dispatch_group(
+        db, group, "@产品助手 这个产品有什么特性？", ["hermes"], owner_id=owner.id,
+    )
+    assert agent_msg is not None
+
+    import json as _json
+
+    from app.config import settings
+
+    entries = await redis_core.get_redis().xrange(settings.acp_stream, "-", "+")
+    task = _json.loads(entries[-1][1]["data"])
+    assert "ACME-KNOWLEDGE-MARKER" in (task["system_prompt"] or "")
+
+
+@pytest.mark.asyncio
+async def test_group_dispatch_injects_request_level_knowledge_ids(db):
+    """A user-selected knowledge reference (picked in the composer's knowledge
+    picker) must actually reach the model's system_prompt in group chat, not
+    just be persisted as a display badge on the message.
+    """
+    from app.db.models.team import TeamKnowledge
+
+    owner = await _mk_user(db, "o10@h.io")
+    team = await _mk_team_with_members(db, owner, [])
+
+    tk = TeamKnowledge(
+        id=uuid.uuid4(), team_id=team.id, name="季度报告.md",
+        content="季度营收 ACME-REQUEST-KNOWLEDGE-MARKER。",
+    )
+    db.add(tk)
+    await db.flush()
+
+    group = await svc.get_or_create_team_group(db, team, owner.id)
+    _, agent_msg = await svc.dispatch_group(
+        db, group, "参考这份报告回答", ["hermes"], owner_id=owner.id,
+        knowledge_ids=[str(tk.id)],
+    )
+    assert agent_msg is not None
+
+    import json as _json
+
+    from app.config import settings
+
+    entries = await redis_core.get_redis().xrange(settings.acp_stream, "-", "+")
+    task = _json.loads(entries[-1][1]["data"])
+    assert "ACME-REQUEST-KNOWLEDGE-MARKER" in (task["system_prompt"] or "")
+
+
+@pytest.mark.asyncio
 async def test_edit_recall_reaction(db):
     owner = await _mk_user(db, "o5@h.io")
     team = await _mk_team_with_members(db, owner, [])

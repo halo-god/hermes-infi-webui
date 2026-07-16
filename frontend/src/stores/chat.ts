@@ -373,7 +373,7 @@ export const useChatStore = defineStore("chat", () => {
   async function send(
     text: string,
     agentId = "hermes",
-    opts?: { profileId?: string; webSearch?: boolean; deepThink?: boolean; stagedFiles?: File[]; attachedFileIds?: string[]; mentions?: string[]; replyToId?: string; taskId?: string },
+    opts?: { profileId?: string; webSearch?: boolean; deepThink?: boolean; stagedFiles?: File[]; attachedFileIds?: string[]; knowledgeIds?: string[]; mentions?: string[]; replyToId?: string; taskId?: string },
   ) {
     if (!activeId.value) await newConversation(agentId, opts?.profileId);
     const id = activeId.value!;
@@ -426,12 +426,16 @@ export const useChatStore = defineStore("chat", () => {
         mentions,
         reply_to_id: opts?.replyToId,
         task_id: opts?.taskId,
-        profileId: opts?.profileId,
+        // Group chat must never carry the personal-conversation "current
+        // assistant" profile — who answers is decided purely by @mentions
+        // (routed server-side in dispatch_group) or the channel's auto-reply
+        // (channel_mode="always") setting, never by a transmitted profileId.
+        knowledge_ids: opts?.knowledgeIds || [],
         attached_file_ids: fileIds,
       });
     } else {
       // Personal conversation: existing logic
-      const passOpts = { profileId: opts?.profileId, fileIds, taskId: opts?.taskId };
+      const passOpts = { profileId: opts?.profileId, fileIds, knowledgeIds: opts?.knowledgeIds, taskId: opts?.taskId };
       // An MoA profile fans out to its reference profiles via the roundtable
       // executor server-side (dispatch() decides this), so it needs the same
       // WS transport as a real multi-agent roundtable — the SSE transport
@@ -447,7 +451,7 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   /** Single agent: open SSE, register handlers, then POST. */
-  async function sendSingle(id: string, text: string, opts?: { profileId?: string; fileIds?: string[]; taskId?: string }) {
+  async function sendSingle(id: string, text: string, opts?: { profileId?: string; fileIds?: string[]; knowledgeIds?: string[]; taskId?: string }) {
     closeStream();
     streamingConvoId.value = id;
     setupStreamHandlers();
@@ -501,7 +505,7 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   /** Roundtable: bidirectional WebSocket — send + stream over one socket. */
-  async function sendRoundtable(id: string, text: string, opts?: { profileId?: string; fileIds?: string[]; taskId?: string }) {
+  async function sendRoundtable(id: string, text: string, opts?: { profileId?: string; fileIds?: string[]; knowledgeIds?: string[]; taskId?: string }) {
     closeStream();
     streamingConvoId.value = id;
     setupStreamHandlers();
@@ -526,8 +530,11 @@ export const useChatStore = defineStore("chat", () => {
       created_at: new Date().toISOString(),
     });
 
-    const { fileIds, taskId, ...restOpts } = opts || {};
-    stream.send({ action: "send", text, ...restOpts, task_id: taskId, attached_file_ids: fileIds || [] });
+    const { fileIds, taskId, knowledgeIds, ...restOpts } = opts || {};
+    stream.send({
+      action: "send", text, ...restOpts,
+      task_id: taskId, attached_file_ids: fileIds || [], knowledge_ids: knowledgeIds || [],
+    });
   }
 
   async function cancel() {

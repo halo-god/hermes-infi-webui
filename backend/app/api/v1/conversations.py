@@ -488,7 +488,6 @@ async def send_message(
             knowledge_ids=payload.knowledge_ids,
             owner_id=user.id,
             skip_agent=payload.skip_agent,
-            profile_id_override=payload.profile_id,
             reply_to_id=payload.reply_to_id,
             task_id=payload.task_id,
         )
@@ -662,6 +661,7 @@ async def conversation_ws(
                         )
                         continue
                     file_ids = payload.get("attached_file_ids") or []
+                    knowledge_ids = payload.get("knowledge_ids") or payload.get("knowledgeIds") or []
                     p_id = payload.get("profileId") or payload.get("profile_id") or None
                     mentions = payload.get("mentions") or []
                     reply_raw = payload.get("reply_to_id")
@@ -684,15 +684,20 @@ async def conversation_ws(
                         c = await svc.get_conversation(msg_db, conversation_id, user_id)
                         if c and c.type == "group":
                             # Group: route via @mentions (human↔human / human↔AI / roundtable).
+                            # No profile_id_override here — group chat must never inherit
+                            # the personal-conversation "current assistant" profile; who
+                            # answers is decided purely by @mentions / auto-reply mode.
                             await svc.dispatch_group(
                                 msg_db, c, text, mentions,
-                                attached_file_ids=file_ids, owner_id=user_id,
-                                profile_id_override=p_id, reply_to_id=reply_to_id,
+                                attached_file_ids=file_ids, knowledge_ids=knowledge_ids,
+                                owner_id=user_id,
+                                reply_to_id=reply_to_id,
                                 task_id=task_id,
                             )
                         elif c:
                             await svc.dispatch(
-                                msg_db, c, text, attached_file_ids=file_ids, owner_id=user_id,
+                                msg_db, c, text, attached_file_ids=file_ids, knowledge_ids=knowledge_ids,
+                                owner_id=user_id,
                                 profile_id_override=p_id, task_id=task_id,
                             )
             elif action == "cancel":

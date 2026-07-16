@@ -287,7 +287,11 @@ function doSend() {
   // Clear saved draft on send
   if (props.conversationId) localStorage.removeItem(`draft:${props.conversationId}`);
 
-  emit("send", { profileId: selected.value?.id, stagedFiles: files, knowledgeIds: kIds, attachedFileIds: fIds, mentions, replyToId: props.replyTo?.id });
+  // Group chat must never transmit the personal-conversation "current
+  // assistant" profile — who answers is decided purely by @mentions or the
+  // channel's auto-reply setting, never by whatever profile happens to be
+  // pinned/shown in this composer.
+  emit("send", { profileId: props.isGroup ? undefined : selected.value?.id, stagedFiles: files, knowledgeIds: kIds, attachedFileIds: fIds, mentions, replyToId: props.replyTo?.id });
 }
 
 function selectMention(agent: { agent_id: string; name: string; profile_id?: string | null }) {

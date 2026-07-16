@@ -55,13 +55,14 @@ export const conversationsApi = {
   async getShared(id: string): Promise<ConversationDetail> {
     return (await http.get<ConversationDetail>(`/conversations/shared/${id}`)).data;
   },
-  async send(id: string, text: string, opts?: { profileId?: string; fileIds?: string[]; skipAgent?: boolean; taskId?: string }): Promise<SendResponse> {
-    const { fileIds, skipAgent, profileId, taskId, ...restOpts } = opts || {};
+  async send(id: string, text: string, opts?: { profileId?: string; fileIds?: string[]; knowledgeIds?: string[]; skipAgent?: boolean; taskId?: string }): Promise<SendResponse> {
+    const { fileIds, knowledgeIds, skipAgent, profileId, taskId, ...restOpts } = opts || {};
     return (await http.post<SendResponse>(`/conversations/${id}/messages`, {
       text,
       ...restOpts,
       profile_id: profileId || null,
       attached_file_ids: fileIds || [],
+      knowledge_ids: knowledgeIds || [],
       skip_agent: skipAgent || false,
       task_id: taskId || null,
     })).data;
