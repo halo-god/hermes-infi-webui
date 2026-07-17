@@ -744,6 +744,7 @@ async def send_message(
             "conversation_id": str(convo.id),
             "message_id": str(agent_msg.id),
             "agent_id": reply_agent_id,
+            "profile_id": str(parsed_profile_id) if parsed_profile_id else None,
             "text": full_text,
             "content_blocks": prompt_blocks if len(prompt_blocks) > 1 else None,
             "system_prompt": system_prompt,

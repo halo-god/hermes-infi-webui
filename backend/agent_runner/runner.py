@@ -682,7 +682,7 @@ class Runner:
             )
 
         await R.publish_event(
-            conversation_id, {"type": "start", "message_id": message_id, "agent_id": agent_id}
+            conversation_id, {"type": "start", "message_id": message_id, "agent_id": agent_id, "profile_id": task.get("profile_id")}
         )
 
         try:

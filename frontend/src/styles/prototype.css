@@ -588,14 +588,15 @@
   /* Sticky composer in thread */
   .dock {
     position: absolute;
-    left: 50%; transform: translateX(-50%);
+    left: 0;
+    right: 0;
     bottom: 18px;
-    width: 85%;
-    min-width: 480px;
-    max-width: 1000px;
+    padding: 0 40px;
+    display: flex;
+    justify-content: center;
     pointer-events: none;
   }
-  .dock .composer-wrap { pointer-events: auto; }
+  .dock .composer-wrap { width: 100%; max-width: 900px; pointer-events: auto; }
 
   /* Dropdown menu */
   .menu {

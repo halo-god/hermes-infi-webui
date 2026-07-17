@@ -149,6 +149,7 @@ export function registerStreamHandlers(
         owner_id: null,
         role: "agent",
         agent_id: ev.agent_id || "hermes",
+        profile_id: ev.profile_id || null,
         content: { text: "" },
         status: "streaming",
         created_at: new Date().toISOString(),
