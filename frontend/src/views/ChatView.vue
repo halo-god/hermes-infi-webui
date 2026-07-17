@@ -877,7 +877,7 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                 </template>
                 <h2 v-else class="thread-title" @click="startEditTitle" title="点击编辑标题">{{ activeConvo?.title || "对话" }}</h2>
                 <div class="thread-meta" style="margin-top:5px;">
-                  <span class="agent-tag"><Icon :name="primaryProfile?.icon || 'brand'" :size="10" /> {{ primaryProfile?.name || branding.shortName }}</span>
+                  <span v-if="!isGroup" class="agent-tag"><Icon :name="primaryProfile?.icon || 'brand'" :size="10" /> {{ primaryProfile?.name || branding.shortName }}</span>
                   <span v-if="chat.activeProfiles.length > 1" class="agent-tag" style="background:rgba(184,133,42,0.14);color:var(--accent-deep);">
                     <Icon name="sparkle" :size="10" /> 圆桌 · {{ chat.activeProfiles.length }} 位并行
                   </span>

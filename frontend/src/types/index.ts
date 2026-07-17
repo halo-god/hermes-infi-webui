@@ -352,7 +352,7 @@ export interface RtAgentMeta {
 // `conversation_id` is injected centrally by the backend so handlers can drop
 // events that belong to another conversation (switch-while-streaming).
 export type StreamEvent = (
-  | { type: "start"; message_id: string }
+  | { type: "start"; message_id: string; agent_id?: string }
   | { type: "token"; message_id: string; delta: string }
   | { type: "tool_call"; message_id: string; title?: string; status?: string }
   | { type: "file"; message_id: string; file_id: string; name: string; kind: string; version: number; diff?: string | null }

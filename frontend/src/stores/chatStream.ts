@@ -148,7 +148,7 @@ export function registerStreamHandlers(
         conversation_id: activeId.value || "",
         owner_id: null,
         role: "agent",
-        agent_id: "hermes",
+        agent_id: ev.agent_id || "hermes",
         content: { text: "" },
         status: "streaming",
         created_at: new Date().toISOString(),
