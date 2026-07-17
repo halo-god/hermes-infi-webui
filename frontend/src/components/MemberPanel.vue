@@ -48,24 +48,12 @@ const aiMembers = computed(() => {
         name: m.profile_name || fallback?.name || m.agent_id!,
         color: m.profile_color || fallback?.color || '#b8852a',
         icon: m.profile_icon || fallback?.icon || 'sparkle',
-        autoReply: !!m.auto_reply,
       };
     });
 });
 
-async function toggleAutoReply(m: { id: string; autoReply: boolean }) {
-  const next = !m.autoReply;
-  const member = members.value.find((mm) => mm.id === m.id);
-  if (member) member.auto_reply = next; // optimistic
-  try {
-    await conversationsApi.updateMember(props.conversationId, m.id, { autoReply: next });
-  } catch {
-    if (member) member.auto_reply = !next; // revert on failure
-  }
-}
-
 const channelModeOptions = [
-  { value: 'mention', label: '@ 触发', desc: '被 @ 或已开启"自动回复"的助手才会回复' },
+  { value: 'mention', label: '@ 触发', desc: '被 @ 到的助才会回复，@ 所有AI 则全部回复' },
   { value: 'off', label: '关闭', desc: '仅人工对话' },
 ];
 
@@ -127,14 +115,6 @@ watch(() => props.conversationId, load);
                 <div class="mp-name">{{ a.name }}</div>
                 <div class="mp-sub">{{ getProfileForAgent(a.agentId)?.desc || 'AI 助手' }}</div>
               </div>
-              <button
-                class="mp-auto-reply-toggle"
-                :class="{ on: a.autoReply }"
-                :title="a.autoReply ? '已开启自动回复（未被 @ 也会应答）' : '开启后即使没被 @ 也会应答'"
-                @click="toggleAutoReply(a)"
-              >
-                <span class="mp-toggle-knob" />
-              </button>
             </div>
             <div v-if="!aiMembers.length" class="mp-empty-sm">暂无 AI 助手</div>
           </template>

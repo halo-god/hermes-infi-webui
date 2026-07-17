@@ -1899,16 +1899,8 @@ async def dispatch_group(
     # 特例——auto_reply 是逐成员的，channel_mode 的 mention/always 两态在
     # 参与判定上已等价（区别只剩历史遗留的存量数据，迁移时已批量置位）。
     agent_targets: list[tuple[str | None, str]] = list(resolved.agent_targets)
-    if mode != "off" and not resolved.all_humans and not skip_agent:
-        existing_keys = {(pid, aid) for pid, aid in agent_targets}
-        members = await get_group_members(db, convo.id)
-        for m in members:
-            if not m.agent_id or not m.auto_reply:
-                continue
-            key = (str(m.profile_id) if m.profile_id else None, m.agent_id)
-            if key not in existing_keys:
-                agent_targets.append(key)
-                existing_keys.add(key)
+    # 只有被 @ 提及的 AI 才参与应答，不再根据 auto_reply 开关自动拉入。
+    # @所有AI → 全部参与（圆桌）；@单个/多个 AI → 被 @ 的那些参与。
 
     save_only = (
         mode == "off" or skip_agent or resolved.all_humans or not agent_targets
