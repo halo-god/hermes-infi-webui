@@ -611,7 +611,8 @@ function isImageFile(f: File) {
           </div>
         </div>
         <span class="composer-spacer"></span>
-        <div style="position: relative">
+        <!-- 群聊模式下不显示 profile 选择器，回复者由 @mention 决定 -->
+        <div v-if="!isGroup" style="position: relative">
           <button class="model-pick" :class="{ locked: profileLocked }" :title="profileLocked ? '助手已锁定，创建新会话可切换' : '切换助手'" @click="!profileLocked && (showProfile = !showProfile)">
             <span class="profile-dot" :style="{ background: pillColor }"></span>
             {{ pillLabel }}
