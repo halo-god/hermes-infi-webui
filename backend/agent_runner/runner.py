@@ -555,6 +555,9 @@ class Runner:
 
         # If a profile-specific session exists in Redis, use it instead of the
         # conversation-level one so that group-chat agents are isolated.
+        # When switching to a different profile, NEVER resume the old
+        # conversation-level session (it may belong to a different profile/env
+        # and hermes CLI will refuse with stop_reason=refusal).
         if profile_id:
             redis = R.get_redis()
             key = f"acp_session:{conversation_id}:{profile_id}"
@@ -562,6 +565,10 @@ class Runner:
                 sid = await redis.get(key)
                 if sid:
                     acp_session_id = sid.decode("utf-8") if isinstance(sid, bytes) else sid
+                else:
+                    # No profile-specific session yet — force a fresh session
+                    # rather than reusing a potentially mismatched convo-level one.
+                    acp_session_id = None
             except Exception:
                 pass
 
