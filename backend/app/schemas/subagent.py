@@ -3,8 +3,14 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel
+
+SubagentStatus = Literal[
+    "starting", "running", "idle", "waiting_input",
+    "done", "error", "stopped", "timeout", "interrupted",
+]
 
 
 class SubagentSpawn(BaseModel):
@@ -25,7 +31,7 @@ class SubagentOut(BaseModel):
     purpose: str
     agent_id: str
     profile_id: uuid.UUID | None
-    status: str
+    status: SubagentStatus
     last_active_at: datetime | None
     error_detail: str | None
     unread_count: int = 0

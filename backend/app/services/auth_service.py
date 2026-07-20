@@ -4,6 +4,7 @@ LDAP/AD and WeCom are stubbed with a clear NotImplemented path (P5).
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 import jwt
@@ -29,14 +30,19 @@ from app.db.models.user import User
 from app.schemas.auth import LoginRequest, TokenPair
 from app.services import user_service
 
+logger = logging.getLogger(__name__)
+
 
 async def authenticate_local(db: AsyncSession, username: str, password: str) -> User:
     user = await user_service.get_by_email(db, username)
     if not user or not user.password_hash:
+        logger.warning("Auth failed: user not found or no password set (email=%s)", username[:50])
         raise InvalidCredentialsError()
     if not verify_password(password, user.password_hash):
+        logger.warning("Auth failed: invalid password (email=%s)", username[:50])
         raise InvalidCredentialsError()
     if not user.is_active or user.status == "inactive":
+        logger.warning("Auth failed: account disabled (email=%s)", username[:50])
         raise AccountDisabledError()
 
     # Transparent rehash on algorithm/param upgrade.

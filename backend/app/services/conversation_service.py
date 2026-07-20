@@ -270,16 +270,25 @@ async def _resolve_attached_files(
         if storage_convo:
             file_storage_convo_id = storage_convo.id
 
-    result = []
+    # Batch-load all files in a single query instead of N individual db.get
+    # calls (N+1 prevention on the message send hot path).
+    valid_fids: list[uuid.UUID] = []
     for raw_id in file_ids:
         try:
-            fid = uuid.UUID(str(raw_id))
+            valid_fids.append(uuid.UUID(str(raw_id)))
         except ValueError:
             continue
-        f = await db.get(WorkspaceFile, fid)
-        # Security: only allow files belonging to the current conversation,
-        # OR the user's global __file_storage__ conversation, to prevent
-        # cross-user/cross-conversation file content exfiltration.
+    if not valid_fids:
+        return []
+
+    file_rows = (
+        await db.execute(select(WorkspaceFile).where(WorkspaceFile.id.in_(valid_fids)))
+    ).scalars().all()
+    files_by_id: dict[uuid.UUID, WorkspaceFile] = {f.id: f for f in file_rows}
+
+    result = []
+    for fid in valid_fids:
+        f = files_by_id.get(fid)
         if f is None:
             continue
         f_conv_id = f.conversation_id
@@ -1023,6 +1032,34 @@ async def _collect_folder_knowledge_ids(
     return result
 
 
+async def _batch_load_knowledge_entries(
+    db: AsyncSession, all_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, object]:
+    """Batch-load knowledge entries from TeamKnowledge and ProjectDoc in two
+    queries instead of N per-id db.get round-trips (N+1 prevention)."""
+    from app.db.models.team import ProjectDoc, TeamKnowledge
+
+    result: dict[uuid.UUID, object] = {}
+    if not all_ids:
+        return result
+
+    tk_rows = (await db.execute(
+        select(TeamKnowledge).where(TeamKnowledge.id.in_(all_ids))
+    )).scalars().all()
+    for r in tk_rows:
+        result[r.id] = r
+
+    remaining = [kid for kid in all_ids if kid not in result]
+    if remaining:
+        pd_rows = (await db.execute(
+            select(ProjectDoc).where(ProjectDoc.id.in_(remaining))
+        )).scalars().all()
+        for r in pd_rows:
+            result[r.id] = r
+
+    return result
+
+
 async def _build_knowledge_prompt(db: AsyncSession, profile: Profile | None) -> str | None:
     """Inject the content of a Profile's bound knowledge into the prompt.
 
@@ -1033,7 +1070,7 @@ async def _build_knowledge_prompt(db: AsyncSession, profile: Profile | None) -> 
     """
     if not profile:
         return None
-    from app.db.models.team import ProjectDoc, TeamKnowledge
+    from app.db.models.team import TeamKnowledge
 
     # Collect all knowledge IDs to load
     all_ids: list[uuid.UUID] = []
@@ -1078,8 +1115,9 @@ async def _build_knowledge_prompt(db: AsyncSession, profile: Profile | None) -> 
 
     parts: list[str] = []
     used = 0
+    entries_by_id = await _batch_load_knowledge_entries(db, all_ids)
     for kid in all_ids:
-        entry = await db.get(TeamKnowledge, kid) or await db.get(ProjectDoc, kid)
+        entry = entries_by_id.get(kid)
         if entry is None or not getattr(entry, "content", None):
             continue
         # Office HTML is for human preview only. For AI prompt injection,
@@ -1108,18 +1146,22 @@ async def _build_request_knowledge_prompt(db: AsyncSession, knowledge_ids: list[
     """Build knowledge prompt from request-level knowledge_ids (user-selected knowledge refs)."""
     if not knowledge_ids:
         return None
-    from app.db.models.team import ProjectDoc, TeamKnowledge
+
+    valid_ids: list[uuid.UUID] = []
+    for kid_str in knowledge_ids:
+        try:
+            valid_ids.append(uuid.UUID(str(kid_str)))
+        except (ValueError, TypeError):
+            continue
+    if not valid_ids:
+        return None
 
     parts: list[str] = []
     used = 0
 
-
-    for kid_str in knowledge_ids:
-        try:
-            kid = uuid.UUID(str(kid_str))
-        except (ValueError, TypeError):
-            continue
-        entry = await db.get(TeamKnowledge, kid) or await db.get(ProjectDoc, kid)
+    entries_by_id = await _batch_load_knowledge_entries(db, valid_ids)
+    for kid in valid_ids:
+        entry = entries_by_id.get(kid)
         if entry is None or not getattr(entry, "content", None):
             continue
         content = entry.content
@@ -1142,14 +1184,18 @@ async def _build_request_knowledge_prompt(db: AsyncSession, knowledge_ids: list[
 
 async def _resolve_knowledge_names(db, knowledge_ids: list[str]) -> dict[str, str]:
     """Map knowledge IDs to their display names for persisting in message metadata."""
-    from app.db.models.team import ProjectDoc, TeamKnowledge
-    out: dict[str, str] = {}
+    valid_ids: list[uuid.UUID] = []
     for kid_str in knowledge_ids:
         try:
-            kid = uuid.UUID(str(kid_str))
+            valid_ids.append(uuid.UUID(str(kid_str)))
         except (ValueError, TypeError):
             continue
-        entry = await db.get(TeamKnowledge, kid) or await db.get(ProjectDoc, kid)
+    if not valid_ids:
+        return {}
+    entries_by_id = await _batch_load_knowledge_entries(db, valid_ids)
+    out: dict[str, str] = {}
+    for kid_str, kid in zip(knowledge_ids, valid_ids):
+        entry = entries_by_id.get(kid)
         if entry:
             out[kid_str] = getattr(entry, "name", "") or kid_str[:8]
     return out
@@ -1938,22 +1984,20 @@ async def dispatch_group(
             agent_profile = res_p.scalars().first()
             if agent_profile:
                 effective_profile_id = str(agent_profile.id)
-
-            res_p = await db.execute(
-                select(Profile).where(
-                    Profile.default_agent_id == target_agent_id,
-                    Profile.is_active.is_(True),
-                ).limit(1)
-            )
-            agent_profile = res_p.scalars().first()
-            if agent_profile:
-                effective_profile_id = str(agent_profile.id)
         if effective_profile_id:
             profile = await db.get(Profile, effective_profile_id)
             if profile:
                 system_prompt = profile.system_prompt or None
                 profile_dir = _profile_dir(profile)
                 mcp_servers = await _resolve_mcp_servers(db, profile)
+
+        # Skills prompt (parity with dispatch() -- without this, group chat
+        # @-mention replies don't record SkillFiring data for the eval pipeline).
+        matched_skill_ids: list[uuid.UUID] = []
+        if profile:
+            skills_prompt, matched_skill_ids = await _build_skills_prompt(db, profile, owner_id, text)
+            if skills_prompt:
+                system_prompt = f"{system_prompt}\n\n{skills_prompt}" if system_prompt else skills_prompt
 
         memory_prompt = await _build_memory_prompt(db, owner_id)
         if memory_prompt:
@@ -1981,6 +2025,7 @@ async def dispatch_group(
             agent_id_override=target_agent_id,
             profile_id=effective_profile_id,
             task_id=task_id,
+            matched_skill_ids=matched_skill_ids,
         )
         return user_msg, agent_msg
 
@@ -1991,29 +2036,81 @@ async def dispatch_group(
         await _build_request_knowledge_prompt(db, knowledge_ids) if knowledge_ids else None
     )
     targets: list[dict] = []
+
+    # Batch-load all Profiles needed by the roundtable targets in one query
+    # instead of N per-target db.get round-trips (N+1 prevention). We resolve
+    # effective profile IDs first (including agent_id fallback lookups), then
+    # fetch all Profile objects at once.
+    eff_pid_by_target: list[str | None] = []
+    agent_ids_needing_fallback: list[str] = []
     for target_profile_id, target_agent_id in agent_targets:
+        if target_profile_id:
+            eff_pid_by_target.append(target_profile_id)
+        elif target_agent_id:
+            agent_ids_needing_fallback.append(target_agent_id)
+            eff_pid_by_target.append(None)
+        else:
+            eff_pid_by_target.append(None)
+
+    # Batch-resolve agent_id -> Profile fallback in one query.
+    fallback_pids: dict[str, str] = {}
+    if agent_ids_needing_fallback:
+        fb_rows = (await db.execute(
+            select(Profile).where(
+                Profile.default_agent_id.in_(agent_ids_needing_fallback),
+                Profile.is_active.is_(True),
+            )
+        )).scalars().all()
+        # Keep first match per agent_id (limit(1) equivalent in Python).
+        seen_agents: set[str] = set()
+        for p in fb_rows:
+            if p.default_agent_id not in seen_agents:
+                seen_agents.add(p.default_agent_id)
+                fallback_pids[p.default_agent_id] = str(p.id)
+
+    # Resolve final effective profile IDs.
+    final_eff_pids: list[str | None] = []
+    all_eff_pids: list[str] = []
+    for idx, (target_profile_id, target_agent_id) in enumerate(agent_targets):
+        final_pid = eff_pid_by_target[idx] or fallback_pids.get(target_agent_id)
+        final_eff_pids.append(final_pid)
+        if final_pid:
+            all_eff_pids.append(final_pid)
+
+    # Batch-load all Profile objects in one query.
+    profiles_by_id: dict[str, Profile] = {}
+    if all_eff_pids:
+        unique_pids = list(dict.fromkeys(all_eff_pids))
+        pid_uuids = []
+        for pid in unique_pids:
+            try:
+                pid_uuids.append(uuid.UUID(pid))
+            except (ValueError, TypeError):
+                continue
+        if pid_uuids:
+            prof_rows = (await db.execute(
+                select(Profile).where(Profile.id.in_(pid_uuids))
+            )).scalars().all()
+            profiles_by_id = {str(p.id): p for p in prof_rows}
+
+    # Cache MCP server resolution per profile within this dispatch.
+    mcp_cache: dict[str, list[dict]] = {}
+
+    for idx, (target_profile_id, target_agent_id) in enumerate(agent_targets):
+        eff_pid = final_eff_pids[idx]
         t_system_prompt = None
         t_profile_dir = None
         t_mcp_servers: list[dict] = []
-        # 绝不 fallback 到 convo.profile_id，每个目标仅使用自己绑定的 Profile。
-        eff_pid = target_profile_id
-        if not eff_pid and target_agent_id:
-            # 退化为按 agent_id 尽力匹配
-            res_p = await db.execute(
-                select(Profile).where(
-                    Profile.default_agent_id == target_agent_id,
-                    Profile.is_active.is_(True),
-                ).limit(1)
-            )
-            ap = res_p.scalars().first()
-            if ap:
-                eff_pid = str(ap.id)
         if eff_pid:
-            profile = await db.get(Profile, eff_pid)
+            profile = profiles_by_id.get(eff_pid)
             if profile:
                 t_system_prompt = profile.system_prompt or None
                 t_profile_dir = _profile_dir(profile)
-                t_mcp_servers = await _resolve_mcp_servers(db, profile)
+                if eff_pid in mcp_cache:
+                    t_mcp_servers = mcp_cache[eff_pid]
+                else:
+                    t_mcp_servers = await _resolve_mcp_servers(db, profile)
+                    mcp_cache[eff_pid] = t_mcp_servers
         if memory_prompt:
             t_system_prompt = f"{t_system_prompt}\n\n{memory_prompt}" if t_system_prompt else memory_prompt
         if request_knowledge_prompt:
@@ -2379,13 +2476,24 @@ async def get_or_create_project_group(
         human_ids.append(owner_id)
     # Resolve pinned Profile ids → (profile_id, agent_id) pairs for project dispatch.
     pairs: list[tuple[str | None, str]] = []
+    # Batch-load all pinned Profiles in one query instead of N db.get calls.
+    pinned_profile_uuids: list[uuid.UUID] = []
     for pid in (project.pinned_profile_ids or []):
         try:
-            p = await db.get(Profile, uuid.UUID(pid))
+            pinned_profile_uuids.append(uuid.UUID(str(pid)))
         except (ValueError, TypeError):
             continue
-        if p and p.default_agent_id:
-            pairs.append((str(p.id), p.default_agent_id))
+
+    if pinned_profile_uuids:
+        prof_rows = (await db.execute(
+            select(Profile).where(Profile.id.in_(pinned_profile_uuids))
+        )).scalars().all()
+        # Preserve the original order from pinned_profile_ids.
+        prof_by_id = {str(p.id): p for p in prof_rows}
+        for pid in (project.pinned_profile_ids or []):
+            p = prof_by_id.get(str(pid))
+            if p and p.default_agent_id:
+                pairs.append((str(p.id), p.default_agent_id))
     if not pairs:
         pairs = [(None, "hermes")]
     agents = [aid for _pid, aid in pairs]

@@ -1,5 +1,7 @@
 /** Shared formatting utilities. */
 
+import type { AxiosError } from "axios";
+
 /** Format a timestamp to a compact zh-CN datetime string. */
 export function fmtDate(ts: string | number | Date | null | undefined): string {
   if (!ts) return "";
@@ -29,4 +31,18 @@ export function fmtBytes(bytes: number | null | undefined): string {
     i++;
   }
   return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+/** Extract a human-readable error message from an unknown catch value.
+ *  Handles Axios errors (response.data.detail), Error instances, and strings. */
+export function extractDetail(e: unknown): string {
+  if (!e) return "未知错误";
+  // Axios error with detail
+  const ax = e as AxiosError<{ detail?: string }>;
+  if (ax.response?.data?.detail) return ax.response.data.detail;
+  // Standard Error
+  if (e instanceof Error) return e.message;
+  // String
+  if (typeof e === "string") return e;
+  return "未知错误";
 }

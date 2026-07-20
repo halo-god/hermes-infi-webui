@@ -27,12 +27,15 @@ function applyTheme(t: Theme) {
 // Apply on load
 applyTheme(theme.value);
 
-// Listen for system theme changes
-window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e) => {
+// Listen for system theme changes. Save handler reference so it can be
+// removed if ever needed (e.g. SSR or testing). The composable is a module
+// singleton so this runs once.
+const _systemThemeHandler = (e: MediaQueryListEvent) => {
   if (!localStorage.getItem(THEME_KEY)) {
     theme.value = e.matches ? "dark" : "light";
   }
-});
+};
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", _systemThemeHandler);
 
 watch(theme, (t) => {
   applyTheme(t);

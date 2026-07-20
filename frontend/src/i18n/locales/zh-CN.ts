@@ -83,7 +83,6 @@ export default {
   actions: {
     copy: "复制",
     regenerate: "重新生成",
-    like: "点赞",
     share: "分享",
     deleteChat: "删除会话",
     confirmDelete: "确认删除",

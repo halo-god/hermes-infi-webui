@@ -3,9 +3,9 @@
 # ── Build stage ──
 FROM docker.m.daocloud.io/library/node:20-alpine AS build
 WORKDIR /app
-COPY frontend/package.json ./package.json
-# Use npm install (lockfile generated on first build).
-RUN npm install
+COPY frontend/package.json frontend/package-lock.json ./
+# Use npm ci for reproducible builds from lockfile.
+RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 

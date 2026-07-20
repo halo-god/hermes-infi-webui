@@ -60,14 +60,19 @@ async def add_episode(
     summary: str,
     raw_excerpt_chars: int,
     consolidated_at: datetime,
+    *,
+    commit: bool = True,
 ) -> MemoryEpisode:
     episode = MemoryEpisode(
         user_id=user_id, conversation_id=conversation_id, title=title[:200],
         summary=summary, raw_excerpt_chars=raw_excerpt_chars, consolidated_at=consolidated_at,
     )
     db.add(episode)
-    await db.commit()
-    await db.refresh(episode)
+    if commit:
+        await db.commit()
+        await db.refresh(episode)
+    else:
+        await db.flush()
     return episode
 
 

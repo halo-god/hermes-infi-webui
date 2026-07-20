@@ -24,6 +24,12 @@ function brandPrefix(): string {
   }
 }
 
+// Module-level holder for the current registration's cleanup function.
+// registerStreamHandlers returns a disposer; the caller (chat.ts) saves it
+// and calls it before the next registration to cancel any pending refresh
+// timer and prevent stale callbacks on a dead stream.
+export type StreamDisposer = () => void;
+
 interface StreamHandlersDeps {
   activeId: Ref<string | null>;
   messages: Ref<Message[]>;
@@ -35,6 +41,12 @@ interface StreamHandlersDeps {
   typingUsers: Ref<{ user_id: string; name: string }[]>;
   find: (id: string) => Message | undefined;
   refreshAfterTurn: () => void;
+  /** Notify reactivity after in-place message mutations (shallowRef compat). */
+  triggerMessages: () => void;
+  /** Push a message and notify reactivity (shallowRef compat). */
+  pushMessage: (m: Message) => void;
+  /** Splice a message and notify reactivity (shallowRef compat). */
+  spliceMessage: (idx: number, count: number, ...items: Message[]) => void;
 }
 
 /** Drop events that belong to another conversation. */
@@ -57,9 +69,10 @@ export function registerStreamHandlers(
     offAll: () => void;
   },
   deps: StreamHandlersDeps,
-) {
-  const { activeId, messages, conversations, pendingConfirmations, contextTokens, contextSize, files, typingUsers, find, refreshAfterTurn } = deps;
+): StreamDisposer {
+  const { activeId, messages, conversations, pendingConfirmations, contextTokens, contextSize, files, typingUsers, find, refreshAfterTurn, triggerMessages, pushMessage, spliceMessage } = deps;
 
+  // Clear previous handlers before registering new ones.
   stream.offAll();
 
   // ── Group chat: realtime peer messages, edits, typing, membership ──
@@ -73,9 +86,9 @@ export function registerStreamHandlers(
         (m) => m.id.startsWith("tmp-") && m.role === "user" &&
           (m.content?.text || "") === (incoming.content?.text || ""),
       );
-      if (idx !== -1) { messages.value.splice(idx, 1, incoming); return; }
+      if (idx !== -1) { spliceMessage(idx, 1, incoming); return; }
     }
-    messages.value.push(incoming);
+    pushMessage(incoming);
   }, activeId));
 
   stream.on("message_update", scoped((ev) => {
@@ -86,6 +99,7 @@ export function registerStreamHandlers(
     if (p.edited_at !== undefined) m.edited_at = p.edited_at;
     if (p.deleted_at !== undefined) m.deleted_at = p.deleted_at;
     if (p.reactions !== undefined) m.reactions = p.reactions;
+    triggerMessages();
   }, activeId));
 
   // Typing indicators expire after 4s; refresh the timer on each ping.
@@ -124,7 +138,7 @@ export function registerStreamHandlers(
 
   stream.on("token", scoped((ev) => {
     const m = find(ev.message_id);
-    if (m && m.status === "streaming") m.content = { ...m.content, text: (m.content.text || "") + ev.delta };
+    if (m && m.status === "streaming") { m.content = { ...m.content, text: (m.content.text || "") + ev.delta }; triggerMessages(); }
   }, activeId));
 
   // Debounced refresh
@@ -143,7 +157,7 @@ export function registerStreamHandlers(
   stream.on("start", scoped((ev) => {
     cancelRefresh();
     if (!find(ev.message_id)) {
-      messages.value.push({
+      pushMessage({
         id: ev.message_id,
         conversation_id: activeId.value || "",
         owner_id: null,
@@ -162,7 +176,7 @@ export function registerStreamHandlers(
       const replies = [...ev.agents]
         .sort((a, b) => a.slot - b.slot)
         .map((a) => ({ agent_id: a.agent_id, profile_id: a.profile_id ?? null, text: "", status: "streaming" as const }));
-      messages.value.push({
+      pushMessage({
         id: ev.message_id,
         conversation_id: activeId.value || "",
         owner_id: null,
@@ -177,22 +191,22 @@ export function registerStreamHandlers(
 
   stream.on("rt_token", scoped((ev) => {
     const r = find(ev.message_id)?.content.replies?.[ev.slot];
-    if (r && r.status === "streaming") r.text += ev.delta;
+    if (r && r.status === "streaming") { r.text += ev.delta; triggerMessages(); }
   }, activeId));
 
   stream.on("rt_reply_done", scoped((ev) => {
     const r = find(ev.message_id)?.content.replies?.[ev.slot];
-    if (r) r.status = ev.status || "complete";
+    if (r) { r.status = ev.status || "complete"; triggerMessages(); }
   }, activeId));
 
   stream.on("merge_start", scoped((ev) => {
     const merged = find(ev.message_id)?.content.merged;
-    if (merged) merged.status = "streaming";
+    if (merged) { merged.status = "streaming"; triggerMessages(); }
   }, activeId));
 
   stream.on("merge_token", scoped((ev) => {
     const merged = find(ev.message_id)?.content.merged;
-    if (merged && merged.status === "streaming") merged.text += ev.delta;
+    if (merged && merged.status === "streaming") { merged.text += ev.delta; triggerMessages(); }
   }, activeId));
 
   const t = i18n.global.t;
@@ -204,17 +218,18 @@ export function registerStreamHandlers(
       const existing = m.steps.find((s) => s.title === ev.title);
       if (existing) existing.status = ev.status || existing.status;
       else m.steps.push({ title: ev.title || t("stream.toolCall"), status: ev.status || "running" });
+      triggerMessages();
     }
   }, activeId));
 
   stream.on("thought", scoped((ev) => {
     const m = find(ev.message_id);
-    if (m && m.status === "streaming") m.thinking = (m.thinking || "") + ev.delta;
+    if (m && m.status === "streaming") { m.thinking = (m.thinking || "") + ev.delta; triggerMessages(); }
   }, activeId));
 
   stream.on("plan", scoped((ev) => {
     const m = find(ev.message_id);
-    if (m) m.plan = ev.entries;
+    if (m) { m.plan = ev.entries; triggerMessages(); }
   }, activeId));
 
   stream.on("usage", scoped((ev) => {
@@ -226,6 +241,7 @@ export function registerStreamHandlers(
         context_size: ev.context_size,
         context_used: ev.context_used,
       };
+      triggerMessages();
     }
     if (ev.context_size) {
       contextSize.value = ev.context_size;
@@ -250,6 +266,7 @@ export function registerStreamHandlers(
       if (!existing) {
         m.content.files!.push({ id: ev.file_id, name: ev.name, kind: ev.kind, diff: ev.diff });
       }
+      triggerMessages();
     }
     if (activeId.value) {
       conversationsApi.files(activeId.value).then((f) => (files.value = f)).catch(() => {});
@@ -285,6 +302,7 @@ export function registerStreamHandlers(
       if (m.content.merged && m.content.merged.status === "streaming") {
         m.content.merged.status = "complete";
       }
+      triggerMessages();
     }
     // A cancelled turn is not a "completion" — never fire the success
     // notification for it (the cancel action already gave the user feedback).
@@ -304,4 +322,12 @@ export function registerStreamHandlers(
     if (m) m.status = "error";
     scheduleRefresh();
   }, activeId));
+
+  // Return a disposer that cancels the refresh timer and clears handlers.
+  // The caller must invoke this before the next registration to prevent
+  // stale timers from firing refreshAfterTurn on a dead stream.
+  return () => {
+    cancelRefresh();
+    stream.offAll();
+  };
 }

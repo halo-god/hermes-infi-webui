@@ -75,7 +75,7 @@ jobs:
         env:
           DATABASE_URL: postgresql+asyncpg://hermes:test@localhost:5432/hermes_test
           REDIS_URL: redis://localhost:6379
-          FIRST_ADMIN_PASSWORD: Hermes@2026
+          FIRST_ADMIN_PASSWORD: ci-test-password-not-secret
         run: python -m app.seed
 
       - name: Run tests
@@ -83,7 +83,7 @@ jobs:
         env:
           DATABASE_URL: postgresql+asyncpg://hermes:test@localhost:5432/hermes_test
           REDIS_URL: redis://localhost:6379
-          FIRST_ADMIN_PASSWORD: Hermes@2026
+          FIRST_ADMIN_PASSWORD: ci-test-password-not-secret
           # Tests share one Redis for the whole run and log in as the same admin
           # many times; the per-IP login guard (default 10/min) would trip a 429.
           LOGIN_RATE_LIMIT_PER_MIN: "100000"

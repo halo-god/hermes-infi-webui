@@ -13,7 +13,7 @@ make logs      # 查看 API 日志
 make migrate   # 在运行中的 api 容器内执行 alembic upgrade head
 make seed      # 在运行中的 api 容器内重新初始化超级管理员
 ```
-默认登录：`admin@hermes.io` / `Hermes@2026` — Web: http://localhost:8080 · API 文档: http://localhost:8000/api/docs
+默认登录：`admin@hermes.io` / 密码见 `.env` 中的 `FIRST_ADMIN_PASSWORD` — Web: http://localhost:8080 · API 文档: http://localhost:8000/api/docs
 
 ### 后端（裸机）
 ```bash

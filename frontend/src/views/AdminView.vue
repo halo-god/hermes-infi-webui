@@ -12,6 +12,7 @@ import { http } from "@/api/client";
 import { fmtDate } from "@/utils/format";
 import { agentsApi, profilesApi, type Profile, type ProfileCreate } from "@/api/agents";
 import { teamsApi } from "@/api/teams";
+import { logsApi, type LogEntry } from "@/api/logs";
 import { skillEvolutionApi, type AdminSkill, type DatasetPreview, type SkillProposal } from "@/api/skillEvolution";
 import { colorDiff, computeLineDiff } from "@/utils/diff";
 import { useAuthStore } from "@/stores/auth";
@@ -51,6 +52,49 @@ const auditAutoRefresh = ref(false);
 const auditDateFrom = ref("");
 const auditDateTo = ref("");
 let _auditTimer: ReturnType<typeof setInterval> | null = null;
+
+// ── Runtime logs (merged into audit tab) ──
+type LogCategory = "audit" | "runtime";
+const logCategory = ref<LogCategory>("audit");
+const logEntries = ref<LogEntry[]>([]);
+const logLevelFilter = ref("");
+const logKeyword = ref("");
+const logLoading = ref(false);
+const logAutoRefresh = ref(false);
+let _logTimer: ReturnType<typeof setInterval> | null = null;
+const LOG_LEVEL_ORDER: Record<string, number> = { DEBUG: 0, INFO: 1, WARNING: 2, ERROR: 3, CRITICAL: 4 };
+const LOG_LEVEL_COLORS: Record<string, string> = {
+  DEBUG: "var(--ink-mute)",
+  INFO: "var(--ok, #3a8a5a)",
+  WARNING: "var(--warn, #b8852a)",
+  ERROR: "var(--danger, #c04040)",
+  CRITICAL: "var(--danger, #c04040)",
+};
+
+async function loadLogs() {
+  logLoading.value = true;
+  try {
+    const resp = await logsApi.getLogs({ limit: 300 });
+    logEntries.value = resp.entries;
+  } catch { logEntries.value = []; } finally { logLoading.value = false; }
+}
+function toggleLogAutoRefresh() {
+  logAutoRefresh.value = !logAutoRefresh.value;
+  if (_logTimer) { clearInterval(_logTimer); _logTimer = null; }
+  if (logAutoRefresh.value) _logTimer = setInterval(loadLogs, 5000);
+}
+const filteredLogs = computed(() => {
+  let result = logEntries.value;
+  if (logLevelFilter.value) {
+    const threshold = LOG_LEVEL_ORDER[logLevelFilter.value];
+    if (threshold !== undefined) result = result.filter((e) => (LOG_LEVEL_ORDER[e.level] ?? 0) >= threshold);
+  }
+  if (logKeyword.value.trim()) {
+    const kw = logKeyword.value.toLowerCase();
+    result = result.filter((e) => e.message.toLowerCase().includes(kw) || e.logger.toLowerCase().includes(kw));
+  }
+  return result;
+});
 const settings = ref<SystemSettings["data"] | null>(null);
 const savingSettings = ref(false);
 const assetBusy = ref<"favicon" | "logo" | null>(null);
@@ -122,7 +166,13 @@ async function loadMcpServers() {
 }
 
 // ── Performance ──
-const perfData = ref<Record<string, unknown> | null>(null);
+interface PerfData {
+  process?: { cpu_percent?: number; memory_mb?: number; memory_percent?: number; threads?: number; pid?: number; uptime_seconds?: number };
+  system?: { cpu_percent?: number; memory_used_mb?: number; memory_total_mb?: number; memory_percent?: number; disk_percent?: number; load_avg?: number[] };
+  database?: { conversations?: number; messages?: number; users?: number; pool_size?: number; checked_out?: number; active_queries?: number };
+  redis?: { connected?: boolean; connected_clients?: number; used_memory_mb?: number; ops_per_sec?: number };
+}
+const perfData = ref<PerfData | null>(null);
 const perfLoading = ref(false);
 async function loadPerformance() {
   perfLoading.value = true;
@@ -277,11 +327,15 @@ watch(tab, (t) => {
   if (t === "performance") loadPerformance();
   if (t === "skill-evolution") { loadEvoSkills(); loadEvoProposals(); }
 });
+watch(logCategory, (c) => {
+  if (c === "runtime" && !logEntries.value.length) loadLogs();
+});
 watch(evoStatusFilter, loadEvoProposals);
 
 onMounted(load);
 onUnmounted(() => {
   if (_auditTimer) { clearInterval(_auditTimer); _auditTimer = null; }
+  if (_logTimer) { clearInterval(_logTimer); _logTimer = null; }
   evoStopPolling();
 });
 async function load() {
@@ -366,12 +420,13 @@ const filteredUsers = () =>
     return true;
   });
 const filteredAudit = computed(() => {
+  // resultFilter is already applied server-side in loadAudit(), so we only
+  // filter by the client-side keyword here (avoids redundant double-filtering).
   const term = auditQ.value.trim().toLowerCase();
-  return audit.value.filter((a) => {
-    if (resultFilter.value !== "all" && a.result !== resultFilter.value) return false;
-    if (!term) return true;
-    return [a.actor_name, a.action, a.target, a.ip].some((v) => (v || "").toLowerCase().includes(term));
-  });
+  if (!term) return audit.value;
+  return audit.value.filter((a) =>
+    [a.actor_name, a.action, a.target, a.ip].some((v) => (v || "").toLowerCase().includes(term)),
+  );
 });
 function nextOf<T>(arr: T[], cur: T): T {
   return arr[(arr.indexOf(cur) + 1) % arr.length];
@@ -1337,61 +1392,113 @@ async function confirmImport() {
         </div>
       </template>
 
-      <!-- ───────────── AUDIT ───────────── -->
+      <!-- ───────────── AUDIT + LOGS ───────────── -->
       <template v-else-if="tab === 'audit'">
         <div class="flex-between" style="align-items:flex-end;margin-bottom:14px">
           <div>
-            <div class="heading-serif">审计日志</div>
-            <div class="text-mute-sm" style="margin-top:2px">所有后台操作与登录事件都会被记录，按时间倒序。</div>
+            <div class="heading-serif">日志与审计</div>
+            <div class="text-mute-sm" style="margin-top:2px">审计日志记录后台操作与登录事件；运行时日志来自磁盘日志文件。</div>
           </div>
-          <div style="display: flex; align-items: center; gap: 8px">
+          <!-- Category switcher -->
+          <div style="display: flex; gap: 4px; background: var(--bg-card); border: 1px solid var(--rule); border-radius: var(--r-sm); padding: 2px">
+            <button class="btn" :class="{ primary: logCategory === 'audit' }" style="padding: 4px 14px; font-size: 12.5px" @click="logCategory = 'audit'">审计日志</button>
+            <button class="btn" :class="{ primary: logCategory === 'runtime' }" style="padding: 4px 14px; font-size: 12.5px" @click="logCategory = 'runtime'">运行时日志</button>
+          </div>
+        </div>
+
+        <!-- ── Audit logs ── -->
+        <template v-if="logCategory === 'audit'">
+          <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px">
             <button class="btn" :class="{ primary: auditAutoRefresh }" title="每 15 秒自动刷新" @click="toggleAutoRefresh">
               <Icon name="refresh" /> {{ auditAutoRefresh ? "自动刷新中" : "自动刷新" }}
             </button>
             <button class="btn" @click="loadAudit"><Icon name="refresh" /> 立即刷新</button>
           </div>
-        </div>
 
-        <!-- filters toolbar -->
-        <div class="users-toolbar">
-          <div class="filter-input"><Icon name="search" /><input v-model="auditQ" placeholder="按操作者、动作、目标或 IP 搜索" @input="loadAudit" /></div>
-          <button class="filter-select" :class="{ on: resultFilter !== 'all' }"
-            @click="resultFilter = nextOf(['all', 'ok', 'fail', 'partial'], resultFilter); loadAudit()">
-            结果：{{ { all: "全部", ok: "成功", fail: "失败", partial: "部分成功" }[resultFilter] }} <Icon name="chevron_down" />
-          </button>
-          <span class="text-mute-sm">从</span>
-          <input type="date" class="filter-select" v-model="auditDateFrom" style="padding: 0 10px; height: 34px" @change="loadAudit" />
-          <span class="text-mute-sm">至</span>
-          <input type="date" class="filter-select" v-model="auditDateTo" style="padding: 0 10px; height: 34px" @change="loadAudit" />
-          <span class="flex-1"></span>
-          <span class="text-mute-sm">{{ filteredAudit.length }} / {{ audit.length }} 条</span>
-        </div>
+          <div class="users-toolbar">
+            <div class="filter-input"><Icon name="search" /><input v-model="auditQ" placeholder="按操作者、动作、目标或 IP 搜索" /></div>
+            <button class="filter-select" :class="{ on: resultFilter !== 'all' }"
+              @click="resultFilter = nextOf(['all', 'ok', 'fail', 'partial'], resultFilter); loadAudit()">
+              结果：{{ { all: "全部", ok: "成功", fail: "失败", partial: "部分成功" }[resultFilter] }} <Icon name="chevron_down" />
+            </button>
+            <span class="text-mute-sm">从</span>
+            <input type="date" class="filter-select" v-model="auditDateFrom" style="padding: 0 10px; height: 34px" @change="loadAudit" />
+            <span class="text-mute-sm">至</span>
+            <input type="date" class="filter-select" v-model="auditDateTo" style="padding: 0 10px; height: 34px" @change="loadAudit" />
+            <span class="flex-1"></span>
+            <span class="text-mute-sm">{{ filteredAudit.length }} / {{ audit.length }} 条</span>
+          </div>
 
-        <div class="audit-table">
-          <div class="au-row head"><div>时间戳</div><div>操作者</div><div>动作</div><div class="col-target">目标</div><div>结果</div><div class="col-ip">IP</div></div>
-          <div v-if="!filteredAudit.length" class="empty-state-lg" style="padding:32px">暂无符合条件的记录。</div>
-          <div v-for="a in filteredAudit" :key="a.id" class="au-row">
-            <div class="au-ts">{{ fmtDate(a.ts) }}</div>
-            <div class="au-actor">{{ a.actor_name || "系统" }}</div>
-            <div style="font-family: var(--font-mono); font-size: 11.5px">{{ a.action }}</div>
-            <div class="col-target">
-              <div class="au-target">{{ a.target || "—" }}</div>
-              <div v-if="a.meta && Object.keys(a.meta).length" class="au-meta">
-                <span v-for="(v, k) in a.meta" :key="k">{{ k }}: {{ v }}</span>
+          <div class="audit-table">
+            <div class="au-row head"><div>时间戳</div><div>操作者</div><div>动作</div><div class="col-target">目标</div><div>结果</div><div class="col-ip">IP</div></div>
+            <div v-if="!filteredAudit.length" class="empty-state-lg" style="padding:32px">暂无符合条件的记录。</div>
+            <div v-for="a in filteredAudit" :key="a.id" class="au-row">
+              <div class="au-ts">{{ fmtDate(a.ts) }}</div>
+              <div class="au-actor">{{ a.actor_name || "系统" }}</div>
+              <div style="font-family: var(--font-mono); font-size: 11.5px">{{ a.action }}</div>
+              <div class="col-target">
+                <div class="au-target">{{ a.target || "-" }}</div>
+                <div v-if="a.meta && Object.keys(a.meta).length" class="au-meta">
+                  <span v-for="(v, k) in a.meta" :key="k">{{ k }}: {{ v }}</span>
+                </div>
+              </div>
+              <div><span class="au-result" :class="a.result">{{ { ok: "成功", fail: "失败", partial: "部分成功" }[a.result] || a.result }}</span></div>
+              <div class="col-ip au-ip">{{ a.ip || "-" }}</div>
+            </div>
+          </div>
+
+          <div v-if="audit.length >= auditLimit" style="margin-top: 16px; text-align: center">
+            <button class="btn" @click="loadMore">加载更多 <Icon name="chevron_down" /></button>
+          </div>
+          <div style="margin-top: 12px; font-size: 11.5px; color: var(--ink-faint); text-align: right">
+            已加载最近 {{ auditLimit }} 条 · 后端最多返回 500 条
+          </div>
+        </template>
+
+        <!-- ── Runtime logs ── -->
+        <template v-else>
+          <div class="section-card" style="margin-bottom: 16px">
+            <div style="padding: 12px 18px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap">
+              <select v-model="logLevelFilter" class="cfg-input" style="width: auto">
+                <option value="">全部级别</option>
+                <option value="DEBUG">DEBUG</option>
+                <option value="INFO">INFO</option>
+                <option value="WARNING">WARNING</option>
+                <option value="ERROR">ERROR</option>
+                <option value="CRITICAL">CRITICAL</option>
+              </select>
+              <input v-model="logKeyword" class="cfg-input" style="flex: 1; min-width: 180px" placeholder="关键词搜索…" @keydown.enter="loadLogs" />
+              <span style="font-size: 12px; color: var(--ink-mute)">{{ filteredLogs.length }} / {{ logEntries.length }} 条</span>
+              <button class="btn" :class="{ primary: logAutoRefresh }" @click="toggleLogAutoRefresh">
+                <Icon name="refresh" :size="12" /> {{ logAutoRefresh ? "自动刷新中" : "自动刷新" }}
+              </button>
+              <button class="btn" @click="loadLogs" :disabled="logLoading">
+                <Icon name="refresh" :size="12" /> {{ logLoading ? "加载中…" : "刷新" }}
+              </button>
+            </div>
+          </div>
+
+          <div class="section-card">
+            <div style="padding: 4px 0; max-height: calc(100vh - 320px); overflow-y: auto; font-family: var(--font-mono, 'SF Mono', monospace); font-size: 12px; line-height: 1.6">
+              <div v-if="logLoading && !logEntries.length" style="padding: 40px; text-align: center; color: var(--ink-mute)">加载中…</div>
+              <div v-else-if="!filteredLogs.length" style="padding: 40px; text-align: center; color: var(--ink-mute)">
+                {{ logEntries.length ? "无匹配日志" : "暂无日志" }}
+              </div>
+              <div
+                v-for="(entry, i) in filteredLogs"
+                :key="i"
+                class="log-row"
+                :class="entry.level.toLowerCase()"
+              >
+                <span class="log-ts">{{ entry.timestamp }}</span>
+                <span class="log-level" :style="{ color: LOG_LEVEL_COLORS[entry.level] || 'var(--ink)' }">{{ entry.level }}</span>
+                <span class="log-rid" v-if="entry.request_id !== '-'">[{{ entry.request_id }}]</span>
+                <span class="log-logger">{{ entry.logger }}</span>
+                <span class="log-msg">{{ entry.message }}</span>
               </div>
             </div>
-            <div><span class="au-result" :class="a.result">{{ { ok: "成功", fail: "失败", partial: "部分成功" }[a.result] || a.result }}</span></div>
-            <div class="col-ip au-ip">{{ a.ip || "—" }}</div>
           </div>
-        </div>
-
-        <div v-if="audit.length >= auditLimit" style="margin-top: 16px; text-align: center">
-          <button class="btn" @click="loadMore">加载更多 <Icon name="chevron_down" /></button>
-        </div>
-
-        <div style="margin-top: 12px; font-size: 11.5px; color: var(--ink-faint); text-align: right">
-          已加载最近 {{ auditLimit }} 条 · 后端最多返回 500 条
-        </div>
+        </template>
       </template>
 
       <!-- ───────────── SYSTEM ───────────── -->
@@ -1778,36 +1885,36 @@ async function confirmImport() {
             <div class="section-card" style="padding:16px">
               <div class="section-head"><div class="section-title">进程</div></div>
               <div style="font-size:13px;line-height:1.8;color:var(--ink)">
-                <div>CPU: <strong>{{ (perfData as any).process?.cpu_percent }}%</strong></div>
-                <div>内存: <strong>{{ (perfData as any).process?.memory_mb }}MB</strong> ({{ (perfData as any).process?.memory_percent }}%)</div>
-                <div>线程: <strong>{{ (perfData as any).process?.threads }}</strong></div>
-                <div>运行: <strong>{{ Math.floor(((perfData as any).process?.uptime_seconds || 0) / 3600) }}h {{ Math.floor((((perfData as any).process?.uptime_seconds || 0) % 3600) / 60) }}m</strong></div>
+                <div>CPU: <strong>{{ perfData?.process?.cpu_percent }}%</strong></div>
+                <div>内存: <strong>{{ perfData?.process?.memory_mb }}MB</strong> ({{ perfData?.process?.memory_percent }}%)</div>
+                <div>线程: <strong>{{ perfData?.process?.threads }}</strong></div>
+                <div>运行: <strong>{{ Math.floor((perfData?.process?.uptime_seconds || 0) / 3600) }}h {{ Math.floor(((perfData?.process?.uptime_seconds || 0) % 3600) / 60) }}m</strong></div>
               </div>
             </div>
             <!-- System -->
             <div class="section-card" style="padding:16px">
               <div class="section-head"><div class="section-title">系统</div></div>
               <div style="font-size:13px;line-height:1.8;color:var(--ink)">
-                <div>CPU: <strong>{{ (perfData as any).system?.cpu_percent }}%</strong></div>
-                <div>内存: <strong>{{ (perfData as any).system?.memory_used_mb }}MB / {{ (perfData as any).system?.memory_total_mb }}MB</strong> ({{ (perfData as any).system?.memory_percent }}%)</div>
-                <div v-if="(perfData as any).system?.disk_percent != null">磁盘: <strong>{{ (perfData as any).system?.disk_percent }}%</strong></div>
+                <div>CPU: <strong>{{ perfData?.system?.cpu_percent }}%</strong></div>
+                <div>内存: <strong>{{ perfData?.system?.memory_used_mb }}MB / {{ perfData?.system?.memory_total_mb }}MB</strong> ({{ perfData?.system?.memory_percent }}%)</div>
+                <div v-if="perfData?.system?.disk_percent != null">磁盘: <strong>{{ perfData?.system?.disk_percent }}%</strong></div>
               </div>
             </div>
             <!-- Database -->
             <div class="section-card" style="padding:16px">
               <div class="section-head"><div class="section-title">数据库</div></div>
               <div style="font-size:13px;line-height:1.8;color:var(--ink)">
-                <div>会话: <strong>{{ (perfData as any).database?.conversations }}</strong></div>
-                <div>消息: <strong>{{ (perfData as any).database?.messages }}</strong></div>
-                <div>用户: <strong>{{ (perfData as any).database?.users }}</strong></div>
+                <div>会话: <strong>{{ perfData?.database?.conversations }}</strong></div>
+                <div>消息: <strong>{{ perfData?.database?.messages }}</strong></div>
+                <div>用户: <strong>{{ perfData?.database?.users }}</strong></div>
               </div>
             </div>
             <!-- Redis -->
             <div class="section-card" style="padding:16px">
               <div class="section-head"><div class="section-title">Redis</div></div>
               <div style="font-size:13px;line-height:1.8;color:var(--ink)">
-                <div>状态: <strong :style="{ color: (perfData as any).redis?.connected ? 'var(--ok)' : 'var(--danger)' }">{{ (perfData as any).redis?.connected ? '已连接' : '未连接' }}</strong></div>
-                <div>内存: <strong>{{ (perfData as any).redis?.used_memory_mb }}MB</strong></div>
+                <div>状态: <strong :style="{ color: perfData?.redis?.connected ? 'var(--ok)' : 'var(--danger)' }">{{ perfData?.redis?.connected ? '已连接' : '未连接' }}</strong></div>
+                <div>内存: <strong>{{ perfData?.redis?.used_memory_mb }}MB</strong></div>
               </div>
             </div>
           </div>
@@ -1944,3 +2051,29 @@ async function confirmImport() {
     </Teleport>
   </div>
 </template>
+
+<style scoped>
+.log-row {
+  display: flex;
+  gap: 8px;
+  padding: 2px 18px;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.log-row.error,
+.log-row.critical {
+  background: rgba(192, 64, 64, 0.06);
+}
+.log-row.warning {
+  background: rgba(184, 133, 42, 0.04);
+}
+.log-ts { color: var(--ink-faint); flex-shrink: 0; }
+.log-level { font-weight: 700; flex-shrink: 0; min-width: 70px; }
+.log-rid { color: var(--accent); flex-shrink: 0; opacity: 0.7; }
+.log-logger { color: var(--ink-mute); flex-shrink: 0; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+.log-msg {
+  color: var(--ink);
+  word-break: break-all;
+  white-space: pre-wrap;
+  min-width: 0;
+}
+</style>

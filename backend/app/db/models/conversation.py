@@ -79,6 +79,9 @@ class Message(UUIDPrimaryKey, Timestamps, Base):
     __tablename__ = "messages"
     __table_args__ = (
         Index("ix_msg_conv_created", "conversation_id", "created_at", postgresql_using="btree"),
+        Index("ix_messages_owner_id", "owner_id"),
+        Index("ix_messages_owner_created", "owner_id", "created_at"),
+        Index("ix_messages_mentions_gin", "mentions", postgresql_using="gin"),
     )
 
     conversation_id: Mapped[uuid.UUID] = mapped_column(
@@ -87,7 +90,7 @@ class Message(UUIDPrimaryKey, Timestamps, Base):
         index=True,
     )
     owner_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
     role: Mapped[str] = mapped_column(String(16), nullable=False)  # user | agent | roundtable | system
     agent_id: Mapped[str | None] = mapped_column(String(64))
@@ -122,6 +125,7 @@ class GroupMember(UUIDPrimaryKey, Timestamps, Base):
     __table_args__ = (
         UniqueConstraint("conversation_id", "user_id", name="group_members_unique_user"),
         UniqueConstraint("conversation_id", "profile_id", name="group_members_unique_profile"),
+        Index("ix_group_members_user_id", "user_id"),
     )
 
     conversation_id: Mapped[uuid.UUID] = mapped_column(
@@ -130,7 +134,7 @@ class GroupMember(UUIDPrimaryKey, Timestamps, Base):
         index=True,
     )
     user_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
     )
     profile_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("profiles.id", ondelete="SET NULL"), nullable=True

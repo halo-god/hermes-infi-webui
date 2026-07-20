@@ -69,8 +69,17 @@ async def scan_agents(
     updated = 0
     now = datetime.now(timezone.utc)
 
+    # Batch-load all existing agents in one query instead of N db.get calls.
+    discovered_ids = [da.id for da in discovered]
+    existing_agents: dict = {}
+    if discovered_ids:
+        existing_rows = (await db.execute(
+            select(Agent).where(Agent.id.in_(discovered_ids))
+        )).scalars().all()
+        existing_agents = {a.id: a for a in existing_rows}
+
     for da in discovered:
-        existing = await db.get(Agent, da.id)
+        existing = existing_agents.get(da.id)
         if existing:
             existing.label = da.label
             existing.kind = da.kind

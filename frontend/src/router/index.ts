@@ -28,12 +28,6 @@ const router = createRouter({
           meta: { requiresAdmin: true },
         },
         {
-          path: "logs",
-          name: "logs",
-          component: () => import("@/views/LogsView.vue"),
-          meta: { requiresAdmin: true },
-        },
-        {
           path: "feedback",
           name: "feedback",
           component: () => import("@/views/FeedbackView.vue"),

@@ -17,7 +17,7 @@
   }
   .side-inner { display: flex; flex-direction: column; height: 100%; min-width: 268px; overflow: hidden; }
 
-  .brand { display: flex; align-items: center; gap: 10px; padding: 14px 16px 12px; }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 14px 16px 12px; flex-shrink: 0; }
   .brand-mark {
     width: 36px; height: 36px; border-radius: 9px;
     background: linear-gradient(180deg, #2a241a, #15110b);
@@ -45,8 +45,8 @@
     margin-top: 3px;
   }
 
-  .side-section { padding: 4px 10px; }
-  .team-scroll { max-height: 150px; overflow-y: auto; flex-shrink: 0; }
+  .side-section { padding: 4px 10px; flex-shrink: 0; }
+  .team-scroll { max-height: 150px; overflow-y: auto; flex: 0 1 auto; min-height: 0; }
   /* Shared thin scrollbar for the sidebar's scrollable lists (teams, group
      chats, conversations) and the main thread/stage so every scrollable
      surface looks the same rather than falling back to the browser default. */
@@ -95,6 +95,7 @@
     text-transform: uppercase;
     color: var(--ink-mute);
     font-weight: 600;
+    flex-shrink: 0;
   }
   /* Top/bottom borders on the three scrollable list blocks so teams / group
      chats / conversations are clearly separated from each other and from the
@@ -115,6 +116,10 @@
   .side-label button:hover { background: rgba(29,26,20,0.06); color: var(--ink); }
 
   .convo-list { padding: 0 10px; flex: 1; overflow-y: auto; min-height: 0; }
+  /* Group chat list is a fixed-priority block: it can shrink when vertical
+     space is tight (low-res laptops) but never grows beyond its content,
+     keeping it from squeezing the main conversation list to zero height. */
+  .side .convo-list.group-list { flex: 0 1 auto; max-height: 200px; min-height: 0; }
   .convo {
     display: flex; align-items: center; gap: 9px;
     padding: 7px 10px;
@@ -164,6 +169,25 @@
     border-top: 1px solid var(--rule);
     padding: 10px;
     display: flex; flex-direction: column; gap: 2px;
+    flex-shrink: 0;
+  }
+
+  /* Low-resolution laptops: when viewport height is very tight, allow the
+     entire sidebar interior to scroll so no team/group/convo/footer item is
+     ever clipped beyond reach. At normal heights the flex layout above keeps
+     each section independently scrollable. */
+  @media (max-height: 640px) {
+    .side-inner { overflow-y: auto; }
+    .side .team-scroll,
+    .side .convo-list.group-list { max-height: none; flex: 0 0 auto; }
+    .side .convo-list { flex: 0 0 auto; }
+    .side-foot { flex-shrink: 0; }
+  }
+  /* Narrow-width screens (e.g. 1280×720 with side panel docked): slim the
+     sidebar so the main thread keeps usable width. */
+  @media (max-width: 1024px) {
+    .app { grid-template-columns: var(--side-w, 240px) 1fr; }
+    .side-inner { min-width: 240px; }
   }
 
   .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; overflow: hidden; }

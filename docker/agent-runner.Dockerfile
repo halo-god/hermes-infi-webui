@@ -17,12 +17,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --upgrade pip \
-    && pip install \
-        "sqlalchemy[asyncio]>=2.0.30" "asyncpg>=0.29" \
-        "pydantic>=2.7" "pydantic-settings>=2.3" "pydantic[email]>=2.7" \
-        "pyjwt>=2.8" "argon2-cffi>=23.1" "redis>=5.0" "boto3>=1.34" \
-        "prometheus-client>=0.20"
+# Install Python deps from pyproject.toml for reproducible builds.
+COPY backend/pyproject.toml backend/README.md ./
+COPY backend/app ./app
+RUN pip install --upgrade pip && pip install .
 
 # ── (optional) install the real Hermes Agent CLI ──
 # Enable with: docker build --build-arg INSTALL_HERMES=true

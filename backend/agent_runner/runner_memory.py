@@ -8,6 +8,8 @@ import re
 import uuid
 from datetime import datetime, timezone
 
+import asyncio
+
 from sqlalchemy import select
 
 from app.config import settings
@@ -198,18 +200,33 @@ async def handle_memory_consolidate(task: dict, agents: dict) -> None:
 
             budget = settings.memory_consolidate_input_chars
             sections: list[str] = []
-            # Parallel to `sections` — (conversation_id, title, raw_chars) for
+            # Parallel to `sections` - (conversation_id, title, raw_chars) for
             # each section, used to write one MemoryEpisode per section once
             # the LLM returns per-section summaries in the same order.
             episode_meta: list[tuple[uuid.UUID, str, int]] = []
             used = 0
+
+            # Batch-load messages for all conversations in a single query
+            # instead of N per-conversation round-trips (N+1 prevention).
+            convos_by_id = {c.id: c for c in convos}
+            if convos_by_id:
+                all_msgs = (
+                    await db.execute(
+                        select(Message)
+                        .where(Message.conversation_id.in_(list(convos_by_id.keys())))
+                        .order_by(Message.conversation_id, Message.created_at.asc())
+                    )
+                ).scalars().all()
+            else:
+                all_msgs = []
+
+            # Group messages by conversation_id (preserving the convos order).
+            msgs_by_conv: dict[uuid.UUID, list[Message]] = {}
+            for m in all_msgs:
+                msgs_by_conv.setdefault(m.conversation_id, []).append(m)
+
             for convo in convos:
-                res = await db.execute(
-                    select(Message)
-                    .where(Message.conversation_id == convo.id)
-                    .order_by(Message.created_at.asc())
-                )
-                lines = [e for m in res.scalars().all() if (e := _message_excerpt(m))]
+                lines = [e for m in msgs_by_conv.get(convo.id, []) if (e := _message_excerpt(m))]
                 if not lines:
                     continue
                 section = f"## 会话「{convo.title}」\n" + "\n".join(lines)
@@ -252,7 +269,7 @@ async def handle_memory_consolidate(task: dict, agents: dict) -> None:
         )
 
         cwd = os.path.join(settings.workspace_root, f"memconsol-{user_id}")
-        os.makedirs(cwd, exist_ok=True)
+        await asyncio.to_thread(os.makedirs, cwd, exist_ok=True)
         buf = {"text": ""}
 
         async def on_update(update: dict) -> None:
@@ -306,7 +323,10 @@ async def handle_memory_consolidate(task: dict, agents: dict) -> None:
                 for (conv_id, title, raw_chars), summary in zip(episode_meta, episode_summaries):
                     await memory_service.add_episode(
                         db, uuid.UUID(user_id), conv_id, title, summary, raw_chars, consolidation_ts,
+                        commit=False,
                     )
+                # Single commit for all episodes instead of N round-trips.
+                await db.commit()
         await _set_status("done")
     except ACPTimeout:
         await _set_status("error", "整理超时")

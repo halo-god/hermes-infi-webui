@@ -70,11 +70,13 @@ const SECTION_LABEL: Record<string, string> = {
   demo: "演示脚本", press: "媒体材料", metric: "指标定义", baseline: "基线数据",
 };
 
+function closeMenu() { menuOpen.value = false; }
+
 onMounted(() => {
-  document.addEventListener("click", () => (menuOpen.value = false));
+  document.addEventListener("click", closeMenu);
   load();
 });
-onBeforeUnmount(() => document.removeEventListener("click", () => (menuOpen.value = false)));
+onBeforeUnmount(() => document.removeEventListener("click", closeMenu));
 
 async function load() {
   const p = await projectsApi.get(projectId);

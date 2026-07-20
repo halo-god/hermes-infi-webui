@@ -57,6 +57,12 @@ def _write_text(path: str, content: str) -> None:
         fh.write(content)
 
 
+def _read_text(path: str) -> str:
+    """Synchronous file read for use with asyncio.to_thread."""
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
 # ── Stability constants ──
 LOCK_KEY = "hermes:runner:lock"
 LOCK_TTL = 30          # seconds; must be > heartbeat interval
@@ -66,6 +72,7 @@ RECLAIM_INTERVAL = 30   # check for stale messages every N seconds
 MAX_CONCURRENT = 5      # max tasks processed in parallel
 MAX_RETRIES = 3         # max retries before sending to DLQ
 DLQ_STREAM = "acp:dlq"  # dead letter queue stream
+RETRY_BACKOFF_BASE = 2  # exponential backoff base: 2^attempt seconds, capped at 60
 
 
 class Runner:
@@ -78,7 +85,6 @@ class Runner:
         self._sem = asyncio.Semaphore(MAX_CONCURRENT)
         self._active_tasks: set[asyncio.Task] = set()
         self._bg_tasks: set[asyncio.Task] = set()
-        self._task_retries: dict[str, int] = {}  # entry_id -> retry count
         self._watchers: dict[str, WorkspaceWatcher] = {}  # conversation_id -> watcher
 
     # ── Singleton lock ──
@@ -294,7 +300,7 @@ class Runner:
                 try:
                     import os
                     cwd = os.path.join(settings.workspace_root, new_conv_id)
-                    os.makedirs(cwd, exist_ok=True)
+                    await asyncio.to_thread(os.makedirs, cwd, exist_ok=True)
                     mcp_servers = self.pool._mcp_servers.get(conv_id)
                     new_sid = await asyncio.wait_for(
                         client.fork_session(client._session_id, cwd, mcp_servers=mcp_servers),
@@ -418,13 +424,20 @@ class Runner:
 
     # ── concurrency helpers ──
     async def _run_task(self, task_data: dict, entry_id: str) -> None:
-        """Run a single task with semaphore-based concurrency limiting."""
+        """Run a single task with semaphore-based concurrency limiting.
+
+        Retry tracking uses an ``_attempt`` counter embedded in ``task_data``
+        (not ``entry_id``) because re-enqueueing via ``xadd`` creates a *new*
+        stream entry with a *new* id -- keying on ``entry_id`` would reset the
+        counter to zero on every retry, so the DLQ would never be reached.
+        """
         async with self._sem:
             task_type = task_data.get("type", "unknown")
+            attempt = task_data.get("_attempt", 0)
             start_time = time.monotonic()
             TASKS_ENQUEUED.labels(type=task_type).inc()
-            logger.info("Starting task %s (active=%d/%d)",
-                        entry_id, len(self._active_tasks), MAX_CONCURRENT)
+            logger.info("Starting task %s (attempt %d, active=%d/%d)",
+                        entry_id, attempt + 1, len(self._active_tasks), MAX_CONCURRENT)
             try:
                 await self.handle(task_data)
                 duration = time.monotonic() - start_time
@@ -433,20 +446,24 @@ class Runner:
             except Exception as exc:
                 duration = time.monotonic() - start_time
                 TASK_DURATION.labels(type=task_type).observe(duration)
-                retries = self._task_retries.get(entry_id, 0)
-                if retries < MAX_RETRIES:
-                    self._task_retries[entry_id] = retries + 1
+                if attempt < MAX_RETRIES:
+                    next_attempt = attempt + 1
                     logger.warning("Task %s failed (retry %d/%d): %s",
-                                   entry_id, retries + 1, MAX_RETRIES, exc)
-                    # Re-enqueue for retry
+                                   entry_id, next_attempt, MAX_RETRIES, exc)
+                    # Exponential backoff before re-enqueue to avoid fail-fast storms
+                    delay = min(RETRY_BACKOFF_BASE ** next_attempt, 60)
+                    await asyncio.sleep(delay)
+                    # Persist the attempt counter in the task payload so the
+                    # re-enqueued message carries it across the new entry_id.
+                    retry_data = {**task_data, "_attempt": next_attempt}
                     try:
                         await R.get_redis().xadd(
-                            settings.acp_stream, {"data": json.dumps(task_data)}
+                            settings.acp_stream, {"data": json.dumps(retry_data)}
                         )
                     except Exception:
                         logger.exception("Failed to re-enqueue task %s", entry_id)
                 else:
-                    # Max retries reached — send to DLQ
+                    # Max retries reached - send to DLQ
                     logger.error("Task %s failed permanently after %d retries, sending to DLQ",
                                  entry_id, MAX_RETRIES)
                     TASKS_FAILED.labels(type=task_type, error=type(exc).__name__).inc()
@@ -458,7 +475,6 @@ class Runner:
                         )
                     except Exception:
                         logger.exception("Failed to send task %s to DLQ", entry_id)
-                    self._task_retries.pop(entry_id, None)
 
     def _on_task_done(self, task: asyncio.Task) -> None:
         """Clean up completed tasks from the active set."""
@@ -522,7 +538,7 @@ class Runner:
             return
 
         cwd = os.path.join(settings.workspace_root, conversation_id)
-        os.makedirs(cwd, exist_ok=True)
+        await asyncio.to_thread(os.makedirs, cwd, exist_ok=True)
 
         acp_session_id = None
         session_mode = None
@@ -650,8 +666,12 @@ class Runner:
             # Also write to disk so the agent can read its own output later.
             from app.core.files import confine_to_dir, safe_relative_path
             disk_path = confine_to_dir(cwd, safe_relative_path(path))
-            os.makedirs(os.path.dirname(disk_path), exist_ok=True)
-            await asyncio.to_thread(_write_text, disk_path, content)
+
+            def _write_disk():
+                os.makedirs(os.path.dirname(disk_path), exist_ok=True)
+                _write_text(disk_path, content)
+
+            await asyncio.to_thread(_write_disk)
             diff: str | None = None
             if old_content is not None:
                 diff_lines = list(difflib.unified_diff(
@@ -879,12 +899,11 @@ class Runner:
             filename = os.path.basename(raw_path)
             if filename in saved_names:
                 continue
-            if os.path.isfile(candidate):
+            if await asyncio.to_thread(os.path.isfile, candidate):
                 try:
-                    with open(candidate, encoding="utf-8") as fh:
-                        content = fh.read()
+                    content = await asyncio.to_thread(_read_text, candidate)
                     extracted.append((filename, content))
-                except Exception:  # noqa: BLE01
+                except Exception:  # noqa: BLE001
                     logger.debug("Could not read %s", candidate)
 
         seen: set[str] = set()

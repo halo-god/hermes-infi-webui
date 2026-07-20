@@ -82,7 +82,6 @@ export default {
   actions: {
     copy: "Copy",
     regenerate: "Regenerate",
-    like: "Like",
     share: "Share",
     deleteChat: "Delete Chat",
     confirmDelete: "Confirm Delete",

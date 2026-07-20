@@ -15,20 +15,21 @@ services:
       timeout: 3s
       retries: 10
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
 
   redis:
     image: docker.m.daocloud.io/library/redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"]
     volumes:
       - redisdata:/data
+      - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "-p", "1979", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
     ports:
-      - "6379:6379"
+      - "127.0.0.1:1979:1979"
 
   api:
     build:
@@ -39,8 +40,8 @@ services:
       DEBUG: ${DEBUG:-true}
       SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-hermes}:${POSTGRES_PASSWORD:-hermes}@postgres:5432/${POSTGRES_DB:-hermes}
-      REDIS_URL: redis://redis:6379/0
-      FIRST_ADMIN_PASSWORD: ${FIRST_ADMIN_PASSWORD:-Hermes@2026}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:1979/0
+      FIRST_ADMIN_PASSWORD: ${FIRST_ADMIN_PASSWORD:-change-me-in-production}
       FIRST_ADMIN_NAME: ${FIRST_ADMIN_NAME:-林知微}
       STORAGE_BACKEND: db
     depends_on:

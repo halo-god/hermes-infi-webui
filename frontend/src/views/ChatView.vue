@@ -250,6 +250,12 @@ function profileDisplay(profile: Profile | null | undefined): { label: string; i
   return { label: profile?.name || branding.shortName, icon: profile?.icon || "sparkle", color: profile?.color || branding.accent, description: profile?.desc || "" };
 }
 
+// Combined helper for roundtable cards: resolves profile + display in one call
+// to avoid calling profileForEntity + profileDisplay 3x per card in template.
+function rtProfileDisplay(agentId: string | null | undefined, profileId?: string | null) {
+  return profileDisplay(profileForEntity(agentId, profileId));
+}
+
 // Markdown rendering (highlight.js/KaTeX) is not cheap — memoize per raw-text input so
 // re-renders triggered by unrelated reactive changes (e.g. typing in the search box)
 // don't redo the full parse for every visible message.
@@ -338,13 +344,6 @@ function reactionEntries(msg: Message): { emoji: string; count: number; mine: bo
   }));
 }
 
-// Thumbs up/down on the always-visible msg-tools row — unlike the emoji
-// picker above, not gated by isGroup, so personal 1:1 chat gets a quality
-// signal too (feeds the self-evolving-skills eval dataset).
-function isReacted(msg: Message, emoji: string): boolean {
-  const meId = auth.user?.id || "";
-  return (msg.reactions?.[emoji] || []).includes(meId);
-}
 
 async function editMsg(msg: Message) {
   if (!chat.activeId) return;
@@ -404,9 +403,12 @@ async function detectTasks() {
   if (!chat.activeId) return;
   try {
     const result = await conversationsApi.detectTasks(chat.activeId);
-    // Send the transcript + prompt as a regular message to get AI analysis
+    // Send the transcript + prompt as a regular message to get AI analysis.
+    // In group chat, pass mentions=["__all_agents__"] so dispatch_group
+    // triggers an AI reply (without it, the message is save-only).
     const fullText = result.transcript + "\n\n" + result.prompt;
-    await chat.send(fullText, result.agent_id, {});
+    const opts = isGroup.value ? { mentions: ["__all_agents__"] } : {};
+    await chat.send(fullText, result.agent_id, opts);
     ns.toast("已发送智能提取请求，等待 AI 分析…");
   } catch { ns.toast("提取失败", "error"); }
 }
@@ -434,29 +436,19 @@ function onMembersChanged(e: Event) {
 onMounted(() => window.addEventListener("hermes:members-changed", onMembersChanged));
 onUnmounted(() => window.removeEventListener("hermes:members-changed", onMembersChanged));
 
-// Post-process Mermaid blocks after DOM updates
-watch(() => chat.messages.length, async () => {
-  await nextTick();
-  const blocks = document.querySelectorAll('.md-body pre code.language-mermaid');
-  for (const block of blocks) {
-    const pre = block.parentElement;
-    if (!pre || pre.dataset.mermaidDone) continue;
-    pre.dataset.mermaidDone = '1';
-    const code = block.textContent || '';
-    try {
-      const html = await renderMarkdownAsync(`\`\`\`mermaid\n${code}\n\`\`\``);
-      const wrapper = document.createElement('div');
-      wrapper.innerHTML = html;
-      pre.replaceWith(wrapper.firstElementChild!);
-    } catch { /* leave as code block */ }
-  }
-});
+// Track whether the user is near the bottom of the scroll area, so we only
+// auto-scroll during streaming if they haven't scrolled up to read history.
+let isPinnedToBottom = true;
+function onScroll() {
+  if (!scroller.value) return;
+  const { scrollTop, scrollHeight, clientHeight } = scroller.value;
+  isPinnedToBottom = scrollHeight - scrollTop - clientHeight < 80;
+}
 
 async function scrollDown() {
   await nextTick();
   if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight;
 }
-watch(() => chat.messages.length, () => nextTick(scrollDown));
 watch(() => chat.activeId, scrollDown);
 
 // ── Route query watcher: handle ?c= changes while already in ChatView ──
@@ -483,15 +475,6 @@ const virtualizer = useVirtualizer({
   getItemKey: (index) => chat.messages[index]?.id ?? index,
 });
 
-// Update virtualizer count when messages change
-watch(() => chat.messages.length, (newCount) => {
-  virtualizer.value.options.count = newCount;
-  // Auto-scroll to bottom for new messages
-  nextTick(() => {
-    virtualizer.value.scrollToIndex(newCount - 1, { align: "end" });
-  });
-});
-
 // Measure actual element height for variable-height messages
 function onMeasure(el: HTMLElement, _index: number) {
   if (el) {
@@ -499,15 +482,46 @@ function onMeasure(el: HTMLElement, _index: number) {
   }
 }
 
-// Re-measure virtual items when streaming message content grows.
-// Without this, the virtualizer keeps the initially-measured height
-// while the DOM grows, causing content to appear clipped / "not refreshing".
-watch(
-  () => chat.messages.length,
-  () => {
-    nextTick(() => virtualizer.value.measure());
-  },
-);
+// Throttle virtualizer re-measure during streaming to avoid per-token measure() calls.
+let measureTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleMeasure() {
+  if (measureTimer) return;
+  measureTimer = setTimeout(() => {
+    measureTimer = null;
+    virtualizer.value.measure();
+  }, 200);
+}
+
+// Single consolidated watcher for messages.length changes, replacing 4
+// separate watches that each fired on every token during streaming.
+watch(() => chat.messages.length, async (newCount) => {
+  // 1. Update virtualizer count
+  virtualizer.value.options.count = newCount;
+
+  // 2. Post-process Mermaid blocks (guarded by dataset flag, cheap if none new)
+  await nextTick();
+  const blocks = document.querySelectorAll('.md-body pre code.language-mermaid');
+  for (const block of blocks) {
+    const pre = block.parentElement;
+    if (!pre || pre.dataset.mermaidDone) continue;
+    pre.dataset.mermaidDone = '1';
+    const code = block.textContent || '';
+    try {
+      const html = await renderMarkdownAsync(`\`\`\`mermaid\n${code}\n\`\`\``);
+      const wrapper = document.createElement('div');
+      wrapper.innerHTML = html;
+      pre.replaceWith(wrapper.firstElementChild!);
+    } catch { /* leave as code block */ }
+  }
+
+  // 3. Auto-scroll only if user is already near the bottom
+  if (isPinnedToBottom) {
+    nextTick(() => virtualizer.value.scrollToIndex(newCount - 1, { align: "end" }));
+  }
+
+  // 4. Re-measure virtual items (throttled)
+  scheduleMeasure();
+});
 
 const openFileId = ref<string | null>(null);
 
@@ -812,7 +826,12 @@ function onGlobalKey(e: KeyboardEvent) {
   if (e.key === "Escape" && showSearch.value) { showSearch.value = false; searchQuery.value = ""; }
 }
 onMounted(() => window.addEventListener("keydown", onGlobalKey));
-onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
+onUnmounted(() => {
+  window.removeEventListener("keydown", onGlobalKey);
+  // Clean up IntersectionObserver to prevent memory + callback leaks.
+  observer?.disconnect();
+  observer = null;
+});
 </script>
 
 <template>
@@ -971,7 +990,7 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
       </div>
 
       <!-- Scrollable message area -->
-      <div ref="scroller" class="thread">
+      <div ref="scroller" class="thread" @scroll="onScroll">
         <div class="thread-inner">
           <!-- messages (virtual scroll) -->
           <div v-if="chat.hasMoreMessages || chat.loadingOlder" ref="loadMoreSentinel" class="load-more-sentinel">
@@ -995,9 +1014,9 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
               <div class="roundtable-label">{{ chat.messages[row.index].content.moa ? "MoA 混合模型" : "圆桌" }} · {{ chat.messages[row.index].content.replies?.length || 0 }} 位助手并行作答</div>
               <div v-for="(r, idx) in chat.messages[row.index].content.replies" :key="idx" class="rt-card">
                 <div class="rt-card-head">
-                  <span class="rt-avatar" :style="{ background: profileDisplay(profileForEntity(r.agent_id, r.profile_id)).color }"><Icon :name="profileDisplay(profileForEntity(r.agent_id, r.profile_id)).icon" :size="11" /></span>
-                  <span class="rt-name">{{ profileDisplay(profileForEntity(r.agent_id, r.profile_id)).label }}</span>
-                  <span class="rt-stance">— {{ profileDisplay(profileForEntity(r.agent_id, r.profile_id)).description }}</span>
+                  <span class="rt-avatar" :style="{ background: rtProfileDisplay(r.agent_id, r.profile_id).color }"><Icon :name="rtProfileDisplay(r.agent_id, r.profile_id).icon" :size="11" /></span>
+                  <span class="rt-name">{{ rtProfileDisplay(r.agent_id, r.profile_id).label }}</span>
+                  <span class="rt-stance">— {{ rtProfileDisplay(r.agent_id, r.profile_id).description }}</span>
                   <span class="rt-status" :class="r.status">{{ r.status === 'streaming' ? '生成中' : r.status === 'error' ? '作答失败' : r.status === 'timeout' ? '超时' : '完成' }}</span>
                 </div>
                 <div v-if="chat.messages[row.index].status === 'streaming'" class="rt-progress-wrap">
@@ -1099,9 +1118,9 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                 <div v-if="chat.messages[row.index].role === 'agent' && chat.messages[row.index].status === 'cancelled'" class="msg-cancelled-tag">
                   <Icon name="stop" :size="11" /> 已停止生成
                 </div>
-                <!-- group: reactions + edited marker + hover actions -->
-                <template v-if="isGroup && !chat.messages[row.index].deleted_at">
-                  <div v-if="reactionEntries(chat.messages[row.index]).length || chat.messages[row.index].edited_at" class="msg-reactions">
+                <!-- Unified single-row message actions: reactions + reply + emoji + tools -->
+                <template v-if="!chat.messages[row.index].deleted_at">
+                  <div v-if="reactionEntries(chat.messages[row.index]).length || (isGroup && chat.messages[row.index].edited_at)" class="msg-reactions">
                     <button
                       v-for="r in reactionEntries(chat.messages[row.index])"
                       :key="r.emoji"
@@ -1109,18 +1128,30 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                       :class="{ mine: r.mine }"
                       @click="toggleReaction(chat.messages[row.index], r.emoji)"
                     >{{ r.emoji }} {{ r.count }}</button>
-                    <span v-if="chat.messages[row.index].edited_at" class="edited-tag">(已编辑)</span>
+                    <span v-if="isGroup && chat.messages[row.index].edited_at" class="edited-tag">(已编辑)</span>
                   </div>
-                  <div v-if="!chat.messages[row.index].id.startsWith('tmp-')" class="group-actions">
-                    <button title="回复" @click="setReply(chat.messages[row.index])"><Icon name="quote" :size="12" /></button>
+                  <div v-if="!chat.messages[row.index].id.startsWith('tmp-')" class="msg-actions">
+                    <!-- Group-only: reply / edit / recall -->
+                    <button v-if="isGroup" title="回复" @click="setReply(chat.messages[row.index])"><Icon name="quote" :size="12" /></button>
+                    <!-- Emoji picker (all chats) -->
                     <div class="react-wrap" @mouseleave="closeEmojiPicker()">
                       <button title="表情" @click.stop="toggleEmojiPicker(chat.messages[row.index].id)"><Icon name="thumbs_up" :size="12" /></button>
                       <div v-if="openEmojiFor === chat.messages[row.index].id" class="react-pop">
                         <button v-for="e in REACTION_EMOJIS" :key="e" @click="toggleReaction(chat.messages[row.index], e)">{{ e }}</button>
                       </div>
                     </div>
-                    <button v-if="canModify(chat.messages[row.index])" title="编辑" @click="editMsg(chat.messages[row.index])"><Icon name="edit" :size="12" /></button>
-                    <button v-if="canModify(chat.messages[row.index])" title="撤回" @click="recallMsg(chat.messages[row.index])"><Icon name="trash" :size="12" /></button>
+                    <button v-if="isGroup && canModify(chat.messages[row.index])" title="编辑" @click="editMsg(chat.messages[row.index])"><Icon name="edit" :size="12" /></button>
+                    <button v-if="isGroup && canModify(chat.messages[row.index])" title="撤回" @click="recallMsg(chat.messages[row.index])"><Icon name="trash" :size="12" /></button>
+                    <!-- Agent-only tools (completed agent messages) -->
+                    <template v-if="chat.messages[row.index].role === 'agent' && chat.messages[row.index].status !== 'streaming'">
+                      <button title="复制" @click="copyMessage(chat.messages[row.index].content.text)"><Icon name="copy" :size="12" /></button>
+                      <button title="重新生成" @click="regenerate(chat.messages[row.index].id)"><Icon name="refresh" :size="12" /></button>
+                      <button title="分享" @click="shareMessage(chat.messages[row.index].conversation_id)"><Icon name="share" :size="12" /></button>
+                      <button v-if="canConsolidate && activeConvo?.project_id" title="沉淀为项目文档" @click="consolidateOutput(chat.messages[row.index], 'project_doc')"><Icon name="doc" :size="12" /></button>
+                      <button v-if="canConsolidate && activeConvo?.team_id" title="沉淀为团队知识" @click="consolidateOutput(chat.messages[row.index], 'team_knowledge')"><Icon name="pin" :size="12" /></button>
+                      <button v-if="canConsolidate && activeConvo?.project_id" title="从此消息生成任务" @click="deriveTasks(chat.messages[row.index])"><Icon name="check" :size="12" /></button>
+                      <button title="智能提取待办" @click="detectTasks"><Icon name="sparkle" :size="12" /></button>
+                    </template>
                   </div>
                 </template>
                 <div v-if="chat.messages[row.index].role === 'agent' && chat.messages[row.index].content.files?.length" class="msg-files" style="margin-top:6px">
@@ -1133,28 +1164,6 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
                       <pre class="diff-body" v-html="colorDiff(f.diff)"></pre>
                     </details>
                   </div>
-                </div>
-                <div v-if="chat.messages[row.index].role === 'agent' && chat.messages[row.index].status !== 'streaming'" class="msg-tools">
-                  <button
-                    title="有用"
-                    class="msg-thumb"
-                    :class="{ active: isReacted(chat.messages[row.index], '👍') }"
-                    @click="toggleReaction(chat.messages[row.index], '👍')"
-                  >👍</button>
-                  <button
-                    title="没用"
-                    class="msg-thumb"
-                    :class="{ active: isReacted(chat.messages[row.index], '👎') }"
-                    @click="toggleReaction(chat.messages[row.index], '👎')"
-                  >👎</button>
-                  <button title="复制" @click="copyMessage(chat.messages[row.index].content.text)"><Icon name="copy" :size="12" /></button>
-                  <button title="重新生成" @click="regenerate(chat.messages[row.index].id)"><Icon name="refresh" :size="12" /></button>
-
-                  <button title="分享" @click="shareMessage(chat.messages[row.index].conversation_id)"><Icon name="share" :size="12" /></button>
-                  <button v-if="canConsolidate && activeConvo?.project_id" title="沉淀为项目文档" @click="consolidateOutput(chat.messages[row.index], 'project_doc')"><Icon name="doc" :size="12" /></button>
-                  <button v-if="canConsolidate && activeConvo?.team_id" title="沉淀为团队知识" @click="consolidateOutput(chat.messages[row.index], 'team_knowledge')"><Icon name="pin" :size="12" /></button>
-                  <button v-if="canConsolidate && activeConvo?.project_id" title="从此消息生成任务" @click="deriveTasks(chat.messages[row.index])"><Icon name="check" :size="12" /></button>
-                  <button v-if="isGroup" title="智能提取待办" @click="detectTasks"><Icon name="sparkle" :size="12" /></button>
                 </div>
                 <!-- Smart follow-up suggestion chips -->
                 <div v-if="chat.features.followup_chips && chat.messages[row.index].role === 'agent' && chat.messages[row.index].status !== 'streaming' && chat.messages[row.index].content.text" class="followup-chips">
@@ -1321,6 +1330,26 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKey));
   display: inline-flex;
 }
 .group-actions button:hover { background: var(--accent-tint); color: var(--accent); }
+/* Unified message actions row (replaces separate group-actions + msg-tools) */
+.msg-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 3px;
+  opacity: 0;
+  transition: opacity 120ms;
+}
+.msg:hover .msg-actions { opacity: 1; }
+.msg-actions button {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--ink-mute);
+  padding: 3px;
+  border-radius: 5px;
+  display: inline-flex;
+}
+.msg-actions button:hover { background: var(--accent-tint); color: var(--accent); }
 .react-wrap { position: relative; display: inline-flex; }
 .react-pop {
   position: absolute;

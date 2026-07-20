@@ -26,13 +26,14 @@ services:
   redis:
     image: docker.m.daocloud.io/library/redis:7-alpine
     container_name: hermes-redis
-    command: ["redis-server", "--appendonly", "yes"]
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"]
     volumes:
       - redisdata:/data
+      - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
     ports:
-      - "6379:6379"
+      - "127.0.0.1:1979:1979"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "-p", "1979", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10

@@ -40,7 +40,7 @@ make up
 
 - **Web**: http://localhost:8080
 - **API 文档**: http://localhost:8000/api/docs
-- **默认账号**: `admin@hermes.io` / `Hermes@2026`
+- **默认账号**: `admin@hermes.io` / 密码见 `.env` 中的 `FIRST_ADMIN_PASSWORD`
 
 其他命令：
 

@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core import governance as gov
-from app.core.files import read_upload_capped
+from app.core.files import hydrate_stored_content, read_upload_capped
 from app.core.rbac import require_admin
 from app.db.base import get_db
 from app.db.models.user import User
@@ -486,17 +486,7 @@ async def get_knowledge_content(
     k = await db.get(TeamKnowledge, kid)
     if k is None or k.team_id != team_id:
         raise HTTPException(status_code=404, detail="知识条目不存在")
-    content = k.content
-    if content is None and k.storage_key:
-        import asyncio
-        from app.core import object_storage
-        from app.core.files import OFFICE_EXTRACTORS, is_text_extractable
-
-        data = await asyncio.to_thread(object_storage.get, k.storage_key)
-        if k.kind in OFFICE_EXTRACTORS:
-            content = OFFICE_EXTRACTORS[k.kind](data) or None
-        elif is_text_extractable(k.kind):
-            content = data.decode("utf-8", "ignore")
+    content = await hydrate_stored_content(k.kind, k.storage_key, k.content)
     return KnowledgeDetail(
         **KnowledgeOut.model_validate(k).model_dump(),
         content=content,
@@ -992,16 +982,7 @@ async def get_doc_content(
         raise HTTPException(status_code=404, detail="文件不存在")
     await svc.require_membership(db, (await svc.get_project(db, d.project_id)).team_id, user.id)
     content = d.content
-    if content is None and d.storage_key:
-        import asyncio
-        from app.core import object_storage
-        from app.core.files import OFFICE_EXTRACTORS, is_text_extractable
-
-        data = await asyncio.to_thread(object_storage.get, d.storage_key)
-        if d.kind in OFFICE_EXTRACTORS:
-            content = OFFICE_EXTRACTORS[d.kind](data) or None
-        elif is_text_extractable(d.kind):
-            content = data.decode("utf-8", "ignore")
+    content = await hydrate_stored_content(d.kind, d.storage_key, d.content)
     return DocDetail(**DocOut.model_validate(d).model_dump(), content=content)
 
 

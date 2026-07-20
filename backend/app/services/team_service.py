@@ -473,16 +473,34 @@ _ACTIVITY_ICON: dict[str, str] = {
 
 async def team_activity(db: AsyncSession, team: Team) -> list[dict]:
     """Recent-activity feed: real ProjectActivity rows merged with members joined,
-    projects created and knowledge uploaded (synthesized for events not yet logged)."""
+    projects created and knowledge uploaded (synthesized for events not yet logged).
+
+    Each sub-source is capped (``.limit(8)``) so large teams don't pull full
+    tables just to keep the 8 most recent items."""
     items: list[tuple[datetime, dict]] = []
-    rows = await list_members(db, team.id)
-    for m, u in rows:
+    # Lightweight bounded queries instead of full-table list_members/projects/knowledge.
+    member_rows = (await db.execute(
+        select(TeamMember, User)
+        .join(User, TeamMember.user_id == User.id)
+        .where(TeamMember.team_id == team.id)
+        .order_by(TeamMember.joined_at.desc())
+        .limit(8)
+    )).all()
+    for m, u in member_rows:
         items.append((m.joined_at, {"who": u.name or "成员", "action": "加入了团队",
                                     "target": team.name, "icon": "user", "ago": _ago(m.joined_at)}))
-    for p in await list_projects(db, team.id):
+    proj_rows = (await db.execute(
+        select(Project).where(Project.team_id == team.id)
+        .order_by(Project.created_at.desc()).limit(8)
+    )).scalars().all()
+    for p in proj_rows:
         items.append((p.created_at, {"who": "团队", "action": "创建了项目",
                                      "target": p.name, "icon": "cube", "ago": _ago(p.created_at)}))
-    for k in await list_knowledge(db, team.id):
+    kb_rows = (await db.execute(
+        select(TeamKnowledge).where(TeamKnowledge.team_id == team.id)
+        .order_by(TeamKnowledge.created_at.desc()).limit(8)
+    )).scalars().all()
+    for k in kb_rows:
         items.append((k.created_at, {"who": k.uploaded_by_name or "成员", "action": "上传了文件",
                                      "target": k.name, "icon": "doc", "ago": _ago(k.created_at)}))
     # Real closed-loop activity (task推进 / 沉淀 / 衍生) logged on project_activity.

@@ -6,10 +6,13 @@ tunable at runtime without a redeploy.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from app.config import settings
 from app.core.redis import get_redis
+
+logger = logging.getLogger(__name__)
 
 _RATE_CFG_KEY = "cfg:rate_limit_per_min"
 
@@ -58,4 +61,6 @@ async def allow_send(user_id: str) -> bool:
     allowed, _ = await hit(f"rl:msg:{user_id}", limit, 60)
     if allowed:
         await incr_monthly_messages(user_id)
+    else:
+        logger.warning("Rate limit hit: user %s exceeded %d msg/min", user_id[:12], limit)
     return allowed

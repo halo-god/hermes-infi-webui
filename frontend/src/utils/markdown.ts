@@ -75,13 +75,13 @@ const defaultRender =
     return self.renderToken(tokens, idx, options);
   };
 
-md.renderer.rules.link_open = function (tokens: any[], idx: number, options: any, env: any, self: any) {
+md.renderer.rules.link_open = function (tokens: any[], idx: number, options: any, _env: any, self: any) {
   const href = tokens[idx].attrGet("href") || "";
   const safe = /^\s*(https?:\/\/|mailto:|#|\/)/i.test(href) ? href : "#";
   tokens[idx].attrSet("href", safe);
   tokens[idx].attrSet("target", "_blank");
   tokens[idx].attrSet("rel", "noopener");
-  return defaultRender(tokens, idx, options, env, self);
+  return defaultRender(tokens, idx, options, _env, self);
 };
 
 // ── Collapsible blockquote ──
@@ -96,8 +96,8 @@ md.renderer.rules.blockquote_close = function () {
 const defaultInline = md.renderer.rules.inline || function (tokens: any[], idx: number, options: any, _env: any, self: any) {
   return self.renderToken(tokens, idx, options);
 };
-md.renderer.rules.inline = function (tokens: any[], idx: number, options: any, env: any, self: any) {
-  const html = defaultInline(tokens, idx, options, env, self);
+md.renderer.rules.inline = function (tokens: any[], idx: number, options: any, _env: any, self: any) {
+  const html = defaultInline(tokens, idx, options, _env, self);
   return html;
 };
 
@@ -128,13 +128,13 @@ const defaultFence =
     return self.renderToken(tokens, idx, options);
   };
 
-md.renderer.rules.fence = function (tokens: any[], idx: number, options: any, env: any, self: any) {
+md.renderer.rules.fence = function (tokens: any[], idx: number, options: any, _env: any, self: any) {
   const token = tokens[idx];
   const info = token.info.trim();
   const lang = info.split(/\s+/)[0] || "";
   const langLabel = lang ? `<span class="code-lang">${md.utils.escapeHtml(lang)}</span>` : "";
   const copyBtn = `<button class="code-copy-btn" onclick="copyCode(this)" title="复制">📋</button>`;
-  const codeHtml = defaultFence(tokens, idx, options, env, self);
+  const codeHtml = defaultFence(tokens, idx, options, _env, self);
   // Wrap with header bar
   return `<div class="code-block-wrapper">${langLabel}${copyBtn}${codeHtml}</div>`;
 };

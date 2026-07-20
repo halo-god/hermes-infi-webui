@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { computed, ref } from "vue";
+import { computed, ref, shallowRef, triggerRef } from "vue";
 import { conversationsApi } from "@/api/conversations";
 import { profilesApi } from "@/api/agents";
 import { teamsApi } from "@/api/teams";
@@ -19,7 +19,19 @@ export const useChatStore = defineStore("chat", () => {
   const activeId = ref<string | null>(null);
   const activeAgents = ref<string[]>(["hermes"]);
   const activeProfiles = ref<Profile[]>([]);
-  const messages = ref<Message[]>([]);
+  const messages = shallowRef<Message[]>([]);
+
+  // Helper: push to the shallowRef messages array and trigger reactivity.
+  // shallowRef doesn't track deep mutations, so we must triggerRef after
+  // any in-place .push()/.splice()/.sort() call.
+  function pushMessage(m: Message) {
+    messages.value.push(m);
+    triggerRef(messages);
+  }
+  function spliceMessage(idx: number, count: number, ...items: Message[]) {
+    messages.value.splice(idx, count, ...items);
+    triggerRef(messages);
+  }
   const files = ref<WorkspaceFile[]>([]);
   const streamingConvoId = ref<string | null>(null);
   const streaming = computed(() => streamingConvoId.value !== null);
@@ -175,8 +187,8 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   function closeStream() {
+    if (_streamDisposer) { _streamDisposer(); _streamDisposer = null; }
     stream.close();
-    stream.offAll();
     groupStreamId.value = null;
     typingUsers.value = [];
   }
@@ -354,9 +366,13 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   // ── Stream event handlers (delegated to chatStream module) ──
+  let _streamDisposer: (() => void) | null = null;
 
   function setupStreamHandlers() {
-    registerStreamHandlers(stream, {
+    // Dispose previous registration (cancel refresh timer + clear handlers)
+    // before registering new ones to prevent stale callbacks on a dead stream.
+    if (_streamDisposer) { _streamDisposer(); _streamDisposer = null; }
+    _streamDisposer = registerStreamHandlers(stream, {
       activeId,
       messages,
       conversations,
@@ -367,6 +383,9 @@ export const useChatStore = defineStore("chat", () => {
       typingUsers,
       find,
       refreshAfterTurn,
+      triggerMessages: () => triggerRef(messages),
+      pushMessage,
+      spliceMessage,
     });
   }
 
@@ -410,7 +429,7 @@ export const useChatStore = defineStore("chat", () => {
         (activeConvo?.channel_mode === "always" && !mentions.includes("__all_humans__"));
       if (expectAgent) streamingConvoId.value = id;
       // Optimistic user bubble — reconciled by the `message` echo (same text).
-      messages.value.push({
+      pushMessage({
         id: `tmp-${crypto.randomUUID?.() ?? Math.random().toString(36).slice(2) + Date.now().toString(36)}`,
         conversation_id: id,
         owner_id: null,
@@ -476,7 +495,7 @@ export const useChatStore = defineStore("chat", () => {
       status: "complete" as const,
       created_at: new Date().toISOString(),
     };
-    messages.value.push(optimisticUser);
+    pushMessage(optimisticUser);
 
     // Anchor the stream BEFORE the POST. The runner publishes start/token/done
     // only after the prompt is enqueued (post-POST), so anything from this
@@ -496,9 +515,9 @@ export const useChatStore = defineStore("chat", () => {
     const res = await conversationsApi.send(id, text, opts);
     // Replace the optimistic user message with the real one (server-assigned id)
     const optIdx = messages.value.findIndex((m) => m.id === optimisticUser.id);
-    if (optIdx !== -1) messages.value.splice(optIdx, 1, res.user_message);
+    if (optIdx !== -1) spliceMessage(optIdx, 1, res.user_message);
     // The SSE "start" event may have already created the agent bubble
-    if (!find(res.agent_message.id)) messages.value.push(res.agent_message);
+    if (!find(res.agent_message.id)) pushMessage(res.agent_message);
   }
 
   /** Roundtable: bidirectional WebSocket — send + stream over one socket. */
@@ -516,7 +535,7 @@ export const useChatStore = defineStore("chat", () => {
     });
 
     // Optimistic user bubble
-    messages.value.push({
+    pushMessage({
       id: `tmp-${crypto.randomUUID?.() ?? Math.random().toString(36).slice(2) + Date.now().toString(36)}`,
       conversation_id: id,
       owner_id: null,

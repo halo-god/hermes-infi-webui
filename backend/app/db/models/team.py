@@ -84,6 +84,9 @@ class Project(UUIDPrimaryKey, Timestamps, Base):
 
 class ProjectTask(UUIDPrimaryKey, Timestamps, Base):
     __tablename__ = "project_tasks"
+    __table_args__ = (
+        Index("ix_project_tasks_project_order", "project_id", "order_idx"),
+    )
 
     project_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), index=True
@@ -117,7 +120,7 @@ class TeamKnowledge(UUIDPrimaryKey, Timestamps, Base):
     uploaded_by_name: Mapped[str | None] = mapped_column(String(120))
     source_conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     source_message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
-    folder_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    folder_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     is_folder: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     current_version: Mapped[int] = mapped_column(Integer, default=1)
@@ -153,7 +156,7 @@ class ProjectDoc(UUIDPrimaryKey, Timestamps, Base):
     created_by_name: Mapped[str | None] = mapped_column(String(120))
     source_conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     source_message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
-    folder_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    folder_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     is_folder: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     current_version: Mapped[int] = mapped_column(Integer, default=1)
 

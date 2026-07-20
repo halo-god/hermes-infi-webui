@@ -86,26 +86,56 @@ async def list_subagents(
     db: AsyncSession, parent_conversation_id: uuid.UUID,
 ) -> list[tuple[BackgroundSubagent, int]]:
     """Return [(row, unread_count), ...] for the parent's subagents, newest
-    first. Unread is computed per-row against BackgroundSubagent.last_read_at
-    (mirrors the GroupMember.last_read_at unread pattern, per-row cutoff so
-    no single grouped query — the expected subagent count per conversation
-    is small, this isn't a hot path)."""
+    first. Unread is computed per-row against BackgroundSubagent.last_read_at."""
     stmt = (
         select(BackgroundSubagent)
         .where(BackgroundSubagent.parent_conversation_id == parent_conversation_id)
         .order_by(BackgroundSubagent.created_at.desc())
     )
     rows = list((await db.execute(stmt)).scalars().all())
+    if not rows:
+        return []
+
+    # Batch-compute unread counts in a single grouped query instead of N
+    # per-row round-trips. We fetch total agent messages per sub-conversation,
+    # then subtract the "read" portion (messages up to last_read_at) per row.
+    sub_conv_ids = [r.subagent_conversation_id for r in rows]
+    total_rows = (
+        await db.execute(
+            select(Message.conversation_id, func.count(Message.id))
+            .where(
+                Message.conversation_id.in_(sub_conv_ids),
+                Message.role == "agent",
+            )
+            .group_by(Message.conversation_id)
+        )
+    ).all()
+    total_by_conv = {row[0]: int(row[1] or 0) for row in total_rows}
+
+    # Fetch read counts only for rows that have a last_read_at cutoff.
+    read_cutoffs = {r.subagent_conversation_id: r.last_read_at for r in rows if r.last_read_at}
+    read_by_conv: dict[uuid.UUID, int] = {}
+    if read_cutoffs:
+        # Build OR conditions for each (conversation_id, last_read_at) pair.
+        from sqlalchemy import or_, and_
+        conditions = [
+            and_(Message.conversation_id == cid, Message.created_at <= cutoff)
+            for cid, cutoff in read_cutoffs.items()
+        ]
+        read_rows = (
+            await db.execute(
+                select(Message.conversation_id, func.count(Message.id))
+                .where(Message.role == "agent", or_(*conditions))
+                .group_by(Message.conversation_id)
+            )
+        ).all()
+        read_by_conv = {row[0]: int(row[1] or 0) for row in read_rows}
+
     out: list[tuple[BackgroundSubagent, int]] = []
     for row in rows:
-        count_stmt = select(func.count(Message.id)).where(
-            Message.conversation_id == row.subagent_conversation_id,
-            Message.role == "agent",
-        )
-        if row.last_read_at:
-            count_stmt = count_stmt.where(Message.created_at > row.last_read_at)
-        unread = (await db.execute(count_stmt)).scalar_one()
-        out.append((row, int(unread or 0)))
+        total = total_by_conv.get(row.subagent_conversation_id, 0)
+        read = read_by_conv.get(row.subagent_conversation_id, 0) if row.last_read_at else 0
+        out.append((row, max(0, total - read)))
     return out
 
 

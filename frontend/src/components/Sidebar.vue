@@ -11,7 +11,6 @@ import { useAuthStore } from "@/stores/auth";
 import { useBrandingStore } from "@/stores/branding";
 import { useChatStore } from "@/stores/chat";
 import { useNotificationStore } from "@/stores/notifications";
-import { useTheme } from "@/composables/useTheme";
 import { conversationsApi } from "@/api/conversations";
 import type { Conversation } from "@/types";
 
@@ -21,7 +20,6 @@ const branding = useBrandingStore();
 const ns = useNotificationStore();
 const router = useRouter();
 const route = useRoute();
-const { theme, toggleTheme } = useTheme();
 const { t } = useI18n();
 const showNewTeam = ref(false);
 const showNewGroup = ref(false);
@@ -84,12 +82,22 @@ const groupedConversations = computed((): ConvoGroup[] => {
 });
 
 /** Conversations grouped by folder (non-pinned conversations, assigned to a folder).
- *  Empty folders are shown too — otherwise a freshly-created folder vanishes
- *  until a conversation is moved into it, which is confusing. */
+ *  Empty folders are shown too - otherwise a freshly-created folder vanishes
+ *  until a conversation is moved into it, which is confusing.
+ *
+ *  Single-pass: build a Map<folder_id, Conversation[]> in one iteration over
+ *  personalConversations instead of O(folders × convos) repeated filter. */
 const folderGroups = computed(() => {
+  const byFolder = new Map<string, Conversation[]>();
+  for (const c of personalConversations.value) {
+    if (c.pinned || !c.folder_id) continue;
+    const arr = byFolder.get(c.folder_id);
+    if (arr) arr.push(c);
+    else byFolder.set(c.folder_id, [c]);
+  }
   return chat.folders.map((f) => ({
     folder: f,
-    items: personalConversations.value.filter((c) => !c.pinned && c.folder_id === f.id),
+    items: byFolder.get(f.id) || [],
   }));
 });
 
@@ -460,7 +468,7 @@ function doDeleteFolder() {
         群聊
         <button title="创建群聊" @click="showNewGroup = true">+</button>
       </div>
-      <div class="convo-list" style="margin-bottom: 8px; flex: 0 0 auto; max-height: 200px; overflow-y: auto">
+      <div class="convo-list group-list" style="margin-bottom: 8px">
         <div
           v-for="c in groupConversations"
           :key="c.id"
@@ -644,22 +652,12 @@ function doDeleteFolder() {
       </div>
 
       <div class="side-foot" v-if="auth.user">
-        <div class="side-row" @click="toggleTheme" :title="theme === 'dark' ? t('nav.lightMode') : t('nav.darkMode')">
-          <Icon :name="theme === 'dark' ? 'sun' : 'moon'" class="ico" />
-          {{ theme === 'dark' ? t('nav.lightMode') : t('nav.darkMode') }}
-        </div>
         <div v-if="isAdmin" class="side-row" :class="{ active: route.name === 'admin' }" @click="router.push('/admin')">
           <Icon name="settings" class="ico" /> {{ t('nav.admin') }}
           <span class="badge" style="background: var(--accent-tint); color: var(--accent-deep); font-weight: 600">ADMIN</span>
         </div>
-        <div v-if="isAdmin" class="side-row" :class="{ active: route.name === 'logs' }" @click="router.push('/logs')">
-          <Icon name="doc" class="ico" /> 日志查看
-        </div>
         <div class="side-row" :class="{ active: route.name === 'feedback' }" @click="router.push('/feedback')">
           <Icon name="chat" class="ico" /> 反馈中心
-        </div>
-        <div class="side-row" :class="{ active: route.name === 'settings' }" @click="router.push('/settings')">
-          <Icon name="user" class="ico" /> {{ t('nav.settings') }}
         </div>
         <div class="side-row" :class="{ active: route.name === 'settings' }" @click="router.push('/settings')" :title="t('nav.settings')">
           <div class="mem-avatar" :style="{ background: auth.user.color || '#b8852a', width: '20px', height: '20px', fontSize: '10px', marginLeft: '-2px', marginRight: '-2px' }">

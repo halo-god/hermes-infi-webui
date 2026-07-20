@@ -375,23 +375,53 @@ async def process_upload(
             raise HTTPException(
                 status_code=503, detail="文件预览服务不可用，请检查对象存储配置"
             ) from exc
-        content = OFFICE_EXTRACTORS[ext](raw) or "<p><em>(无法解析文档内容)</em></p>"
+        # Office extraction (zipfile + XML parse + base64 images) is CPU-bound;
+        # offload to a thread so it doesn't block the event loop and stall
+        # concurrent SSE token streams.
+        content = await asyncio.to_thread(OFFICE_EXTRACTORS[ext], raw) or "<p><em>(无法解析文档内容)</em></p>"
     elif len(raw) > threshold_bytes or settings.storage_backend == "minio":
         storage_key = f"{storage_key_prefix}/{uuid.uuid4().hex}/{name}"
         await asyncio.to_thread(object_storage.put, storage_key, raw, ctype)
         if ext == "pdf":
-            content = extract_pdf_text(raw)
+            content = await asyncio.to_thread(extract_pdf_text, raw)
         elif ext in PLAIN_TEXT_EXTS:
             content = raw.decode("utf-8", "ignore")
     else:
         if ext in PLAIN_TEXT_EXTS:
             content = raw.decode("utf-8", "ignore")
         elif ext == "pdf":
-            content = extract_pdf_text(raw)
+            content = await asyncio.to_thread(extract_pdf_text, raw)
         else:
             content = base64.b64encode(raw).decode("ascii")
 
     return ProcessedUpload(content=content, storage_key=storage_key, size_bytes=len(raw))
+
+
+async def hydrate_stored_content(
+    kind: str | None,
+    storage_key: str | None,
+    inline_content: str | None,
+) -> str | None:
+    """Resolve knowledge/doc content from inline text or object storage.
+
+    Consolidates the "if content is None and storage_key: fetch from storage
+    and extract" pattern that was duplicated across teams.py and
+    conversation_service.py. Returns ``None`` if no content is available.
+    """
+    if inline_content is not None:
+        return inline_content
+    if not storage_key or not kind:
+        return None
+
+    from app.core import object_storage
+
+    data = await asyncio.to_thread(object_storage.get, storage_key)
+    ext = kind.lower()
+    if ext in OFFICE_EXTRACTORS:
+        return OFFICE_EXTRACTORS[ext](data) or None
+    if is_text_extractable(ext):
+        return data.decode("utf-8", "ignore")
+    return None
 
 
 async def read_upload_capped(file: UploadFile, max_bytes: int) -> bytes:
