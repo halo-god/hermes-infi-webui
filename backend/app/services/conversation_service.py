@@ -2742,46 +2742,6 @@ async def auto_create_tasks_from_message(
     return created
 
 
-async def detect_action_items(
-    db: AsyncSession, conversation_id: uuid.UUID
-) -> dict:
-    """Send a special prompt to the agent asking it to extract action items
-    from the conversation. Returns the agent's text response for the frontend
-    to parse and confirm."""
-    convo = await db.get(Conversation, conversation_id)
-    if not convo:
-        raise ValueError("conversation not found")
-
-    msgs = await get_messages(db, conversation_id, limit=20)
-    if not msgs:
-        return {"text": "", "items": []}
-
-    # Build a transcript of recent messages
-    transcript = []
-    for m in msgs:
-        role = "用户" if m.role == "user" else "助手"
-        text = (m.content or {}).get("text", "")
-        if text:
-            transcript.append(f"{role}: {text[:300]}")
-
-    prompt = (
-        "分析以上对话，提取所有待办事项、决策和截止日期。\n"
-        "以 JSON 格式输出，格式如下：\n"
-        '{"tasks":[{"title":"任务标题","priority":"normal","deadline":null}],"decisions":["决策1"]}\n'
-        "只输出 JSON，不要加其他文字。如果没有待办，返回 {\"tasks\":[],\"decisions\":[]}"
-    )
-
-    # Use the conversation's primary agent to process
-    agent_id = convo.primary_agent_id or "hermes"
-    # For simplicity, we just return the transcript + prompt and let the frontend
-    # send it as a regular message to get the AI response.
-    return {
-        "transcript": "\n".join(transcript),
-        "prompt": prompt,
-        "agent_id": agent_id,
-    }
-
-
 async def execute_task_with_profile(
     db: AsyncSession,
     task_id: uuid.UUID,

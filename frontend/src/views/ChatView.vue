@@ -399,20 +399,6 @@ async function deriveTasks(msg: Message) {
   } catch { ns.toast("生成任务失败（需相应权限）"); }
 }
 
-async function detectTasks() {
-  if (!chat.activeId) return;
-  try {
-    const result = await conversationsApi.detectTasks(chat.activeId);
-    // Send the transcript + prompt as a regular message to get AI analysis.
-    // In group chat, pass mentions=["__all_agents__"] so dispatch_group
-    // triggers an AI reply (without it, the message is save-only).
-    const fullText = result.transcript + "\n\n" + result.prompt;
-    const opts = isGroup.value ? { mentions: ["__all_agents__"] } : {};
-    await chat.send(fullText, result.agent_id, opts);
-    ns.toast("已发送智能提取请求，等待 AI 分析…");
-  } catch { ns.toast("提取失败", "error"); }
-}
-
 function onComposerTyping() {
   const me = auth.user?.name || auth.user?.email || "有人";
   chat.sendTyping(me);
@@ -1150,10 +1136,7 @@ onUnmounted(() => {
                       <button v-if="canConsolidate && activeConvo?.project_id" title="沉淀为项目文档" @click="consolidateOutput(chat.messages[row.index], 'project_doc')"><Icon name="doc" :size="12" /></button>
                       <button v-if="canConsolidate && activeConvo?.team_id" title="沉淀为团队知识" @click="consolidateOutput(chat.messages[row.index], 'team_knowledge')"><Icon name="pin" :size="12" /></button>
                       <button v-if="canConsolidate && activeConvo?.project_id" title="从此消息生成任务" @click="deriveTasks(chat.messages[row.index])"><Icon name="check" :size="12" /></button>
-                      <button title="智能提取待办" @click="detectTasks"><Icon name="sparkle" :size="12" /></button>
                     </template>
-                  </div>
-                </template>
                 <div v-if="chat.messages[row.index].role === 'agent' && chat.messages[row.index].content.files?.length" class="msg-files" style="margin-top:6px">
                   <div v-for="f in chat.messages[row.index].content.files" :key="f.id" class="msg-file-chip-wrap">
                     <button class="msg-file-chip" @click="openFile(f.id)">

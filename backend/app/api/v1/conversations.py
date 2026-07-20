@@ -947,18 +947,6 @@ async def extract_items(
     }
 
 
-@router.post("/{conversation_id}/detect-tasks")
-async def detect_tasks(
-    conversation_id: uuid.UUID,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Detect action items from conversation — returns transcript + prompt for the frontend to send."""
-    convo = await _require_convo(db, conversation_id, user)
-    result = await svc.detect_action_items(db, convo.id)
-    return result
-
-
 @router.post("/{conversation_id}/messages/{message_id}/consolidate")
 async def consolidate_message(
     conversation_id: uuid.UUID,
