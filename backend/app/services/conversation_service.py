@@ -1201,6 +1201,107 @@ async def _resolve_knowledge_names(db, knowledge_ids: list[str]) -> dict[str, st
     return out
 
 
+# ---------------------------------------------------------------------------
+# Context compression — tiered sliding-window summarisation so that very long
+# conversations don't silently overflow the model context.
+# ---------------------------------------------------------------------------
+
+_CONTEXT_COMPRESSION_CONFIG = {
+    "preserve_recent": 10,          # most-recent messages kept verbatim
+    "summary_window": 20,           # older messages batched in groups of N
+    "max_history_messages": 100,    # hard cap before compression kicks in
+    "max_prompt_chars": 80_000,     # hard cap on total prompt chars
+}
+
+_SUMMARY_KEYWORDS = (
+    "决定", "确认", "方案", "选择", "结果", "同意", "拒绝",
+    "执行", "完成", "待办", "todo", "任务", "重点",
+)
+
+
+def _summarize_message_batch(batch: list[Message]) -> str:
+    """Zero-cost rule-based summary of a batch of messages.
+
+    Extracts lines that contain key decisions, actions, or numeric data.
+    Falls back to a generic sentence when nothing salient is found.
+    """
+    key_points: list[str] = []
+    for m in batch:
+        text = ""
+        content = m.content or {}
+        if isinstance(content, dict):
+            text = content.get("text", "")
+        elif isinstance(content, str):
+            text = content
+        lines = text.splitlines()
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            # decision / action keywords
+            if any(kw in line for kw in _SUMMARY_KEYWORDS):
+                key_points.append(line[:200])
+                continue
+            # numeric / temporal / monetary hints
+            if any(c.isdigit() for c in line[:50]):
+                key_points.append(line[:200])
+    if not key_points:
+        return "该段对话主要围绕日常交流展开，无关键决策。"
+    return "；".join(key_points[:5])
+
+
+async def _compress_conversation_history(
+    db: AsyncSession,
+    convo: Conversation,
+    messages: list[Message],
+) -> list[Message]:
+    """Return a compressed view of *messages* when the history is very long.
+
+    The algorithm:
+    1. If <= preserve_recent + 5 → no change.
+    2. Keep the most-recent ``preserve_recent`` messages verbatim.
+    3. Older messages are grouped into ``summary_window`` chunks; each chunk
+       is collapsed into a single pseudo-system message that carries a
+       rule-based summary.
+    4. The summaries are assembled into one synthetic Message inserted at the
+       front of the returned list.
+    """
+    cfg = _CONTEXT_COMPRESSION_CONFIG
+    target_recent = cfg["preserve_recent"]
+    window = cfg["summary_window"]
+
+    if len(messages) <= target_recent + 5:
+        return messages
+
+    recent = messages[-target_recent:]
+    older = messages[:-target_recent]
+
+    summaries: list[str] = []
+    for i in range(0, len(older), window):
+        batch = older[i:i + window]
+        summaries.append(_summarize_message_batch(batch))
+
+    running_summary = "\n\n".join(
+        f"【第{i + 1}段历史摘要】{s}"
+        for i, s in enumerate(summaries)
+    )
+
+    summary_msg = Message(
+        conversation_id=convo.id,
+        role="system",
+        content={
+            "text": (
+                "以下是本对话的早期历史摘要：\n\n"
+                f"{running_summary}\n\n"
+                "---\n"
+                "【注意】以上内容为历史摘要，"
+                "细节可能不完整。如有需要可要求展开。"
+            ),
+        },
+    )
+    return [summary_msg] + recent
+
+
 async def dispatch(
     db: AsyncSession,
     convo: Conversation,

@@ -52,15 +52,22 @@ class SessionPool:
         acp_session_id: str | None = None,
         profile_dir: str | None = None,
         mcp_servers: list | None = None,
+        session_namespace: str = "",
     ) -> tuple[ACPClient, str | None]:
         """Return (client, new_session_id_or_None). session id is set only when
-        a fresh subprocess+session was created."""
-        self._last_used[conversation_id] = time.monotonic()
-        c = self._clients.get(conversation_id)
+        a fresh subprocess+session was created.
+
+        ``session_namespace`` allows isolating multiple ACP sessions within the
+        same conversation (e.g. one per profile in group chat) so that history
+        from one assistant doesn't pollute another.
+        """
+        pool_key = f"{conversation_id}:{session_namespace}" if session_namespace else conversation_id
+        self._last_used[pool_key] = time.monotonic()
+        c = self._clients.get(pool_key)
         if c is not None and self._alive(c):
             if (
-                self._profile_dirs.get(conversation_id) == profile_dir
-                and self._mcp_servers.get(conversation_id) == mcp_servers
+                self._profile_dirs.get(pool_key) == profile_dir
+                and self._mcp_servers.get(pool_key) == mcp_servers
             ):
                 c.on_update = on_update
                 c.on_fs_write = on_fs_write
@@ -71,15 +78,15 @@ class SessionPool:
             # below fails and falls back to a fresh session, which the runner
             # persists.
             logger.info(
-                "Profile/MCP config changed for conv %s, respawning agent",
-                conversation_id[:8],
+                "Profile/MCP config changed for conv %s (ns=%s), respawning agent",
+                conversation_id[:8], session_namespace,
             )
-            await self.drop(conversation_id)
+            await self.drop(pool_key)
             c = None
 
         # Drop stale client if any
         if c is not None:
-            await self.drop(conversation_id)
+            await self.drop(pool_key)
 
         # Build command
         effective_command = list(command)
@@ -121,7 +128,7 @@ class SessionPool:
                             timeout=POOL_SESSION_TIMEOUT,
                         )
                         session_id = None  # resumed, no new session
-                        logger.info("Resumed ACP session %s for conv %s", acp_session_id[:8], conversation_id[:8])
+                        logger.info("Resumed ACP session %s for conv %s (ns=%s)", acp_session_id[:8], conversation_id[:8], session_namespace)
                     except Exception as exc:
                         logger.warning("Resume failed for %s: %s, falling back to new", acp_session_id[:8], exc)
                         session_id = await asyncio.wait_for(
@@ -138,19 +145,20 @@ class SessionPool:
                     c.new_session(cwd, mcp_servers=mcp_servers), timeout=POOL_SESSION_TIMEOUT,
                 )
         except (asyncio.TimeoutError, Exception) as exc:
-            logger.error("Failed to create ACP session for %s: %s", conversation_id, exc)
+            logger.error("Failed to create ACP session for %s (ns=%s): %s", conversation_id, session_namespace, exc)
             await c.stop()
             raise
-        self._clients[conversation_id] = c
-        self._profile_dirs[conversation_id] = profile_dir
-        self._mcp_servers[conversation_id] = mcp_servers
+        self._clients[pool_key] = c
+        self._profile_dirs[pool_key] = profile_dir
+        self._mcp_servers[pool_key] = mcp_servers
         return c, session_id
 
-    async def drop(self, conversation_id: str) -> None:
-        c = self._clients.pop(conversation_id, None)
-        self._last_used.pop(conversation_id, None)
-        self._profile_dirs.pop(conversation_id, None)
-        self._mcp_servers.pop(conversation_id, None)
+    async def drop(self, conversation_id: str, session_namespace: str = "") -> None:
+        pool_key = f"{conversation_id}:{session_namespace}" if session_namespace else conversation_id
+        c = self._clients.pop(pool_key, None)
+        self._last_used.pop(pool_key, None)
+        self._profile_dirs.pop(pool_key, None)
+        self._mcp_servers.pop(pool_key, None)
         if c:
             await c.stop()
 

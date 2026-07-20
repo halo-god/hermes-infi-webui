@@ -548,7 +548,24 @@ class Runner:
                 acp_session_id = convo.acp_session_id
                 session_mode = convo.session_mode
 
-        acc = {"text": "", "cancelled": False, "current_msg_id": message_id, "tool_since_split": False, "thinking": "", "plan": None, "files": []}
+        # Use profile-specific session namespace so that different agents in a
+        # group chat don't share the same ACP history.
+        profile_id = task.get("profile_id") or ""
+        session_namespace = str(profile_id) if profile_id else ""
+
+        # If a profile-specific session exists in Redis, use it instead of the
+        # conversation-level one so that group-chat agents are isolated.
+        if profile_id:
+            redis = R.get_redis()
+            key = f"acp_session:{conversation_id}:{profile_id}"
+            try:
+                sid = await redis.get(key)
+                if sid:
+                    acp_session_id = sid.decode("utf-8") if isinstance(sid, bytes) else sid
+            except Exception:
+                pass
+
+        acc = {"text": "", "cancelled": False, "current_msg_id": message_id, "tool_since_split": False, "thinking": "", "plan": None, "files": [], "total_tokens": 0}
         steps: list[dict] = []
 
         async def on_update(update: dict) -> None:
@@ -601,13 +618,39 @@ class Runner:
                         ],
                     })
             elif kind == "usage":
-                await R.publish_event(conversation_id, {
-                    "type": "usage",
-                    "message_id": acc["current_msg_id"],
-                    "input_tokens": update.get("input_tokens", 0),
-                    "output_tokens": update.get("output_tokens", 0),
-                })
-                acc["total_tokens"] = update.get("input_tokens", 0) + update.get("output_tokens", 0)
+                input_tokens = update.get("input_tokens", 0)
+                output_tokens = update.get("output_tokens", 0)
+                total = input_tokens + output_tokens
+                acc["total_tokens"] = total
+
+                # Warn when approaching the context limit so the UI can show a
+                # heads-up and the next turn may trigger compression.
+                context_limit = 256_000  # TODO: read from profile config
+                if total > context_limit * 0.8:
+                    logger.warning(
+                        "Context at %s tokens (%.0f%% of %s) for %s",
+                        total, total / context_limit * 100, context_limit,
+                        conversation_id[:8],
+                    )
+                    await R.publish_event(
+                        conversation_id,
+                        {
+                            "type": "compression_warning",
+                            "message_id": acc["current_msg_id"],
+                            "tokens": total,
+                            "limit": context_limit,
+                        },
+                    )
+
+                await R.publish_event(
+                    conversation_id,
+                    {
+                        "type": "usage",
+                        "message_id": acc["current_msg_id"],
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                    },
+                )
             elif kind == "session_info" or kind == "session_info_update":
                 new_title = update.get("title")
                 if new_title:
@@ -710,14 +753,16 @@ class Runner:
                 conversation_id, agent.command, cwd, on_update, on_fs_write,
                 acp_session_id=acp_session_id, profile_dir=profile_dir,
                 mcp_servers=mcp_servers,
+                session_namespace=session_namespace,
             )
             logger.info(
-                "handle_single: conv=%s msg=%s client_pid=%s new_session=%s",
-                conversation_id[:8], message_id[:8],
+                "handle_single: conv=%s msg=%s ns=%s client_pid=%s new_session=%s",
+                conversation_id[:8], message_id[:8], session_namespace,
                 client._proc.pid if client._proc else "None", new_session,
             )
             # Start filesystem watcher for MCP write_file tools that bypass ACP.
-            watcher = self._watchers.get(conversation_id)
+            watcher_key = f"{conversation_id}:{session_namespace}" if session_namespace else conversation_id
+            watcher = self._watchers.get(watcher_key)
             if watcher:
                 watcher.stop()
             watcher = WorkspaceWatcher(
@@ -732,9 +777,9 @@ class Runner:
             # Scan for files written before watcher started (MCP may write
             # during prompt while the watcher wasn't active yet).
             await watcher.scan_existing()
-            self._watchers[conversation_id] = watcher
+            self._watchers[watcher_key] = watcher
             if new_session:
-                await self._set_session_id(conversation_id, new_session)
+                await self._set_session_id(conversation_id, new_session, profile_id=profile_id)
                 # No manual approval UI anymore — conversations without an explicit
                 # mode (the vast majority) default to full-auto (dont_ask) rather
                 # than the ACP agent's own default (typically "ask").
@@ -778,28 +823,40 @@ class Runner:
             stop_reason = prompt_task.result()
         except ACPTimeout as exc:
             logger.error("prompt timed out for %s: %s", conversation_id, exc)
-            await self.pool.drop(conversation_id)
+            await self.pool.drop(conversation_id, session_namespace=session_namespace)
             await self._fail(conversation_id, acc["current_msg_id"], f"响应超时：{exc}")
             return
         except Exception as exc:  # noqa: BLE001
             logger.exception("prompt failed")
-            await self.pool.drop(conversation_id)
+            await self.pool.drop(conversation_id, session_namespace=session_namespace)
             await self._fail(conversation_id, acc["current_msg_id"], f"{exc.__class__.__name__}")
             return
 
         if acc["cancelled"]:
             status = "cancelled"
         elif not acc["text"].strip():
-            # Agent returned empty text (e.g. context overflow → 400 → refusal).
-            # Don't silently mark as complete — surface the error to the user.
+            # Agent returned empty text. Distinguish root causes so the user
+            # doesn't get the misleading "context too long" message for a
+            # 4-message conversation that is obviously not over the limit.
+            # stop_reason may be unset if prompt() raised; default to empty.
+            _stop_reason = locals().get("stop_reason", "")
             logger.warning(
-                "Agent returned empty text for %s (stop_reason=%s)",
-                conversation_id[:8], stop_reason,
+                "Agent returned empty text for %s (stop_reason=%s total_tokens=%s)",
+                conversation_id[:8], _stop_reason, acc.get("total_tokens", 0),
             )
-            await self._fail(
-                conversation_id, acc["current_msg_id"],
-                "模型返回空响应（上下文可能过长，请减少附件大小或缩短对话后重试）",
-            )
+
+            fail_reason: str
+            if _stop_reason in ("context_overflow", "length"):
+                fail_reason = "上下文超出模型限制（已自动触发压缩，请重试）"
+            elif _stop_reason == "content_filter":
+                fail_reason = "内容被安全过滤（触发模型内容安全策略，请调整提问方式）"
+            elif acc.get("total_tokens", 0) > 200_000:
+                fail_reason = f"上下文接近上限（已用 {acc['total_tokens']} tokens，建议开启新会话）"
+            else:
+                # Most likely an API-layer problem, not context length.
+                fail_reason = "模型未返回有效内容（可能是服务临时故障，请稍后重试；如持续出现请检查模型配置）"
+
+            await self._fail(conversation_id, acc["current_msg_id"], fail_reason)
             return
         else:
             status = "complete"
@@ -998,11 +1055,18 @@ class Runner:
                 ))
             await db.commit()
 
-    async def _set_session_id(self, conversation_id: str, session_id: str) -> None:
+    async def _set_session_id(self, conversation_id: str, session_id: str, profile_id: str = "") -> None:
         async with async_session_maker() as db:
             convo = await db.get(Conversation, uuid.UUID(conversation_id))
             if convo:
-                convo.acp_session_id = session_id
+                if profile_id:
+                    # Profile-specific session → Redis so different agents in a
+                    # group chat don't overwrite each other's ACP session.
+                    redis = R.get_redis()
+                    key = f"acp_session:{conversation_id}:{profile_id}"
+                    await redis.set(key, session_id, ex=3600 * 24 * 7)  # 7d TTL
+                else:
+                    convo.acp_session_id = session_id
                 await db.commit()
 
     async def _update_conv_title(self, conversation_id: str, title: str) -> None:
