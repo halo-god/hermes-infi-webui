@@ -202,6 +202,21 @@ def extract_xlsx_html(raw: bytes) -> str | None:
 
         from openpyxl import load_workbook
 
+        # Validate: .xlsx must be a ZIP archive (PK\x03\x04 magic).
+        if len(raw) < 4 or raw[:4] != b"PK\x03\x04":
+            # If it looks like HTML/text, the agent likely wrote preview markup
+            # into a .xlsx filename instead of the real binary. Surface this
+            # clearly so the user / agent knows what went wrong.
+            preview = raw[:200].decode("utf-8", "ignore").strip()
+            return (
+                '<p><em style="color:#c0392b">⚠ 文件格式错误：该文件不是有效的 .xlsx 工作簿。</em></p>'
+                '<p>可能原因：AI 助手在生成文件时将 HTML 预览写入了 <code>.xlsx</code> 扩展名，'
+                '而非真正的 Excel 二进制内容。</p>'
+                '<p>解决方法：请使用 <code>write_file</code> 工具生成 <code>.md</code> 或 <code>.txt</code> 文件，'
+                '或者上传真实的 .xlsx 文件。</p>'
+                f'<pre style="background:#f8f9fa;padding:8px;border-radius:4px;font-size:12px">{escape(preview)}</pre>'
+            )
+
         wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
         parts: list[str] = []
         for ws in wb.worksheets:
