@@ -125,7 +125,7 @@ const greeting = computed(() => {
   try { voice = JSON.parse(localStorage.getItem("hermes.tweaks") || "{}").voice || "warm"; } catch { /* noop */ }
   if (voice === "classical") return { main: escapeHtml(branding.tagline), sub: "Quidquid mittere vis, mihi crede." };
   if (voice === "engineering") return { main: `> <em>${escapeHtml(branding.shortName)}</em> ready —`, sub: `agents: ${chat.activeProfiles.length} active · model: ACP · uptime: 99.9%` };
-  return { main: `${timePart}，<em>今天有什么安排？</em>`, sub: "Ask me anything · 我会调度合适的助手为你完成。" };
+  return { main: `${timePart}，<em>今天有什么安排？</em>`, sub: "Ask me anything · 我会调度合适的数字员工为你完成。" };
 });
 
 const landingProfile = computed(() => chat.profiles.find((p) => p.id === landingProfileId.value) || chat.profiles.find((p) => p.is_active) || null);
@@ -151,7 +151,7 @@ const groupAgents = computed(() => {
       return {
         agent_id: p?.default_agent_id || "hermes",
         profile_id: pid,
-        name: p?.name || "助手",
+        name: p?.name || "数字员工",
         color: p?.color || branding.accent,
         icon: p?.icon || "sparkle",
       };
@@ -282,7 +282,7 @@ function safeColor(color: string | null | undefined): string {
 function highlightMentions(html: string): string {
   if (!isGroup.value) return html;
   // The @name inserted by the composer is the assistant's/member's *display*
-  // name (e.g. "@代码助手"), not its agent_id slug — match against that, and
+  // name (e.g. "@代码数字员工"), not its agent_id slug — match against that, and
   // allow CJK characters (\w alone is ASCII-only and never matches Chinese
   // assistant names).
   return html.replace(/@([\w一-鿿-]+)/g, (match, name: string) => {
@@ -828,7 +828,7 @@ onUnmounted(() => {
         <h1 class="hello" v-html="greeting.main"></h1>
         <div class="hello-sub">{{ greeting.sub }}</div>
 
-        <!-- All profiles for selection -->
+        <!-- Digital employee selection -->
         <div class="featured-profiles">
           <button
             v-for="p in chat.profiles.filter(p => p.is_active)"
@@ -842,14 +842,15 @@ onUnmounted(() => {
             </div>
             <div class="featured-card-body">
               <div class="featured-card-name">{{ p.name }}</div>
-              <div class="featured-card-desc">{{ p.desc || p.skills?.join(' · ') || p.default_model }}</div>
+              <div class="featured-card-desc">{{ p.position || p.desc || p.skills?.join(' · ') || p.default_model }}</div>
+              <div v-if="p.department" style="font-size:10px;color:var(--ink-faint);margin-top:2px">{{ p.department }}</div>
             </div>
           </button>
         </div>
 
         <Composer
           v-model="draft"
-          :placeholder="`给 ${landingProfile?.name || branding.shortName} 发消息…  ⌘K 搜索 · Enter 发送`"
+          :placeholder="`给 ${landingProfile?.name || branding.shortName}${landingProfile?.position ? ' (' + landingProfile.position + ')' : ''} 发消息…  ⌘K 搜索 · Enter 发送`"
           :agent="{ label: landingProfile?.name, color: landingProfile?.color, model: landingProfile?.default_model || 'ACP' }"
           :profile-id="landingProfileId"
           :profile-locked="true"
@@ -997,7 +998,7 @@ onUnmounted(() => {
               <template v-if="chat.messages[row.index]">
                 <!-- roundtable -->
                 <div v-if="chat.messages[row.index].role === 'roundtable'" class="roundtable">
-              <div class="roundtable-label">{{ chat.messages[row.index].content.moa ? "MoA 混合模型" : "圆桌" }} · {{ chat.messages[row.index].content.replies?.length || 0 }} 位助手并行作答</div>
+              <div class="roundtable-label">{{ chat.messages[row.index].content.moa ? "MoA 混合模型" : "圆桌" }} · {{ chat.messages[row.index].content.replies?.length || 0 }} 位数字员工并行作答</div>
               <div v-for="(r, idx) in chat.messages[row.index].content.replies" :key="idx" class="rt-card">
                 <div class="rt-card-head">
                   <span class="rt-avatar" :style="{ background: rtProfileDisplay(r.agent_id, r.profile_id).color }"><Icon :name="rtProfileDisplay(r.agent_id, r.profile_id).icon" :size="11" /></span>

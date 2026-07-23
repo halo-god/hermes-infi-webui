@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -45,6 +46,12 @@ class ProfileOut(BaseModel):
     mcp_server_names: list[str] = []
     is_moa: bool = False
     moa_target_profile_ids: list[str] = []
+    # Digital Employee HR attributes
+    employee_no: str | None = None
+    department: str | None = None
+    position: str | None = None
+    employee_status: str = "active"
+    hired_at: datetime | None = None
 
     @field_validator("skills", mode="before")
     @classmethod
@@ -78,6 +85,12 @@ class ProfileCreate(BaseModel):
     knowledge_ids: list[str] = []
     knowledge_folder_ids: list[str] = []
     knowledge_team_ids: list[str] = []
+    # Digital Employee HR attributes
+    employee_no: str | None = None
+    department: str | None = None
+    position: str | None = None
+    employee_status: str = "active"
+    hired_at: datetime | None = None
 
 
 class ProfileUpdate(BaseModel):
@@ -101,6 +114,36 @@ class ProfileUpdate(BaseModel):
     mcp_server_names: list[str] | None = None
     is_moa: bool | None = None
     moa_target_profile_ids: list[str] | None = None
+    # Digital Employee HR attributes
+    employee_no: str | None = None
+    department: str | None = None
+    position: str | None = None
+    employee_status: str | None = None
+    hired_at: datetime | None = None
+
+
+class WorkRecordOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    profile_id: uuid.UUID
+    conversation_id: uuid.UUID | None = None
+    message_id: uuid.UUID | None = None
+    event_type: str
+    summary: str
+    tokens_used: int
+    duration_ms: int | None = None
+    feedback: str | None = None
+    created_at: datetime
+
+
+class PerformanceOut(BaseModel):
+    total_messages: int = 0
+    total_tokens: int = 0
+    positive_count: int = 0
+    negative_count: int = 0
+    avg_duration_ms: float = 0
+    daily: list[dict] = []
 
 
 class ProfileExport(BaseModel):

@@ -27,7 +27,7 @@ const BASE_TABS = [
   { id: "chat", label: "智能对话", component: HelpChat },
   { id: "collab", label: "协作与圆桌", component: HelpCollaboration },
   { id: "teams", label: "团队与项目", component: HelpTeamsProjects },
-  { id: "memory", label: "助手与记忆", component: HelpAssistantsMemory },
+  { id: "memory", label: "数字员工与记忆", component: HelpAssistantsMemory },
   { id: "knowledge", label: "知识库", component: HelpKnowledge },
   { id: "files", label: "文件与通知", component: HelpFilesNotifications },
   { id: "tools", label: "效率工具", component: HelpProductivity },
@@ -57,8 +57,8 @@ interface SearchEntry {
 
 const HELP_INDEX: SearchEntry[] = [
   // 快速开始
-  { tab: "start", tabLabel: "快速开始", title: "选一个助手开聊", body: "首页点击助手卡片或直接在输入框发送消息即可开始对话" },
-  { tab: "start", tabLabel: "快速开始", title: "拉团队一起协作", body: "加入或创建团队后，可以发起团队群聊，多个人和多个助手在同一个会话里 @ 彼此" },
+  { tab: "start", tabLabel: "快速开始", title: "选一个数字员工开聊", body: "首页点击数字员工卡片或直接在输入框发送消息即可开始对话" },
+  { tab: "start", tabLabel: "快速开始", title: "拉团队一起协作", body: "加入或创建团队后，可以发起团队群聊，多个人和多个数字员工在同一个会话里 @ 彼此" },
   { tab: "start", tabLabel: "快速开始", title: "把讨论沉淀下来", body: "满意的回复可以沉淀为团队知识或生成项目任务" },
   // 智能对话
   { tab: "chat", tabLabel: "智能对话", title: "流式输出", body: "AI 回复以流式方式逐字显示，生成过程中可以点击停止按钮中断" },
@@ -68,18 +68,18 @@ const HELP_INDEX: SearchEntry[] = [
   { tab: "chat", tabLabel: "智能对话", title: "文件上传", body: "支持上传 Office 文档、PDF、图片、代码文件等，大文件自动转存对象存储" },
   // 协作与圆桌
   { tab: "collab", tabLabel: "协作与圆桌", title: "群聊文件夹分组", body: "群聊页签支持独立文件夹系统，可创建文件夹分组管理群聊" },
-  { tab: "collab", tabLabel: "协作与圆桌", title: "@提及路由", body: "群聊中 @ 指定助手会只让该助手回复，@所有AI 则触发圆桌并行作答" },
+  { tab: "collab", tabLabel: "协作与圆桌", title: "@提及路由", body: "群聊中 @ 指定数字员工会只让该数字员工回复，@所有AI 则触发圆桌并行作答" },
   { tab: "collab", tabLabel: "协作与圆桌", title: "表情回应", body: "悬停消息点击表情按钮，可选择 👍👎❤️ 等表情对消息做出反应" },
   { tab: "collab", tabLabel: "协作与圆桌", title: "消息编辑与撤回", body: "群聊中自己的消息可以编辑或撤回，编辑后会显示已编辑标记" },
   // 团队与项目
   { tab: "teams", tabLabel: "团队与项目", title: "项目任务看板", body: "项目详情页有任务看板，支持 todo/doing/done 三栏拖拽" },
   { tab: "teams", tabLabel: "团队与项目", title: "任务从对话生成", body: "悬停 AI 回复点击生成任务按钮，可从消息内容自动创建项目任务" },
   { tab: "teams", tabLabel: "团队与项目", title: "知识沉淀", body: "将满意的 AI 回复沉淀为团队知识或项目文档" },
-  // 助手与记忆
-  { tab: "memory", tabLabel: "助手与记忆", title: "Profile 创建与编辑", body: "管理员在后台助手管理页面创建和编辑 Profile，配置人设、模型、技能" },
-  { tab: "memory", tabLabel: "助手与记忆", title: "技能绑定", body: "Profile 可绑定技能，技能是一组预定义的 system prompt 片段" },
-  { tab: "memory", tabLabel: "助手与记忆", title: "MCP 服务器", body: "管理员可注册 MCP 服务器，Profile 绑定后助手获得外部工具调用能力" },
-  { tab: "memory", tabLabel: "助手与记忆", title: "记忆与做梦整理", body: "系统会定期整理对话生成记忆摘要，也可手动触发整理" },
+  // 数字员工与记忆
+  { tab: "memory", tabLabel: "数字员工与记忆", title: "Profile 创建与编辑", body: "管理员在后台数字员工管理页面创建和编辑 Profile，配置人设、模型、技能" },
+  { tab: "memory", tabLabel: "数字员工与记忆", title: "技能绑定", body: "Profile 可绑定技能，技能是一组预定义的 system prompt 片段" },
+  { tab: "memory", tabLabel: "数字员工与记忆", title: "MCP 服务器", body: "管理员可注册 MCP 服务器，Profile 绑定后数字员工获得外部工具调用能力" },
+  { tab: "memory", tabLabel: "数字员工与记忆", title: "记忆与做梦整理", body: "系统会定期整理对话生成记忆摘要，也可手动触发整理" },
   // 知识库
   { tab: "knowledge", tabLabel: "知识库", title: "目录树绑定", body: "按目录树绑定知识库，目录下所有文件递归绑定，新增文件自动生效" },
   { tab: "knowledge", tabLabel: "知识库", title: "团队知识 vs 项目文档", body: "团队知识归属整个团队，项目文档归属特定项目" },
@@ -93,7 +93,7 @@ const HELP_INDEX: SearchEntry[] = [
   { tab: "tools", tabLabel: "效率工具", title: "主题切换", body: "顶栏月亮/太阳图标切换界面配色主题" },
   { tab: "tools", tabLabel: "效率工具", title: "快捷键", body: "⌘K 搜索、⌘\\ 折叠侧栏、⌘F 会话内搜索、Enter 发送、Shift+Enter 换行" },
   // 定时任务
-  { tab: "schedule", tabLabel: "定时任务", title: "创建定时任务", body: "填写名称、选择助手、输入 prompt 和 cron 表达式" },
+  { tab: "schedule", tabLabel: "定时任务", title: "创建定时任务", body: "填写名称、选择数字员工、输入 prompt 和 cron 表达式" },
   { tab: "schedule", tabLabel: "定时任务", title: "Cron 表达式", body: "5 段格式：分 时 日 月 周，支持 * / - , 语法" },
   { tab: "schedule", tabLabel: "定时任务", title: "执行历史", body: "每次执行结果追加到对应会话，可像普通对话一样查看" },
   // 安全与权限

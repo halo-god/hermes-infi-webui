@@ -23,6 +23,34 @@ export interface Profile {
   mcp_server_names?: string[];
   is_moa?: boolean;
   moa_target_profile_ids?: string[];
+  // Digital Employee HR attributes
+  employee_no?: string | null;
+  department?: string | null;
+  position?: string | null;
+  employee_status?: string;
+  hired_at?: string | null;
+}
+
+export interface WorkRecord {
+  id: string;
+  profile_id: string;
+  conversation_id: string | null;
+  message_id: string | null;
+  event_type: string;
+  summary: string;
+  tokens_used: number;
+  duration_ms: number | null;
+  feedback: string | null;
+  created_at: string;
+}
+
+export interface Performance {
+  total_messages: number;
+  total_tokens: number;
+  positive_count: number;
+  negative_count: number;
+  avg_duration_ms: number;
+  daily: { date: string; count: number; tokens: number }[];
 }
 
 export interface ScanResult {
@@ -61,6 +89,11 @@ export interface ProfileCreate {
   knowledge_ids?: string[];
   knowledge_folder_ids?: string[];
   knowledge_team_ids?: string[];
+  employee_no?: string | null;
+  department?: string | null;
+  position?: string | null;
+  employee_status?: string;
+  hired_at?: string | null;
 }
 
 export interface ProfileUpdate {
@@ -83,6 +116,11 @@ export interface ProfileUpdate {
   mcp_server_names?: string[];
   is_moa?: boolean;
   moa_target_profile_ids?: string[];
+  employee_no?: string | null;
+  department?: string | null;
+  position?: string | null;
+  employee_status?: string;
+  hired_at?: string | null;
 }
 
 export const agentsApi = {
@@ -118,5 +156,11 @@ export const profilesApi = {
   },
   async import(profiles: Record<string, string>[]): Promise<Profile[]> {
     return (await http.post<Profile[]>("/profiles/import", { profiles })).data;
+  },
+  async getWorkRecords(id: string, limit = 20): Promise<WorkRecord[]> {
+    return (await http.get<WorkRecord[]>(`/profiles/${id}/work-records`, { params: { limit } })).data;
+  },
+  async getPerformance(id: string): Promise<Performance> {
+    return (await http.get<Performance>(`/profiles/${id}/performance`)).data;
   },
 };

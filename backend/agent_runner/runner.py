@@ -552,6 +552,7 @@ class Runner:
         # group chat don't share the same ACP history.
         profile_id = task.get("profile_id") or ""
         session_namespace = str(profile_id) if profile_id else ""
+        turn_start_time = time.monotonic()
 
         # If a profile-specific session exists in Redis, use it instead of the
         # conversation-level one so that group-chat agents are isolated.
@@ -889,6 +890,14 @@ class Runner:
             acc.get("thinking") or "", acc.get("plan"), acc.get("files"),
             acc.get("clarifies"), acc.get("usage"),
         )
+        # Record work for the digital employee's activity log.
+        if profile_id and status in ("complete", "error"):
+            await self._record_work(
+                profile_id, conversation_id, acc["current_msg_id"],
+                status, acc.get("usage"),
+                int((time.monotonic() - turn_start_time) * 1000),
+                acc["text"],
+            )
         if status == "complete" and matched_skill_ids:
             await self._record_skill_firings(
                 conversation_id, acc["current_msg_id"], matched_skill_ids, skill_firing_excerpt,
@@ -1101,6 +1110,37 @@ class Runner:
                 .values(title=title)
             )
             await db.commit()
+
+    async def _record_work(
+        self, profile_id: str, conversation_id: str, message_id: str,
+        status: str, usage: dict | None, duration_ms: int, text: str,
+    ) -> None:
+        """Write an EmployeeWorkRecord for the digital employee's activity log."""
+        from app.db.models.agent import EmployeeWorkRecord
+        try:
+            tokens = 0
+            if usage:
+                tokens = (usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0)
+            # Truncate summary to first 200 chars of the response text.
+            summary = (text or "")[:200].replace("\n", " ").strip()
+            if not summary:
+                summary = f"状态: {status}"
+
+            async with async_session_maker() as db:
+                record = EmployeeWorkRecord(
+                    profile_id=uuid.UUID(profile_id),
+                    conversation_id=uuid.UUID(conversation_id),
+                    message_id=uuid.UUID(message_id),
+                    event_type="chat",
+                    summary=summary,
+                    tokens_used=tokens,
+                    duration_ms=duration_ms,
+                    feedback=None,  # Feedback is updated later when user reacts.
+                )
+                db.add(record)
+                await db.commit()
+        except Exception:
+            logger.debug("Failed to record work for profile %s", profile_id[:8], exc_info=True)
 
     async def _fail(self, conversation_id: str, message_id: str, detail: str) -> None:
         await self._finalize(message_id, f"⚠ 生成失败：{detail}", "error")

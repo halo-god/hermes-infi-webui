@@ -10,7 +10,7 @@ import { adminApi, type UsageData } from "@/api/admin";
 import { brandingApi } from "@/api/branding";
 import { http } from "@/api/client";
 import { fmtDate } from "@/utils/format";
-import { agentsApi, profilesApi, type Profile, type ProfileCreate } from "@/api/agents";
+import { agentsApi, profilesApi, type Profile, type ProfileCreate, type WorkRecord, type Performance } from "@/api/agents";
 import { teamsApi } from "@/api/teams";
 import { logsApi, type LogEntry } from "@/api/logs";
 import { skillEvolutionApi, type AdminSkill, type DatasetPreview, type SkillProposal } from "@/api/skillEvolution";
@@ -667,7 +667,7 @@ const providersOn = computed(() => providers.value.filter((p) => p.enabled).leng
 const TABS = computed(() => {
   const base: [AdminTab, string][] = [
     ["overview", "概览"], ["users", "用户管理"], ["roles", "权限管理"],
-    ["identity", "身份与连接"], ["audit", "审计日志"], ["assistants", "助手管理"], ["mcp", "MCP 服务器"], ["system", "系统设置"], ["performance", "性能监控"], ["usage", "用量看板"],
+    ["identity", "身份与连接"], ["audit", "审计日志"], ["assistants", "数字员工管理"], ["mcp", "MCP 服务器"], ["system", "系统设置"], ["performance", "性能监控"], ["usage", "用量看板"],
   ];
   // Super-admin only: the sole gate that lets an automated, real-money
   // optimization pipeline's output ever take effect — hidden from plain admins.
@@ -685,12 +685,15 @@ const editingProfileId = ref<string | null>(null);
 const profileForm = reactive<ProfileCreate & {
   knowledge_ids: string[]; knowledge_folder_ids: string[]; knowledge_team_ids: string[];
   mcp_server_names: string[]; is_moa: boolean; moa_target_profile_ids: string[];
+  employee_no: string | null; department: string | null; position: string | null;
+  employee_status: string; hired_at: string | null;
 }>({
   name: "", handle: "", scope: "global", color: "#b8852a",
   icon: "sparkle", desc: "", default_model: "hermes-4", team_id: null,
   system_prompt: null, skills: [], featured: false,
   knowledge_ids: [], knowledge_folder_ids: [], knowledge_team_ids: [], mcp_server_names: [],
   is_moa: false, moa_target_profile_ids: [],
+  employee_no: null, department: null, position: null, employee_status: "active", hired_at: null,
 });
 // Selectable knowledge entries (team knowledge, labeled by team) for prompt injection.
 const knowledgeOptions = ref<{ id: string; label: string }[]>([]);
@@ -780,7 +783,7 @@ async function scanProfilesFn() {
   scanProfilesErrors.value = [];
   try {
     const result = await profilesApi.scan();
-    scanProfilesMsg.value = result.message || `新增 ${result.created} 个助手，发现 ${result.profiles_found} 个 Profile`;
+    scanProfilesMsg.value = result.message || `新增 ${result.created} 个数字员工，发现 ${result.profiles_found} 个 Profile`;
     scanProfilesErrors.value = result.errors || [];
     await loadProfiles();
   } catch (e: unknown) {
@@ -799,6 +802,7 @@ function openCreateProfile() {
     system_prompt: null, skills: [], featured: false,
     knowledge_ids: [], knowledge_folder_ids: [], knowledge_team_ids: [], mcp_server_names: [],
     is_moa: false, moa_target_profile_ids: [],
+    employee_no: null, department: null, position: null, employee_status: "active", hired_at: null,
   });
   skillInput.value = "";
   profileError.value = "";
@@ -815,6 +819,8 @@ function openEditProfile(p: Profile) {
     knowledge_ids: [...(p.knowledge_ids || [])], knowledge_folder_ids: [...(p.knowledge_folder_ids || [])],
     knowledge_team_ids: [...(p.knowledge_team_ids || [])], mcp_server_names: [...(p.mcp_server_names || [])],
     is_moa: p.is_moa ?? false, moa_target_profile_ids: [...(p.moa_target_profile_ids || [])],
+    employee_no: p.employee_no ?? null, department: p.department ?? null, position: p.position ?? null,
+    employee_status: p.employee_status ?? "active", hired_at: p.hired_at ?? null,
   });
   skillInput.value = "";
   profileError.value = "";
@@ -847,6 +853,11 @@ async function saveProfile() {
         knowledge_team_ids: profileForm.knowledge_team_ids,
         mcp_server_names: profileForm.mcp_server_names,
         is_moa: profileForm.is_moa, moa_target_profile_ids: profileForm.moa_target_profile_ids,
+        employee_no: profileForm.employee_no || null,
+        department: profileForm.department || null,
+        position: profileForm.position || null,
+        employee_status: profileForm.employee_status,
+        hired_at: profileForm.hired_at,
       });
     } else {
       await profilesApi.create({ ...profileForm });
@@ -860,7 +871,7 @@ async function saveProfile() {
   }
 }
 async function deleteProfileItem(p: Profile) {
-  if (!confirm(`删除助手「${p.name}」？此操作不可恢复。`)) return;
+  if (!confirm(`删除数字员工「${p.name}」？此操作不可恢复。`)) return;
   await profilesApi.remove(p.id);
   await loadProfiles();
 }
@@ -870,6 +881,32 @@ async function cloneProfile(p: Profile) {
     await profilesApi.clone(p.id);
     await loadProfiles();
   } catch { /* noop */ }
+}
+
+// ── Employee performance panel ──
+const showPerfPanel = ref(false);
+const perfProfile = ref<Profile | null>(null);
+const empPerfData = ref<Performance | null>(null);
+const perfRecords = ref<WorkRecord[]>([]);
+const empPerfLoading = ref(false);
+const perfMaxDaily = computed(() => {
+  if (!empPerfData.value?.daily?.length) return 1;
+  return Math.max(...empPerfData.value.daily.map((d) => d.count), 1);
+});
+const EMPLOYEE_STATUS_LABELS: Record<string, string> = { active: "在职", leave: "休假", archived: "离职" };
+
+async function openPerfPanel(p: Profile) {
+  perfProfile.value = p;
+  showPerfPanel.value = true;
+  empPerfLoading.value = true;
+  try {
+    const [perf, recs] = await Promise.all([
+      profilesApi.getPerformance(p.id),
+      profilesApi.getWorkRecords(p.id, 20),
+    ]);
+    empPerfData.value = perf;
+    perfRecords.value = recs;
+  } catch { empPerfData.value = null; perfRecords.value = []; } finally { empPerfLoading.value = false; }
 }
 
 async function exportProfile(p: Profile) {
@@ -968,10 +1005,10 @@ async function confirmImport() {
             <div class="text-mute-xs" style="margin-top:13px">所有团队的累计会话</div>
           </div>
           <div class="stat">
-            <div class="stat-label"><Icon name="sparkle" /> 助手 & 团队</div>
+            <div class="stat-label"><Icon name="sparkle" /> 数字员工 & 团队</div>
             <div class="stat-value">{{ stats.agents }}</div>
             <div class="stat-foot"><em>{{ stats.teams }} 个团队</em></div>
-            <div class="text-mute-xs" style="margin-top:13px">ACP 注册的助手数量</div>
+            <div class="text-mute-xs" style="margin-top:13px">ACP 注册的数字员工数量</div>
           </div>
         </div>
 
@@ -1524,8 +1561,8 @@ async function confirmImport() {
       <template v-else-if="tab === 'assistants'">
         <div class="flex-between" style="margin-bottom:14px">
           <div>
-            <div class="heading-serif">助手管理</div>
-            <div class="text-mute-sm" style="margin-top:2px">配置助手别名、图标与默认模型，用户在新建会话时即可看到。</div>
+            <div class="heading-serif">数字员工管理</div>
+            <div class="text-mute-sm" style="margin-top:2px">配置数字员工别名、图标与默认模型，用户在新建会话时即可看到。</div>
           </div>
           <div style="display: flex; gap: 8px; align-items: center">
             <span v-if="hermesVersion" style="font-size: 11.5px; color: var(--ink-mute); font-family: var(--font-mono); padding: 3px 8px; background: var(--bg-plate); border-radius: 5px">{{ hermesVersion }}</span>
@@ -1538,7 +1575,7 @@ async function confirmImport() {
             <button class="btn" @click="exportAllProfiles"><Icon name="download" :size="13" /> 导出全部</button>
             <button class="btn" @click="() => importFileRef?.click()"><Icon name="upload" :size="13" /> 导入</button>
             <input ref="importFileRef" type="file" accept=".json" style="display:none" @change="handleImportFile" />
-            <button class="btn primary" @click="openCreateProfile"><Icon name="plus" /> 新建助手</button>
+            <button class="btn primary" @click="openCreateProfile"><Icon name="plus" /> 新建数字员工</button>
           </div>
         </div>
 
@@ -1580,12 +1617,12 @@ async function confirmImport() {
         <!-- Profile form -->
         <div v-if="showProfileForm" class="section-card" style="margin-bottom: 14px; padding: 18px">
           <div style="font-size: 14px; font-weight: 600; color: var(--ink); margin-bottom: 14px">
-            {{ editingProfileId ? "编辑助手" : "新建助手" }}
+            {{ editingProfileId ? "编辑数字员工" : "新建数字员工" }}
           </div>
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px">
             <label class="text-mute-sm">
               显示名称 *
-              <input v-model="profileForm.name" placeholder="例：写作助手" class="form-input" />
+              <input v-model="profileForm.name" placeholder="例：写作数字员工" class="form-input" />
             </label>
             <label class="text-mute-sm">
               标识符 (handle){{ editingProfileId ? '' : ' *' }}
@@ -1593,7 +1630,7 @@ async function confirmImport() {
             </label>
             <label class="text-mute-sm">
               简介
-              <input v-model="profileForm.desc" placeholder="助手描述" class="form-input" />
+              <input v-model="profileForm.desc" placeholder="数字员工描述" class="form-input" />
             </label>
             <label class="text-mute-sm">
               默认模型
@@ -1625,11 +1662,32 @@ async function confirmImport() {
                 <option v-for="t in teamsOpt" :key="t.id" :value="t.id">{{ t.name }}</option>
               </select>
             </label>
+            <!-- Digital Employee HR fields -->
+            <label class="text-mute-sm">
+              工号
+              <input v-model="profileForm.employee_no" placeholder="可选，留空则用 handle" class="form-input" />
+            </label>
+            <label class="text-mute-sm">
+              岗位
+              <input v-model="profileForm.position" placeholder="如：内容运营专员" class="form-input" />
+            </label>
+            <label class="text-mute-sm">
+              部门
+              <input v-model="profileForm.department" placeholder="如：市场部" class="form-input" />
+            </label>
+            <label class="text-mute-sm">
+              在职状态
+              <select v-model="profileForm.employee_status" class="form-input">
+                <option value="active">在职</option>
+                <option value="leave">休假</option>
+                <option value="archived">离职</option>
+              </select>
+            </label>
           </div>
           <!-- system_prompt -->
           <label class="text-mute-sm" style="display:block;margin-top:12px">
             系统提示词 (system prompt)
-            <textarea v-model="profileForm.system_prompt" rows="4" placeholder="留空则使用助手默认行为" class="form-input" style="resize:vertical"></textarea>
+            <textarea v-model="profileForm.system_prompt" rows="4" placeholder="留空则使用数字员工默认行为" class="form-input" style="resize:vertical"></textarea>
           </label>
           <!-- skills chips -->
           <label class="text-mute-sm" style="display:block;margin-top:12px">
@@ -1644,7 +1702,7 @@ async function confirmImport() {
           </label>
           <!-- knowledge binding (injected into system_prompt) -->
           <label class="text-mute-sm" style="display:block;margin-top:12px">
-            绑定知识库（其正文将注入助手上下文供复用）
+            绑定知识库（其正文将注入数字员工上下文供复用）
             <div v-if="!knowledgeOptions.length" style="margin-top:6px;font-size:12px;color:var(--ink-mute)">暂无可绑定的团队知识。</div>
             <div v-else style="margin-top:6px;max-height:160px;overflow-y:auto;border:1px solid var(--rule);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:4px">
               <label v-for="k in knowledgeOptions" :key="k.id" style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;color:var(--ink)">
@@ -1677,7 +1735,7 @@ async function confirmImport() {
           </label>
           <!-- MCP server binding (threaded into the agent's ACP session) -->
           <label class="text-mute-sm" style="display:block;margin-top:12px">
-            绑定 MCP 服务器（该助手的会话将携带这些工具）
+            绑定 MCP 服务器（该数字员工的会话将携带这些工具）
             <div v-if="!mcpServers.length" style="margin-top:6px;font-size:12px;color:var(--ink-mute)">暂无已注册的 MCP 服务器，请先在"MCP 服务器"标签页添加。</div>
             <div v-else style="margin-top:6px;max-height:160px;overflow-y:auto;border:1px solid var(--rule);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:4px">
               <label v-for="s in mcpServers" :key="s.name" style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;color:var(--ink)">
@@ -1689,11 +1747,11 @@ async function confirmImport() {
           <!-- MoA: fan this profile's messages out to reference profiles + synthesize -->
           <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:12.5px;color:var(--ink-mute);cursor:pointer">
             <input type="checkbox" v-model="profileForm.is_moa" style="width:14px;height:14px;cursor:pointer" />
-            MoA 混合模型（选中该助手时，向下方参考助手并行提问并综合作答）
+            MoA 混合模型（选中该数字员工时，向下方参考数字员工并行提问并综合作答）
           </label>
           <label v-if="profileForm.is_moa" class="text-mute-sm" style="display:block;margin-top:8px">
-            参考助手（至少选择 2 个以获得有意义的综合结果）
-            <div v-if="profiles.filter((p) => p.id !== editingProfileId).length === 0" style="margin-top:6px;font-size:12px;color:var(--ink-mute)">暂无其他可选助手。</div>
+            参考数字员工（至少选择 2 个以获得有意义的综合结果）
+            <div v-if="profiles.filter((p) => p.id !== editingProfileId).length === 0" style="margin-top:6px;font-size:12px;color:var(--ink-mute)">暂无其他可选数字员工。</div>
             <div v-else style="margin-top:6px;max-height:160px;overflow-y:auto;border:1px solid var(--rule);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:4px">
               <label v-for="p in profiles.filter((p) => p.id !== editingProfileId)" :key="p.id" style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;color:var(--ink)">
                 <input type="checkbox" :checked="profileForm.moa_target_profile_ids.includes(p.id)" @change="toggleMoaTarget(p.id)" style="width:13px;height:13px;cursor:pointer" />
@@ -1713,35 +1771,98 @@ async function confirmImport() {
           </div>
         </div>
 
-        <!-- Profile list -->
-        <div class="section-card">
-          <div v-if="!profiles.length" class="empty-state-lg">
-            还没有助手。点击「扫描 ACP Agent」自动生成，或手动「新建助手」。
-          </div>
-          <div v-for="p in profiles" :key="p.id" style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--rule-soft)">
-            <div style="width:36px;height:36px;border-radius:8px;display:grid;place-items:center;color:#fff;flex-shrink:0" :style="{ background: p.color || '#b8852a' }">
-              <Icon :name="p.icon || 'sparkle'" />
-            </div>
-            <div style="flex:1;min-width:0">
-              <div style="font-size:13.5px;font-weight:600;color:var(--ink);display:flex;align-items:center;gap:6px">
-                {{ p.name }}
-                <span style="font-size:11.5px;color:var(--ink-mute);font-weight:400">@{{ p.handle }}</span>
-                <span v-if="p.featured" title="首页推荐" style="font-size:13px">&#11088;</span>
+        <!-- Employee roster (card grid) -->
+        <div v-if="!profiles.length" class="empty-state-lg" style="padding:32px;text-align:center">
+          还没有数字员工。点击「扫描 ACP Agent」自动生成，或手动「新建数字员工」。
+        </div>
+        <div v-else style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px">
+          <div v-for="p in profiles" :key="p.id" class="emp-card">
+            <!-- Card header -->
+            <div style="display:flex;align-items:center;gap:10px">
+              <div class="emp-avatar" :style="{ background: p.color || '#b8852a' }">
+                <Icon :name="p.icon || 'sparkle'" :size="18" />
               </div>
-              <div style="font-size:12px;color:var(--ink-mute);margin-top:2px">{{ p.desc || "—" }}</div>
-              <div v-if="p.skills && p.skills.length" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">
-                <span v-for="s in p.skills" :key="s" style="padding:1px 6px;border-radius:999px;background:rgba(184,133,42,0.10);color:var(--accent-deep);font-size:11px">{{ s }}</span>
+              <div style="flex:1;min-width:0">
+                <div style="display:flex;align-items:center;gap:4px">
+                  <span style="font-size:14px;font-weight:600;color:var(--ink)">{{ p.name }}</span>
+                  <span v-if="p.featured" style="font-size:12px">&#11088;</span>
+                </div>
+                <div style="font-size:11.5px;color:var(--ink-mute)">
+                  {{ p.position || p.desc || '@' + p.handle }}
+                </div>
               </div>
-              <div v-if="p.path" style="font-size:10.5px;color:var(--ink-mute);margin-top:2px;font-family:var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:360px" :title="p.path">{{ p.path }}</div>
+              <span class="emp-st-pill" :class="p.employee_status || 'active'">{{ EMPLOYEE_STATUS_LABELS[p.employee_status || 'active'] }}</span>
             </div>
-            <span style="font-size:11px;padding:2px 8px;border-radius:999px;background:rgba(29,26,20,0.06);color:var(--ink-mute)">{{ SCOPE_LABEL[p.scope] || p.scope }}</span>
-            <span style="font-size:10.5px;color:var(--ink-mute);font-family:var(--font-mono)">{{ p.default_model }}</span>
-            <button class="icon-btn" title="克隆" @click="cloneProfile(p)"><Icon name="copy" :size="13" /></button>
-            <button class="icon-btn" title="导出" @click="exportProfile(p)"><Icon name="download" :size="13" /></button>
-            <button class="icon-btn" title="编辑" @click="openEditProfile(p)"><Icon name="edit" :size="13" /></button>
-            <button class="icon-btn" title="删除" style="color:var(--danger)" @click="deleteProfileItem(p)"><Icon name="close" :size="13" /></button>
+            <!-- Card body -->
+            <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:8px">
+              <span v-if="p.department" class="emp-tag">{{ p.department }}</span>
+              <span v-if="p.employee_no" class="emp-tag">{{ p.employee_no }}</span>
+              <span class="emp-tag">{{ SCOPE_LABEL[p.scope] || p.scope }}</span>
+            </div>
+            <div v-if="p.skills && p.skills.length" style="display:flex;flex-wrap:wrap;gap:3px;margin-top:6px">
+              <span v-for="s in p.skills" :key="s" style="padding:1px 6px;border-radius:999px;background:rgba(184,133,42,0.10);color:var(--accent-deep);font-size:10.5px">{{ s }}</span>
+            </div>
+            <!-- Card actions -->
+            <div style="display:flex;gap:4px;margin-top:10px;border-top:1px solid var(--rule-soft);padding-top:8px">
+              <button class="btn" style="flex:1;font-size:12px;padding:4px" @click="openPerfPanel(p)"><Icon name="chart" :size="12" /> 绩效</button>
+              <button class="icon-btn" title="编辑" @click="openEditProfile(p)"><Icon name="edit" :size="13" /></button>
+              <button class="icon-btn" title="导出" @click="exportProfile(p)"><Icon name="download" :size="13" /></button>
+              <button class="icon-btn" title="克隆" @click="cloneProfile(p)"><Icon name="copy" :size="13" /></button>
+              <button class="icon-btn" title="删除" style="color:var(--danger)" @click="deleteProfileItem(p)"><Icon name="close" :size="13" /></button>
+            </div>
           </div>
         </div>
+
+        <!-- Performance panel (Teleport modal) -->
+        <Teleport to="body">
+          <div v-if="showPerfPanel" class="ctx-menu-scrim" @click="showPerfPanel = false">
+            <div class="emp-perf-panel" @click.stop>
+              <div style="display:flex;align-items:center;gap:10px;padding:16px 20px;border-bottom:1px solid var(--rule-soft)">
+                <div class="emp-avatar" :style="{ background: perfProfile?.color || '#b8852a', width: '32px', height: '32px' }">
+                  <Icon :name="perfProfile?.icon || 'sparkle'" :size="16" />
+                </div>
+                <div style="flex:1">
+                  <div style="font-size:15px;font-weight:600;color:var(--ink)">{{ perfProfile?.name }} 绩效面板</div>
+                  <div style="font-size:12px;color:var(--ink-mute)">{{ perfProfile?.position || perfProfile?.desc }}</div>
+                </div>
+                <button class="icon-btn" @click="showPerfPanel = false"><Icon name="close" :size="16" /></button>
+              </div>
+              <div v-if="empPerfLoading" style="padding:40px;text-align:center;color:var(--ink-mute)">加载中…</div>
+              <div v-else style="padding:16px 20px;max-height:60vh;overflow-y:auto">
+                <!-- Summary cards -->
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;margin-bottom:16px">
+                  <div class="emp-stat"><div class="emp-stat-label">总消息数</div><div class="emp-stat-value">{{ empPerfData?.total_messages || 0 }}</div></div>
+                  <div class="emp-stat"><div class="emp-stat-label">总 Token</div><div class="emp-stat-value">{{ empPerfData?.total_tokens?.toLocaleString() || 0 }}</div></div>
+                  <div class="emp-stat"><div class="emp-stat-label">好评数</div><div class="emp-stat-value" style="color:var(--ok)">{{ empPerfData?.positive_count || 0 }}</div></div>
+                  <div class="emp-stat"><div class="emp-stat-label">差评数</div><div class="emp-stat-value" style="color:var(--danger)">{{ empPerfData?.negative_count || 0 }}</div></div>
+                  <div class="emp-stat"><div class="emp-stat-label">平均耗时</div><div class="emp-stat-value">{{ empPerfData?.avg_duration_ms ? Math.round(empPerfData.avg_duration_ms) + 'ms' : '-' }}</div></div>
+                </div>
+                <!-- Daily trend -->
+                <div v-if="empPerfData?.daily?.length" style="margin-bottom:16px">
+                  <div style="font-size:12px;font-weight:600;color:var(--ink-mute);margin-bottom:8px">近 7 天活动</div>
+                  <div style="display:flex;align-items:flex-end;gap:3px;height:60px">
+                    <div v-for="d in empPerfData.daily" :key="d.date" style="flex:1;display:flex;flex-direction:column;align-items:center" :title="`${d.date}: ${d.count} 次, ${d.tokens} tokens`">
+                      <div style="width:100%;border-radius:2px 2px 0 0;background:var(--accent);opacity:0.7;min-height:2px" :style="{ height: Math.max(2, (d.count / perfMaxDaily) * 50) + 'px' }"></div>
+                    </div>
+                  </div>
+                </div>
+                <!-- Work records timeline -->
+                <div style="font-size:12px;font-weight:600;color:var(--ink-mute);margin-bottom:8px">工作记录</div>
+                <div v-if="!perfRecords.length" style="padding:16px;text-align:center;color:var(--ink-mute);font-size:13px">暂无工作记录</div>
+                <div v-for="r in perfRecords" :key="r.id" class="emp-record">
+                  <div style="display:flex;align-items:center;gap:6px">
+                    <span class="emp-record-type" :class="r.event_type">{{ r.event_type }}</span>
+                    <span v-if="r.feedback === 'positive'" style="font-size:12px">&#128077;</span>
+                    <span v-if="r.feedback === 'negative'" style="font-size:12px">&#128078;</span>
+                    <span style="font-size:11px;color:var(--ink-faint);margin-left:auto">{{ new Date(r.created_at).toLocaleString("zh-CN") }}</span>
+                  </div>
+                  <div style="font-size:12px;color:var(--ink-soft);margin-top:3px;line-height:1.5">{{ r.summary }}</div>
+                  <div style="font-size:10.5px;color:var(--ink-faint);margin-top:2px">{{ r.tokens_used }} tokens{{ r.duration_ms ? ' · ' + r.duration_ms + 'ms' : '' }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </Teleport>
       </template>
 
       <!-- ── MCP 服务器 ── -->
@@ -1944,7 +2065,7 @@ async function confirmImport() {
         <div class="flex-between" style="align-items:flex-end;margin-bottom:14px">
           <div>
             <div class="heading-serif">用量看板</div>
-            <div class="text-mute-sm" style="margin-top:2px">Token 消耗与成本统计，支持按助手/用户/模型维度分析。</div>
+            <div class="text-mute-sm" style="margin-top:2px">Token 消耗与成本统计，支持按数字员工/用户/模型维度分析。</div>
           </div>
           <div style="display:flex;gap:8px;align-items:center">
             <button class="btn" :class="{ primary: usagePeriod === 'week' }" style="font-size:12px" @click="usagePeriod = 'week'">近 7 天</button>
@@ -1974,7 +2095,7 @@ async function confirmImport() {
           <div style="padding:12px 18px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--rule-soft)">
             <span style="font-size:13px;font-weight:600;color:var(--ink)">维度分析</span>
             <div style="flex:1"></div>
-            <button class="btn" :class="{ primary: usageBreakdown === 'profile' }" style="font-size:12px;padding:3px 10px" @click="usageBreakdown = 'profile'">按助手</button>
+            <button class="btn" :class="{ primary: usageBreakdown === 'profile' }" style="font-size:12px;padding:3px 10px" @click="usageBreakdown = 'profile'">按数字员工</button>
             <button class="btn" :class="{ primary: usageBreakdown === 'user' }" style="font-size:12px;padding:3px 10px" @click="usageBreakdown = 'user'">按用户</button>
             <button class="btn" :class="{ primary: usageBreakdown === 'model' }" style="font-size:12px;padding:3px 10px" @click="usageBreakdown = 'model'">按模型</button>
           </div>
@@ -1983,7 +2104,7 @@ async function confirmImport() {
           <table v-else style="width:100%;font-size:12.5px;border-collapse:collapse">
             <thead>
               <tr style="border-bottom:1px solid var(--rule)">
-                <th style="text-align:left;padding:8px 18px;color:var(--ink-mute);font-weight:600">{{ usageBreakdown === 'profile' ? '助手' : usageBreakdown === 'user' ? '用户' : '模型' }}</th>
+                <th style="text-align:left;padding:8px 18px;color:var(--ink-mute);font-weight:600">{{ usageBreakdown === 'profile' ? '数字员工' : usageBreakdown === 'user' ? '用户' : '模型' }}</th>
                 <th style="text-align:right;padding:8px 12px;color:var(--ink-mute);font-weight:600">输入</th>
                 <th style="text-align:right;padding:8px 12px;color:var(--ink-mute);font-weight:600">输出</th>
                 <th style="text-align:right;padding:8px 12px;color:var(--ink-mute);font-weight:600">消息数</th>
@@ -2138,7 +2259,7 @@ async function confirmImport() {
     <Teleport to="body">
       <div v-if="importPreview.visible" class="ctx-menu-scrim" style="z-index: 9999" @click="importPreview.visible = false">
         <div class="import-preview" @click.stop>
-          <div class="import-preview-title">导入预览 — 将创建 {{ importPreview.items.length }} 个助手</div>
+          <div class="import-preview-title">导入预览 — 将创建 {{ importPreview.items.length }} 个数字员工</div>
           <div class="import-preview-list">
             <div v-for="(item, i) in importPreview.items" :key="i" class="import-preview-item">
               <Icon name="sparkle" :size="12" />
@@ -2157,6 +2278,81 @@ async function confirmImport() {
 </template>
 
 <style scoped>
+/* ── Digital Employee cards ── */
+.emp-card {
+  background: var(--bg-card);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-sm);
+  padding: 14px;
+  transition: border-color 120ms;
+}
+.emp-card:hover { border-color: var(--accent-soft); }
+.emp-avatar {
+  width: 36px; height: 36px;
+  border-radius: 8px;
+  display: grid; place-items: center;
+  color: #fff; flex-shrink: 0;
+}
+.emp-st-pill {
+  flex-shrink: 0;
+  font-size: 10px; font-weight: 600;
+  padding: 1px 6px; border-radius: 4px;
+  border: 1px solid var(--rule);
+  background: var(--bg-canvas);
+  color: var(--ink-mute);
+}
+.emp-st-pill.active { border-color: var(--ok); color: var(--ok); }
+.emp-st-pill.leave { border-color: var(--warn, #b8852a); color: var(--warn, #b8852a); }
+.emp-st-pill.archived { border-color: var(--ink-faint); color: var(--ink-faint); }
+.emp-tag {
+  font-size: 10.5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--ink-mute);
+}
+
+/* ── Performance panel ── */
+.emp-perf-panel {
+  position: fixed;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: 560px;
+  max-width: 90vw;
+  max-height: 80vh;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-lg);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.emp-stat {
+  background: var(--bg-card);
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--r-sm);
+  padding: 10px 12px;
+}
+.emp-stat-label { font-size: 11px; color: var(--ink-mute); }
+.emp-stat-value { font-size: 18px; font-weight: 700; color: var(--ink); margin-top: 2px; }
+.emp-record {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.emp-record:last-child { border-bottom: none; }
+.emp-record-type {
+  font-size: 10px; font-weight: 600;
+  padding: 1px 5px; border-radius: 3px;
+  background: var(--bg-hover); color: var(--ink-mute);
+  text-transform: uppercase;
+}
+.emp-record-type.chat { background: rgba(184,133,42,0.10); color: var(--accent-deep); }
+.emp-record-type.tool { background: rgba(58,138,90,0.10); color: var(--ok); }
+.emp-record-type.task { background: rgba(58,106,161,0.10); color: #3a6aa1; }
+
+/* ── Log rows (audit tab) ── */
 .log-row {
   display: flex;
   gap: 8px;

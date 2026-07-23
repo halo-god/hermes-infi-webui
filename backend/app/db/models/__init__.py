@@ -1,5 +1,5 @@
 """ORM models. Import all here so Alembic autogenerate sees them."""
-from app.db.models.agent import Agent  # noqa: F401
+from app.db.models.agent import Agent, EmployeeWorkRecord, Profile  # noqa: F401
 from app.db.models.audit import AuditLog  # noqa: F401
 from app.db.models.branding import BrandAsset  # noqa: F401
 from app.db.models.conversation import (  # noqa: F401

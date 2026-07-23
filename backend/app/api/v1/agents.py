@@ -10,17 +10,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import get_db
-from app.db.models.agent import Agent, Profile
+from app.db.models.agent import Agent, EmployeeWorkRecord, Profile
 from app.db.models.user import User
 from app.deps import get_current_user
 from app.core.guards import require_permission
 from app.schemas.agent import (
     AgentOut,
+    PerformanceOut,
     ProfileCreate,
     ProfileExport,
     ProfileOut,
     ProfileUpdate,
     ScanProfilesResponse,
+    WorkRecordOut,
 )
 
 router = APIRouter()
@@ -424,4 +426,96 @@ async def scan_profiles(
         hermes_path=hermes_path,
         hermes_home=hermes_home,
         errors=errors,
+    )
+
+
+# ── Digital Employee: work records & performance ──────────────────────────
+@router.get("/profiles/{profile_id}/work-records", response_model=list[WorkRecordOut])
+async def list_work_records(
+    profile_id: uuid.UUID,
+    limit: int = 20,
+    offset: int = 0,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List recent work records for a digital employee."""
+    rows = (
+        await db.execute(
+            select(EmployeeWorkRecord)
+            .where(EmployeeWorkRecord.profile_id == profile_id)
+            .order_by(EmployeeWorkRecord.created_at.desc())
+            .limit(min(limit, 100))
+            .offset(offset)
+        )
+    ).scalars().all()
+    return rows
+
+
+@router.get("/profiles/{profile_id}/performance", response_model=PerformanceOut)
+async def get_performance(
+    profile_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Aggregate performance stats for a digital employee."""
+    from sqlalchemy import func
+    from datetime import timedelta
+
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=7)
+
+    # Overall stats
+    overall = (
+        await db.execute(
+            select(
+                func.count(EmployeeWorkRecord.id).label("total"),
+                func.sum(EmployeeWorkRecord.tokens_used).label("tokens"),
+                func.avg(EmployeeWorkRecord.duration_ms).label("avg_ms"),
+            ).where(EmployeeWorkRecord.profile_id == profile_id)
+        )
+    ).one()
+
+    # Feedback counts
+    pos = (
+        await db.execute(
+            select(func.count(EmployeeWorkRecord.id)).where(
+                EmployeeWorkRecord.profile_id == profile_id,
+                EmployeeWorkRecord.feedback == "positive",
+            )
+        )
+    ).scalar_one()
+    neg = (
+        await db.execute(
+            select(func.count(EmployeeWorkRecord.id)).where(
+                EmployeeWorkRecord.profile_id == profile_id,
+                EmployeeWorkRecord.feedback == "negative",
+            )
+        )
+    ).scalar_one()
+
+    # Daily breakdown (last 7 days)
+    daily_rows = (
+        await db.execute(
+            select(
+                func.date_trunc("day", EmployeeWorkRecord.created_at).label("date"),
+                func.count(EmployeeWorkRecord.id).label("cnt"),
+                func.sum(EmployeeWorkRecord.tokens_used).label("tokens"),
+            )
+            .where(EmployeeWorkRecord.profile_id == profile_id, EmployeeWorkRecord.created_at >= since)
+            .group_by("date")
+            .order_by("date")
+        )
+    ).all()
+    daily = [
+        {"date": str(r.date), "count": int(r.cnt), "tokens": int(r.tokens or 0)}
+        for r in daily_rows
+    ]
+
+    return PerformanceOut(
+        total_messages=int(overall.total or 0),
+        total_tokens=int(overall.tokens or 0),
+        positive_count=int(pos),
+        negative_count=int(neg),
+        avg_duration_ms=float(overall.avg_ms or 0),
+        daily=daily,
     )
