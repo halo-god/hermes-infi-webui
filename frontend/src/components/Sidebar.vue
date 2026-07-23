@@ -496,6 +496,9 @@ function doDeleteFolder() {
         <div v-if="isAdmin" class="side-row" :class="{ active: route.name === 'terminal' }" @click="router.push('/terminal')">
           <Icon name="sparkle" class="ico" /> {{ t('nav.terminal') }}
         </div>
+        <div class="side-row" :class="{ active: route.name === 'gallery' }" @click="router.push('/gallery')">
+          <Icon name="globe" class="ico" /> 资源广场
+        </div>
       </div>
 
       <div class="side-label">

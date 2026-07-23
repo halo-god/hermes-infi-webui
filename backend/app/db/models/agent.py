@@ -74,6 +74,9 @@ class Profile(UUIDPrimaryKey, Timestamps, Base):
     position: Mapped[str | None] = mapped_column(String(120), nullable=True)
     employee_status: Mapped[str] = mapped_column(String(16), default="active", nullable=False)  # active|leave|archived
     hired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Stage-based system prompts: {requirement: "...", implementation: "...", review: "..."}
+    # When set, dispatch injects the stage-appropriate prompt instead of the static system_prompt.
+    stage_prompts: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
 
 
 class EmployeeWorkRecord(UUIDPrimaryKey, Timestamps, Base):
@@ -100,3 +103,5 @@ class EmployeeWorkRecord(UUIDPrimaryKey, Timestamps, Base):
     tokens_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     feedback: Mapped[str | None] = mapped_column(String(16), nullable=True)  # positive|negative|None
+    analysis_bucket: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    analysis_reason: Mapped[str | None] = mapped_column(Text, nullable=True)

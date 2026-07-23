@@ -1,118 +1,105 @@
-# 数字员工管理平台改造计划
+# ai-agent-book 四大方向实现计划
 
-## 改造原则
-- **Profile 模型不重命名**（避免全局 rename 风险），但在前端和 API 文档中全面使用"数字员工"语义
-- **后端扩展 Profile 模型**：新增 employee 相关字段
-- **前端全面改造**：AdminView 助手管理 -> 数字员工花名册（卡片式），ChatView landing -> 员工选择
+## 方向 1：智能工具管理（主动工具发现 + Skills 渐进式披露）
 
-## 第一部分：后端扩展
+### 1a. 主动工具发现
+**问题**：当前 `_resolve_mcp_servers` 把所有绑定的 MCP 工具 schema 全量传给 ACP session，token 膨胀。
+**实现**：
+- 后端 `_resolve_mcp_servers` 改为：先收集所有工具 schema，再用 pg_trgm 相似度匹配用户消息 → 只传 top-3-5 最相关工具
+- 新增 `ToolRegistry` 缓存层（Redis），按 server name → tool list 映射
+- 兜底：工具数 ≤ 5 时全量传（小量不优化）
 
-### 1. Profile 模型新增字段
-文件：`backend/app/db/models/agent.py`
+### 1b. Agent Skills 渐进式披露
+**问题**：SOP 技能定义（nodes_json）可能很大，全量注入 system_prompt 浪费 token。
+**实现**：
+- Profile 新增 `skills_catalog`（薄目录：skill_id + name + trigger_intents，不含完整 nodes/edges）
+- 启动时只注入薄目录（~100 tokens/skill）
+- 匹配到 SOP 后才加载完整 nodes/edges/instructions
+- 前端 SOP 编辑器增加"目录预览"字段
 
-新增字段：
-- `employee_no: str | None` -- 员工工号（可选，不填则用 handle）
-- `department: str | None` -- 所属部门（文本，不建部门表，保持轻量）
-- `position: str | None` -- 岗位名称（与 desc 互补：desc 是简介，position 是正式岗位名）
-- `employee_status: str` -- 在职状态（active/archived/leave，默认 active，与 is_active 互补：is_active 是技术开关，employee_status 是 HR 状态）
-- `hired_at: datetime | None` -- 入职时间（默认用 created_at）
+## 方向 2：RAG 与安全增强
 
-### 2. 新增 WorkRecord 模型 + 迁移
-文件：`backend/app/db/models/agent.py` 新增 `EmployeeWorkRecord` 表
+### 2a. 上下文感知检索
+**问题**：当前 KnowledgeChunk 的 content 是原始文本，缺少 chunk 级上下文前缀。
+**实现**：
+- `chunk_html_by_headings` 改进：每个 chunk 自动生成上下文前缀（文档名 + heading_path + 前一段摘要）
+- 检索时用 `content_with_context` 做相似度匹配（而非原始 content）
+- 迁移不需要（复用 knowledge_chunks 表，content 字段改为包含上下文前缀的版本）
 
-字段：
-- `id` (UUID PK)
-- `profile_id` (FK -> profiles.id, CASCADE)
-- `conversation_id` (FK -> conversations.id, SET NULL)
-- `message_id` (FK -> messages.id, SET NULL)
-- `event_type: str` -- 事件类型（chat/task/skill/tool/knowledge）
-- `summary: str` -- 事件摘要（如"处理了用户关于XX的咨询"）
-- `tokens_used: int` -- 本次消耗 token
-- `duration_ms: int | None` -- 响应耗时
-- `feedback: str | None` -- 用户反馈（positive/negative/none）
-- `created_at` (Timestamps)
+### 2b. 成本可观测 tracing
+**问题**：当前 usage 只在 message 级别记录，缺少"哪一步最贵"的细粒度 tracing。
+**实现**：
+- 新增 `AgentTrace` 模型：conversation_id + message_id + step_index + event_type + tokens_in + tokens_out + duration_ms + cost
+- runner.py 的 `on_update` 在每个 tool_call/thought 事件时写一条 trace
+- Admin 用量看板新增 "Trace 详情" 视图：展示单条消息的逐步 token 消耗
 
-**触发时机**：在 `runner.py _finalize()` 完成后，写一条 WorkRecord（从 message 的 usage + status 提取）
+### 2c. LLM 二次审批工具调用
+**问题**：当前 `set_session_mode("dont_ask")` 全自动，危险 MCP 工具操作无审批。
+**实现**：
+- conversation_service 新增 `_should_approve_tool(tool_name, args)` 规则引擎
+- 配置 `dangerous_tools` 列表（如 delete_*, drop_*, execute_shell 等）
+- 命中危险工具时走 `confirmation_request` 流程让用户确认
+- runner.py 的 `on_update tool_call` 分支增加审批检查
 
-### 3. 迁移文件 `0055_employee_work_records.py`
-- Profile 加 5 个新列
-- 新建 employee_work_records 表 + 索引 (profile_id, created_at)
+## 方向 3：高级 Agent 模式
 
-### 4. Profile Schema 扩展
-文件：`backend/app/schemas/agent.py`
-- `ProfileOut` 加 employee_no/department/position/employee_status/hired_at
-- `ProfileCreate` / `ProfileUpdate` 同步加这些字段
+### 3a. Artifact 模式
+**问题**：当前 AI 回复包含代码/SQL 时，用户需要手动复制执行。
+**实现**：
+- 新增 `Artifact` 模型：conversation_id + message_id + type(sql/code/json) + content + status(draft/executed) + result
+- runner.py 检测 AI 回复中的代码块（```sql / ```python 等），自动创建 Artifact
+- 前端消息渲染：代码块旁加"执行"按钮
+- 执行结果回填到 Artifact + 消息追加
 
-### 5. 新增 API 端点
-文件：`backend/app/api/v1/agents.py`
+### 3b. 阶段化系统提示
+**问题**：当前 Profile.system_prompt 是静态的，不随任务阶段变化。
+**实现**：
+- Profile 新增 `stage_prompts` JSONB：`{requirement: "...", implementation: "...", review: "..."}`
+- dispatch 根据消息特征判断当前阶段（首次消息=需求澄清，含代码=实现，含"检查"=审查）
+- 注入对应阶段的 system_prompt + 工具集
+- 前端 Profile 编辑表单新增"阶段提示"编辑区
 
-- `GET /profiles/{id}/work-records` -- 查询某员工的工作记录（支持 limit/offset）
-- `GET /profiles/{id}/performance` -- 查询某员工的绩效统计（总消息数、总 token、positive/negative 反馈数、平均耗时、近 7 天每日统计）
+### 3c. Proposer-Reviewer 双 Agent
+**问题**：当前圆桌模式是并行作答+合并，没有"生成+检查迭代"模式。
+**实现**：
+- 新增 dispatch 模式 `"review"`：先走 proposer agent 生成，再用 reviewer agent（带 Vision 或代码审查能力）检查
+- reviewer 的反馈自动追加为 proposer 的第二轮输入
+- 最多迭代 N 轮或 reviewer 通过
 
-### 6. runner.py 写 WorkRecord
-在 `_finalize()` 之后，新增 `_record_work()` 方法：
-- 从 `acc["usage"]` 提取 tokens
-- 从 `message_id` 关联的 conversation 提取信息
-- 从消息 reactions 提取反馈（👍=positive, 👎=negative）
-- 写入 EmployeeWorkRecord
+## 方向 4：异步 Agent 架构（Flux 式）
 
-## 第二部分：前端全面改造
+### 4a. 事件队列 + 优先级分派
+**问题**：当前 runner 的 `handle_single` 是同步阻塞的 ReAct 循环，无法中途打断或并行。
+**实现**：
+- 新增 `AgentInbox` 模型：conversation_id + event_type(user_message/cancel/tool_result/timer) + priority(interrupt/immediate/queue) + payload
+- runner 改为事件循环：从 inbox 取事件 → 按优先级处理
+- `interrupt` 级别（如用户发"停止"）：立即中断当前 turn
+- `immediate` 级别（如用户追问）：暂停当前 turn，处理新消息
+- `queue` 级别（如定时任务结果）：排队等待
 
-### 7. 语义替换（全前端）
-将所有"助手"文案替换为"数字员工"：
-- `frontend/src/i18n/locales/zh-CN.ts` 和 `en.ts`：nav.assistants -> "数字员工"，nav.newAssistant -> "新建员工"等
-- `AdminView.vue`：tab label "助手管理" -> "数字员工"
-- `ChatView.vue`：landing 页 "featured-profiles" 标题、"给 X 发消息" placeholder
-- `HelpView.vue`：帮助中心 "助手与记忆" tab -> "数字员工与记忆"
-- `Sidebar.vue`：无直接"助手"文案，但 profileColor 注释可更新
+### 4b. 并行工具执行
+**问题**：当前 ACP agent 串行调用工具。
+**实现**：
+- runner 的 `on_update tool_call` 检测到多个独立工具调用时，用 `asyncio.gather` 并行执行
+- 工具结果合并后一次性返回给 agent
 
-### 8. AdminView 助手管理 -> 数字员工花名册
-文件：`frontend/src/views/AdminView.vue` assistants tab
+## 文件清单（预估 ~20 文件新建/修改）
 
-**卡片式花名册**（替代当前列表式）：
-- 每个员工一张卡片：头像（icon+color）、姓名、工号、岗位、部门、状态 pill（在职/停用/休假）
-- 卡片底部：消息数、本周 token、好评率（从 work-records 聚合）
-- 点击卡片 -> 编辑抽屉/弹窗
+**新建**：
+- `backend/app/db/models/trace.py`（AgentTrace 模型）
+- `backend/app/db/models/artifact.py`（Artifact 模型）
+- `backend/app/db/models/inbox.py`（AgentInbox 模型）
+- `backend/app/services/tool_discovery_service.py`（主动工具发现）
+- `backend/app/services/artifact_service.py`（Artifact 执行）
+- `backend/app/services/stage_service.py`（阶段化提示）
+- `backend/alembic/versions/0061_*.py` ~ `0064_*.py`
+- `frontend/src/api/artifacts.ts`
+- `frontend/src/api/traces.ts`
 
-**编辑表单新增字段**：
-- 工号 employee_no
-- 岗位 position
-- 部门 department
-- 状态 employee_status（select: 在职/休假/离职）
-- 入职时间 hired_at（date picker）
-
-### 9. 员工详情/绩效面板
-在员工卡片上增加"详情"按钮，展开侧边面板或弹窗显示：
-- 工作记录时间线（最近 20 条，含事件类型/摘要/token/反馈）
-- 绩效汇总卡片：总消息数、总 token、好评率、平均响应时间
-- 近 7 天每日趋势（CSS bar chart，复用用量看板的样式）
-
-### 10. ChatView landing 页改造
-- "featured-profiles" 区域标题改为"选择数字员工"
-- 卡片显示：姓名 + 岗位 + 部门标签
-- 选中后 placeholder 显示"给 [员工名] ([岗位]) 发消息"
-
-### 11. 前端类型 + API 扩展
-- `frontend/src/api/agents.ts`：Profile interface 加新字段；新增 `getWorkRecords(id)` / `getPerformance(id)` 方法
-- `frontend/src/types/index.ts`：如有 Profile 相关类型也同步
-
-## 文件清单
-**后端修改**：
-- `backend/app/db/models/agent.py`（Profile 新字段 + EmployeeWorkRecord 模型）
-- `backend/alembic/versions/0055_employee_work_records.py`（新建迁移）
-- `backend/app/schemas/agent.py`（ProfileOut/Create/Update 扩展）
-- `backend/app/api/v1/agents.py`（新增 work-records/performance 端点）
-- `backend/agent_runner/runner.py`（_finalize 后写 WorkRecord）
-
-**前端修改**：
-- `frontend/src/i18n/locales/zh-CN.ts` + `en.ts`（语义替换）
-- `frontend/src/views/AdminView.vue`（花名册 + 编辑表单 + 绩效面板）
-- `frontend/src/views/ChatView.vue`（landing 改造）
-- `frontend/src/views/HelpView.vue`（tab 名称）
-- `frontend/src/api/agents.ts`（类型 + API 方法）
-
-## 验证
-- `ruff check .` 通过
-- `npm run type-check` + `npm run build` 通过
-- `alembic upgrade head` 成功
-- 手动验证：员工花名册卡片展示、编辑表单含新字段、绩效面板有数据
+**修改**：
+- `backend/app/services/conversation_service.py`（工具发现/阶段提示/审批检查/Artifact 检测）
+- `backend/app/core/files.py`（chunk 上下文前缀改进）
+- `backend/agent_runner/runner.py`（trace 写入/审批检查/并行工具/事件队列）
+- `backend/app/db/models/agent.py`（Profile 加 stage_prompts/skills_catalog）
+- `frontend/src/views/AdminView.vue`（用量看板 trace 视图/阶段提示编辑器）
+- `frontend/src/views/ChatView.vue`（Artifact 执行按钮）

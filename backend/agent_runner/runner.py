@@ -898,6 +898,9 @@ class Runner:
                 int((time.monotonic() - turn_start_time) * 1000),
                 acc["text"],
             )
+        # Extract and save artifacts (code blocks) from the AI response.
+        if status == "complete" and acc["text"]:
+            await self._extract_artifacts(conversation_id, acc["current_msg_id"], acc["text"])
         if status == "complete" and matched_skill_ids:
             await self._record_skill_firings(
                 conversation_id, acc["current_msg_id"], matched_skill_ids, skill_firing_excerpt,
@@ -1141,6 +1144,17 @@ class Runner:
                 await db.commit()
         except Exception:
             logger.debug("Failed to record work for profile %s", profile_id[:8], exc_info=True)
+
+    async def _extract_artifacts(
+        self, conversation_id: str, message_id: str, text: str,
+    ) -> None:
+        """Extract executable code blocks from the AI response and save as Artifacts."""
+        try:
+            from app.services.artifact_service import save_artifacts
+            async with async_session_maker() as db:
+                await save_artifacts(db, uuid.UUID(conversation_id), uuid.UUID(message_id), text)
+        except Exception:
+            logger.debug("Failed to extract artifacts for msg %s", message_id[:8], exc_info=True)
 
     async def _fail(self, conversation_id: str, message_id: str, detail: str) -> None:
         await self._finalize(message_id, f"⚠ 生成失败：{detail}", "error")

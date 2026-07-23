@@ -485,3 +485,95 @@ def confine_to_dir(base_dir: str, relative: str) -> str:
     if target != base_real and not target.startswith(base_real + os.sep):
         raise HTTPException(status_code=400, detail="非法文件路径")
     return target
+
+
+def chunk_html_by_headings(html_content: str, max_chunk_chars: int = 1500) -> list[dict]:
+    """Split HTML content into structurally-aware chunks by heading boundaries.
+
+    Parses h1-h6 tags to identify section boundaries, preserving the heading
+    path (e.g. "第一章 > 1.1 概述") for each chunk. Falls back to paragraph-
+    level splitting if no headings are found.
+
+    Returns list of {heading_path, content, token_estimate} dicts.
+    """
+    import re
+
+    # Extract text and headings from HTML
+    # Remove scripts, styles, and base64 images (they bloat content)
+    clean = re.sub(r'<(script|style)[^>]*>.*?</\1>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+    clean = re.sub(r'<img[^>]*>', '', clean, flags=re.IGNORECASE)
+
+    # Split by heading tags (h1-h6)
+    heading_re = re.compile(r'<(h[1-6])[^>]*>(.*?)</\1>', re.DOTALL | re.IGNORECASE)
+    headings = list(heading_re.finditer(clean))
+
+    chunks: list[dict] = []
+    heading_stack: list[str] = []
+
+    if not headings:
+        # No headings: split by paragraphs
+        paras = re.split(r'<(?:p|div|br)[^>]*>', clean)
+        current_text = ""
+        for para in paras:
+            text = re.sub(r'<[^>]+>', '', para).strip()
+            if not text:
+                continue
+            if len(current_text) + len(text) > max_chunk_chars and current_text:
+                chunks.append({
+                    "heading_path": None,
+                    "content": current_text.strip(),
+                    "token_estimate": len(current_text) // 4,
+                })
+                current_text = text
+            else:
+                current_text += "\n" + text if current_text else text
+        if current_text.strip():
+            chunks.append({
+                "heading_path": None,
+                "content": current_text.strip(),
+                "token_estimate": len(current_text) // 4,
+            })
+    else:
+        # Heading-based splitting
+        for i, match in enumerate(headings):
+            # Content before this heading (belongs to previous section)
+            if i == 0 and match.start() > 0:
+                pre_text = re.sub(r'<[^>]+>', '', clean[:match.start()]).strip()
+                if pre_text:
+                    chunks.append({
+                        "heading_path": None,
+                        "content": pre_text[:max_chunk_chars],
+                        "token_estimate": len(pre_text[:max_chunk_chars]) // 4,
+                    })
+
+            heading_level = int(match.group(1)[1])
+            heading_text = re.sub(r'<[^>]+>', '', match.group(2)).strip()
+
+            # Maintain heading stack
+            while heading_stack and len(heading_stack) >= heading_level:
+                heading_stack.pop()
+            heading_stack.append(heading_text)
+
+            # Content until next heading
+            next_start = headings[i + 1].start() if i + 1 < len(headings) else len(clean)
+            section_html = clean[match.end():next_start]
+            section_text = re.sub(r'<[^>]+>', '', section_html).strip()
+
+            if section_text:
+                # Split long sections further
+                if len(section_text) > max_chunk_chars:
+                    for j in range(0, len(section_text), max_chunk_chars):
+                        chunk_text = section_text[j:j + max_chunk_chars]
+                        chunks.append({
+                            "heading_path": " > ".join(heading_stack),
+                            "content": chunk_text,
+                            "token_estimate": len(chunk_text) // 4,
+                        })
+                else:
+                    chunks.append({
+                        "heading_path": " > ".join(heading_stack),
+                        "content": section_text,
+                        "token_estimate": len(section_text) // 4,
+                    })
+
+    return chunks

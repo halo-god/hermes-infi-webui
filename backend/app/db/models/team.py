@@ -195,3 +195,31 @@ class ProjectActivity(UUIDPrimaryKey, Timestamps, Base):
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
     summary: Mapped[str] = mapped_column(Text, default="")
     meta: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+
+
+class KnowledgeChunk(UUIDPrimaryKey, Timestamps, Base):
+    """A structurally-aware chunk of a knowledge document.
+
+    Created during document upload by splitting on heading boundaries
+    (h1-h6) rather than flat text truncation. Each chunk retains its
+    heading_path (e.g. "第一章 > 1.1 概述") for context-aware retrieval.
+
+    Supports both TeamKnowledge and ProjectDoc via dual nullable FKs.
+    """
+    __tablename__ = "knowledge_chunks"
+    __table_args__ = (
+        Index("ix_knowledge_chunks_tk_idx", "team_knowledge_id", "chunk_index"),
+        Index("ix_knowledge_chunks_pd_idx", "project_doc_id", "chunk_index"),
+    )
+
+    team_knowledge_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("team_knowledge.id", ondelete="CASCADE"), nullable=True, index=True,
+    )
+    project_doc_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("project_docs.id", ondelete="CASCADE"), nullable=True, index=True,
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    heading_path: Mapped[str | None] = mapped_column(Text, nullable=True)  # "第一章 > 1.1 概述"
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_estimate: Mapped[int] = mapped_column(Integer, default=0)

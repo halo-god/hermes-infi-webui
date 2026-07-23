@@ -37,7 +37,7 @@ const ns = useNotificationStore();
 const isSuperAdmin = computed(() => authStore.user?.role === "super_admin");
 const { queryPresence, getStatus } = usePresence();
 
-type AdminTab = "overview" | "users" | "roles" | "identity" | "audit" | "assistants" | "system" | "mcp" | "performance" | "usage" | "skill-evolution";
+type AdminTab = "overview" | "users" | "roles" | "identity" | "audit" | "assistants" | "sop" | "system" | "mcp" | "performance" | "usage" | "skill-evolution";
 const tab = ref<AdminTab>("overview");
 const stats = ref<AdminStats | null>(null);
 const users = ref<User[]>([]);
@@ -177,6 +177,129 @@ const perfLoading = ref(false);
 async function loadPerformance() {
   perfLoading.value = true;
   try { perfData.value = (await http.get("/admin/performance")).data; } catch { perfData.value = null; } finally { perfLoading.value = false; }
+}
+
+// ── SOP skills management ──
+import { sopApi, type SopSkill, type SopNode, type SopEdge } from "@/api/sop";
+import { galleryApi } from "@/api/gallery";
+const sopSkills = ref<SopSkill[]>([]);
+const sopLoading = ref(false);
+const showSopForm = ref(false);
+const editingSopId = ref<string | null>(null);
+const sopForm = reactive<{
+  name: string; description: string; profile_id: string | null;
+  trigger_intents: string[]; nodes: SopNode[]; edges: SopEdge[];
+  start_node_id: string; terminal_node_ids: string[];
+}>({
+  name: "", description: "", profile_id: null,
+  trigger_intents: [], nodes: [], edges: [],
+  start_node_id: "", terminal_node_ids: [],
+});
+const sopIntentInput = ref("");
+const sopNodeJson = ref("");
+const sopEdgeJson = ref("");
+
+async function loadSopSkills() {
+  sopLoading.value = true;
+  try { sopSkills.value = await sopApi.list(); } catch { sopSkills.value = []; } finally { sopLoading.value = false; }
+}
+function openCreateSop() {
+  editingSopId.value = null;
+  Object.assign(sopForm, {
+    name: "", description: "", profile_id: null,
+    trigger_intents: [], nodes: [
+      { node_id: "start", name: "开始", instruction: "", expected_user_info: [], allowed_actions: [] },
+      { node_id: "done", name: "完成", instruction: "", expected_user_info: [], allowed_actions: [] },
+    ],
+    edges: [{ source_node_id: "start", next_node_id: "done", condition: null, priority: 0, label: "" }],
+    start_node_id: "start", terminal_node_ids: ["done"],
+  });
+  sopNodeJson.value = JSON.stringify(sopForm.nodes, null, 2);
+  sopEdgeJson.value = JSON.stringify(sopForm.edges, null, 2);
+  sopIntentInput.value = "";
+  showSopForm.value = true;
+}
+function openEditSop(s: SopSkill) {
+  editingSopId.value = s.id;
+  Object.assign(sopForm, {
+    name: s.name, description: s.description, profile_id: s.profile_id,
+    trigger_intents: [...(s.trigger_intents || [])],
+    nodes: JSON.parse(JSON.stringify(s.nodes || [])),
+    edges: JSON.parse(JSON.stringify(s.edges || [])),
+    start_node_id: s.start_node_id, terminal_node_ids: [...(s.terminal_node_ids || [])],
+  });
+  sopNodeJson.value = JSON.stringify(sopForm.nodes, null, 2);
+  sopEdgeJson.value = JSON.stringify(sopForm.edges, null, 2);
+  sopIntentInput.value = "";
+  showSopForm.value = true;
+}
+function addSopIntent() {
+  const s = sopIntentInput.value.trim();
+  if (s && !sopForm.trigger_intents.includes(s)) sopForm.trigger_intents.push(s);
+  sopIntentInput.value = "";
+}
+function removeSopIntent(s: string) {
+  sopForm.trigger_intents = sopForm.trigger_intents.filter((x) => x !== s);
+}
+async function saveSop() {
+  try {
+    // Parse JSON editors
+    sopForm.nodes = JSON.parse(sopNodeJson.value || "[]");
+    sopForm.edges = JSON.parse(sopEdgeJson.value || "[]");
+    if (editingSopId.value) {
+      await sopApi.update(editingSopId.value, { ...sopForm });
+    } else {
+      await sopApi.create({ ...sopForm });
+    }
+    showSopForm.value = false;
+    await loadSopSkills();
+  } catch (e: unknown) {
+    const ax = e as { response?: { data?: { detail?: string } } };
+    console.error("SOP save failed:", ax?.response?.data?.detail || e);
+  }
+}
+async function deleteSop(s: SopSkill) {
+  if (!confirm(`删除 SOP 技能「${s.name}」？`)) return;
+  await sopApi.remove(s.id);
+  await loadSopSkills();
+}
+
+async function publishToGallery(type: "profile" | "sop", item: Profile | SopSkill) {
+  try {
+    if (type === "profile") {
+      const p = item as Profile;
+      await galleryApi.publish({
+        type: "profile",
+        item_id: p.id,
+        name: p.name,
+        description: p.desc || p.position || "",
+        icon: p.icon || "sparkle",
+        color: p.color || "#b8852a",
+        category: p.department || null,
+        snapshot: { ...p },
+      });
+    } else {
+      const s = item as SopSkill;
+      await galleryApi.publish({
+        type: "sop",
+        item_id: s.id,
+        name: s.name,
+        description: s.description,
+        icon: "bolt",
+        color: "#b8852a",
+        category: null,
+        snapshot: {
+          name: s.name, description: s.description,
+          trigger_intents: s.trigger_intents,
+          nodes: s.nodes, edges: s.edges,
+          start_node_id: s.start_node_id, terminal_node_ids: s.terminal_node_ids,
+        },
+      });
+    }
+    ns.toast("已发布到资源广场");
+  } catch {
+    ns.toast("发布失败", "error");
+  }
 }
 
 // ── Usage dashboard ──
@@ -342,6 +465,7 @@ watch(tab, (t) => {
   if (t === "mcp") loadMcpServers();
   if (t === "performance") loadPerformance();
   if (t === "usage") loadUsage();
+  if (t === "sop") loadSopSkills();
   if (t === "skill-evolution") { loadEvoSkills(); loadEvoProposals(); }
 });
 watch([usagePeriod, usageBreakdown], () => { if (tab.value === "usage") loadUsage(); });
@@ -667,7 +791,7 @@ const providersOn = computed(() => providers.value.filter((p) => p.enabled).leng
 const TABS = computed(() => {
   const base: [AdminTab, string][] = [
     ["overview", "概览"], ["users", "用户管理"], ["roles", "权限管理"],
-    ["identity", "身份与连接"], ["audit", "审计日志"], ["assistants", "数字员工管理"], ["mcp", "MCP 服务器"], ["system", "系统设置"], ["performance", "性能监控"], ["usage", "用量看板"],
+    ["identity", "身份与连接"], ["audit", "审计日志"], ["assistants", "数字员工管理"], ["sop", "SOP 技能"], ["mcp", "MCP 服务器"], ["system", "系统设置"], ["performance", "性能监控"], ["usage", "用量看板"],
   ];
   // Super-admin only: the sole gate that lets an automated, real-money
   // optimization pipeline's output ever take effect — hidden from plain admins.
@@ -1807,6 +1931,7 @@ async function confirmImport() {
               <button class="btn" style="flex:1;font-size:12px;padding:4px" @click="openPerfPanel(p)"><Icon name="chart" :size="12" /> 绩效</button>
               <button class="icon-btn" title="编辑" @click="openEditProfile(p)"><Icon name="edit" :size="13" /></button>
               <button class="icon-btn" title="导出" @click="exportProfile(p)"><Icon name="download" :size="13" /></button>
+              <button class="icon-btn" title="发布到广场" @click="publishToGallery('profile', p)"><Icon name="globe" :size="13" /></button>
               <button class="icon-btn" title="克隆" @click="cloneProfile(p)"><Icon name="copy" :size="13" /></button>
               <button class="icon-btn" title="删除" style="color:var(--danger)" @click="deleteProfileItem(p)"><Icon name="close" :size="13" /></button>
             </div>
@@ -1863,6 +1988,96 @@ async function confirmImport() {
             </div>
           </div>
         </Teleport>
+      </template>
+
+      <!-- ───────────── SOP SKILLS ───────────── -->
+      <template v-else-if="tab === 'sop'">
+        <div class="flex-between" style="margin-bottom:14px">
+          <div>
+            <div class="heading-serif">SOP 技能管理</div>
+            <div class="text-mute-sm" style="margin-top:2px">创建状态机驱动的流程技能，确保数字员工按标准流程执行任务。</div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <button class="btn" @click="loadSopSkills"><Icon name="refresh" :size="12" /> 刷新</button>
+            <button class="btn primary" @click="openCreateSop"><Icon name="plus" :size="12" /> 新建 SOP</button>
+          </div>
+        </div>
+
+        <!-- SOP edit form -->
+        <div v-if="showSopForm" class="section-card" style="margin-bottom:16px;padding:18px">
+          <div style="font-size:14px;font-weight:600;margin-bottom:12px">{{ editingSopId ? "编辑 SOP" : "新建 SOP" }}</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <label class="text-mute-sm">
+              名称 *
+              <input v-model="sopForm.name" placeholder="如：退款处理流程" class="form-input" />
+            </label>
+            <label class="text-mute-sm">
+              描述
+              <input v-model="sopForm.description" placeholder="SOP 用途说明" class="form-input" />
+            </label>
+          </div>
+          <!-- Trigger intents -->
+          <label class="text-mute-sm" style="display:block;margin-top:12px">
+            触发关键词（用户消息包含这些词时触发 SOP）
+            <div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap">
+              <span v-for="t in sopForm.trigger_intents" :key="t" style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;background:var(--accent-tint);color:var(--accent-deep);font-size:12px">
+                {{ t }} <button style="font-size:14px;line-height:1" @click="removeSopIntent(t)">&times;</button>
+              </span>
+              <input v-model="sopIntentInput" style="width:120px;padding:2px 8px;border:1px solid var(--rule);border-radius:6px;font-size:12px" placeholder="添加关键词" @keydown.enter.prevent="addSopIntent" />
+            </div>
+          </label>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">
+            <label class="text-mute-sm">
+              起始节点 ID
+              <input v-model="sopForm.start_node_id" placeholder="start" class="form-input mono" />
+            </label>
+            <label class="text-mute-sm">
+              终止节点 ID（逗号分隔）
+              <input :value="sopForm.terminal_node_ids.join(',')" @input="sopForm.terminal_node_ids = ($event.target as HTMLInputElement).value.split(',').map((s: string) => s.trim()).filter(Boolean)" placeholder="done" class="form-input mono" />
+            </label>
+          </div>
+          <!-- Nodes JSON editor -->
+          <label class="text-mute-sm" style="display:block;margin-top:12px">
+            节点定义（JSON）
+            <textarea v-model="sopNodeJson" rows="10" class="form-input mono" style="resize:vertical;font-size:12px" placeholder='[{"node_id":"start","name":"开始","instruction":"...","expected_user_info":[],"allowed_actions":[]}]'></textarea>
+          </label>
+          <!-- Edges JSON editor -->
+          <label class="text-mute-sm" style="display:block;margin-top:12px">
+            边定义（JSON）
+            <textarea v-model="sopEdgeJson" rows="8" class="form-input mono" style="resize:vertical;font-size:12px" placeholder='[{"source_node_id":"start","next_node_id":"done","condition":null,"priority":0,"label":""}]'></textarea>
+          </label>
+          <div style="display:flex;gap:8px;margin-top:14px">
+            <button class="btn primary" @click="saveSop">保存</button>
+            <button class="btn" @click="showSopForm = false">取消</button>
+          </div>
+        </div>
+
+        <!-- SOP list -->
+        <div v-if="sopLoading" class="empty-state-lg" style="padding:32px;text-align:center">加载中…</div>
+        <div v-else-if="!sopSkills.length" class="empty-state-lg" style="padding:32px;text-align:center">
+          还没有 SOP 技能。点击「新建 SOP」创建第一个流程技能。
+        </div>
+        <div v-else style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px">
+          <div v-for="s in sopSkills" :key="s.id" class="emp-card">
+            <div style="display:flex;align-items:center;gap:8px">
+              <div class="emp-avatar" style="background:var(--accent)"><Icon name="bolt" :size="16" /></div>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:14px;font-weight:600;color:var(--ink)">{{ s.name }}</div>
+                <div style="font-size:11.5px;color:var(--ink-mute)">{{ s.description || '无描述' }}</div>
+              </div>
+              <span class="emp-st-pill" :class="s.enabled ? 'active' : 'archived'">{{ s.enabled ? '启用' : '停用' }}</span>
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:8px">
+              <span v-for="t in s.trigger_intents" :key="t" style="padding:1px 6px;border-radius:999px;background:rgba(184,133,42,0.10);color:var(--accent-deep);font-size:10.5px">{{ t }}</span>
+            </div>
+            <div style="font-size:11px;color:var(--ink-mute);margin-top:6px">{{ s.nodes?.length || 0 }} 个节点 · {{ s.edges?.length || 0 }} 条边</div>
+            <div style="display:flex;gap:4px;margin-top:8px;border-top:1px solid var(--rule-soft);padding-top:8px">
+              <button class="icon-btn" title="编辑" @click="openEditSop(s)"><Icon name="edit" :size="13" /></button>
+              <button class="icon-btn" title="发布到广场" @click="publishToGallery('sop', s)"><Icon name="globe" :size="13" /></button>
+              <button class="icon-btn" title="删除" style="color:var(--danger)" @click="deleteSop(s)"><Icon name="close" :size="13" /></button>
+            </div>
+          </div>
+        </div>
       </template>
 
       <!-- ── MCP 服务器 ── -->

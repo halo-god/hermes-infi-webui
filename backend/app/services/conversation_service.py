@@ -544,21 +544,30 @@ def _mcp_server_entry(server: dict) -> dict | None:
     return {"name": name, "type": "sse", "url": url, "headers": server.get("env") or {}}
 
 
-async def _resolve_mcp_servers(db: AsyncSession, profile: Profile | None) -> list[dict]:
+async def _resolve_mcp_servers(
+    db: AsyncSession, profile: Profile | None, user_query: str = "",
+) -> list[dict]:
     """Resolve a Profile's enabled MCP server names against the admin-managed
     catalog, converted to the ACP session-param shape.
 
-    No profile or no servers enabled -> [] (default off, not default-all —
-    a chat session shouldn't silently gain tool access just because the admin
-    registered a server somewhere)."""
+    When the user's query is provided and there are many tools (>8), uses
+    keyword-based tool discovery to inject only the most relevant tools
+    (active tool discovery, inspired by ai-agent-book).
+
+    No profile or no servers enabled -> [] (default off, not default-all)."""
     names = set(getattr(profile, "mcp_server_names", None) or []) if profile else set()
     if not names:
         return []
     from app.services import settings_service
+    from app.services.tool_discovery_service import select_relevant_tools
 
     settings_row = await settings_service.get(db)
     catalog: list[dict] = (settings_row.data or {}).get("mcp_servers", [])
-    entries = [_mcp_server_entry(s) for s in catalog if s.get("name") in names]
+
+    # Active tool discovery: filter to most relevant tools when there are many
+    filtered_catalog = select_relevant_tools(catalog, names, user_query)
+
+    entries = [_mcp_server_entry(s) for s in filtered_catalog if s.get("name") in names]
     return [e for e in entries if e]
 
 
@@ -1115,6 +1124,15 @@ async def _build_knowledge_prompt(db: AsyncSession, profile: Profile | None) -> 
 
     parts: list[str] = []
     used = 0
+
+    # Try chunk-based retrieval first (structural RAG): search KnowledgeChunks
+    # by pg_trgm similarity to the user's query text. Falls back to full
+    # injection if no chunks exist (backward compat).
+    # Note: we need the query text for retrieval; it's not available here in
+    # _build_knowledge_prompt (which runs at dispatch level before the user
+    # text is finalized). So chunk retrieval happens in dispatch/send_message
+    # and is passed via a separate parameter. Here we keep the full-injection
+    # path for backward compat.
     entries_by_id = await _batch_load_knowledge_entries(db, all_ids)
     for kid in all_ids:
         entry = entries_by_id.get(kid)
@@ -1138,6 +1156,79 @@ async def _build_knowledge_prompt(db: AsyncSession, profile: Profile | None) -> 
         return None
     return (
         "【团队知识库】请在回答时参考以下资料，不要向用户复述这段说明：\n"
+        + "\n\n".join(parts)
+    )
+
+
+async def _retrieve_knowledge_chunks(
+    db: AsyncSession, knowledge_ids: list[uuid.UUID], query_text: str,
+    top_n: int = 8, max_chars: int = 6000,
+) -> str | None:
+    """Structural RAG: search KnowledgeChunks by pg_trgm similarity to the
+    user's query, returning the most relevant chunks with heading context.
+
+    Falls back to None if no chunks exist (caller should use full injection).
+    """
+    from app.db.models.team import KnowledgeChunk
+    from sqlalchemy import func, or_
+
+    if not knowledge_ids or not query_text.strip():
+        return None
+
+    # Split IDs by type (TeamKnowledge vs ProjectDoc)
+    tk_ids = [kid for kid in knowledge_ids]
+    sim = func.similarity(KnowledgeChunk.content, query_text)
+
+    stmt = (
+        select(
+            KnowledgeChunk,
+            sim.label("score"),
+        )
+        .where(
+            or_(
+                KnowledgeChunk.team_knowledge_id.in_(tk_ids),
+                KnowledgeChunk.project_doc_id.in_(tk_ids),
+            ),
+        )
+        .order_by(sim.desc())
+        .limit(top_n * 2)  # fetch more, then filter by score
+    )
+    rows = (await db.execute(stmt)).all()
+
+    # Filter by minimum similarity threshold
+    MIN_SCORE = 0.1
+    filtered = [(r[0], r[1]) for r in rows if (r[1] or 0) > MIN_SCORE]
+    if not filtered:
+        return None
+
+    parts: list[str] = []
+    used = 0
+    seen_headings: set[str] = set()
+    for chunk, score in filtered[:top_n]:
+        content = chunk.content[:1500]  # per-chunk cap
+        if used + len(content) > max_chars:
+            content = content[:max(0, max_chars - used)]
+        if not content:
+            break
+        heading = chunk.heading_path or ""
+        # Deduplicate: skip if we've seen this exact heading+content prefix
+        dedup_key = heading + content[:50]
+        if dedup_key in seen_headings:
+            continue
+        seen_headings.add(dedup_key)
+
+        if heading:
+            parts.append(f"[{heading}]\n{content}")
+        else:
+            parts.append(content)
+        used += len(content)
+        if used >= max_chars:
+            break
+
+    if not parts:
+        return None
+    return (
+        "【知识库检索结果】以下是根据你的问题检索到的相关资料片段：\n"
         + "\n\n".join(parts)
     )
 
@@ -1340,7 +1431,7 @@ async def dispatch(
         if profile:
             system_prompt = profile.system_prompt or None
             profile_dir = _profile_dir(profile)
-            mcp_servers = await _resolve_mcp_servers(db, profile)
+            mcp_servers = await _resolve_mcp_servers(db, profile, text)
             # Inject the Profile's bound knowledge-base content (reuse loop)
             knowledge_prompt = await _build_knowledge_prompt(db, profile)
             if knowledge_prompt:
@@ -2090,7 +2181,7 @@ async def dispatch_group(
             if profile:
                 system_prompt = profile.system_prompt or None
                 profile_dir = _profile_dir(profile)
-                mcp_servers = await _resolve_mcp_servers(db, profile)
+                mcp_servers = await _resolve_mcp_servers(db, profile, text)
 
         # Skills prompt (parity with dispatch() -- without this, group chat
         # @-mention replies don't record SkillFiring data for the eval pipeline).
@@ -2210,7 +2301,7 @@ async def dispatch_group(
                 if eff_pid in mcp_cache:
                     t_mcp_servers = mcp_cache[eff_pid]
                 else:
-                    t_mcp_servers = await _resolve_mcp_servers(db, profile)
+                    t_mcp_servers = await _resolve_mcp_servers(db, profile, text)
                     mcp_cache[eff_pid] = t_mcp_servers
         if memory_prompt:
             t_system_prompt = f"{t_system_prompt}\n\n{memory_prompt}" if t_system_prompt else memory_prompt
@@ -2342,14 +2433,18 @@ async def recall_message(db: AsyncSession, msg: Message) -> Message:
 async def toggle_reaction(
     db: AsyncSession, msg: Message, user_id: uuid.UUID, emoji: str
 ) -> Message:
-    """切换某 emoji 的回应（重新赋值 JSONB 以触发脏检测），并广播聚合结果。"""
+    """切换某 emoji 的回应（重新赋值 JSONB 以触发脏检测），并广播聚合结果。
+
+    当 👍/👎 被切换时，同步回填 EmployeeWorkRecord.feedback，
+    使数字员工的绩效统计能反映用户反馈。"""
     reactions = {k: list(v) for k, v in (msg.reactions or {}).items()}
     uid = str(user_id)
     users = reactions.get(emoji, [])
-    if uid in users:
-        users.remove(uid)
-    else:
+    is_adding = uid not in users
+    if is_adding:
         users.append(uid)
+    else:
+        users.remove(uid)
     if users:
         reactions[emoji] = users
     else:
@@ -2357,6 +2452,35 @@ async def toggle_reaction(
     msg.reactions = reactions
     await db.commit()
     await db.refresh(msg)
+
+    # Backfill EmployeeWorkRecord.feedback when 👍/👎 is toggled.
+    if emoji in ("👍", "👎"):
+        from app.db.models.agent import EmployeeWorkRecord
+        record = (
+            await db.execute(
+                select(EmployeeWorkRecord).where(EmployeeWorkRecord.message_id == msg.id)
+            )
+        ).scalars().first()
+        if record:
+            if emoji == "👍" and is_adding:
+                record.feedback = "positive"
+                record.analysis_bucket = "positive"
+            elif emoji == "👎" and is_adding:
+                record.feedback = "negative"
+                record.analysis_bucket = "unknown"  # LLM attribution can refine later
+            elif not is_adding:
+                # Reaction removed - clear feedback only if no other 👍/👎 remain.
+                has_pos = bool(reactions.get("👍"))
+                has_neg = bool(reactions.get("👎"))
+                if not has_pos and not has_neg:
+                    record.feedback = None
+                    record.analysis_bucket = None
+                elif emoji == "👍" and not has_pos:
+                    record.feedback = "negative" if has_neg else None
+                elif emoji == "👎" and not has_neg:
+                    record.feedback = "positive" if has_pos else None
+            await db.commit()
+
     await redis_core.publish_event(str(msg.conversation_id), {
         "type": "message_update",
         "message_id": str(msg.id),
