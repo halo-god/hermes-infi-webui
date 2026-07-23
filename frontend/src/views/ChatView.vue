@@ -130,6 +130,32 @@ const greeting = computed(() => {
 
 const landingProfile = computed(() => chat.profiles.find((p) => p.id === landingProfileId.value) || chat.profiles.find((p) => p.is_active) || null);
 const activeConvo = computed(() => chat.conversations.find((c) => c.id === chat.activeId));
+// P1-3 staged conversations: 3-step role switcher (clarify→implement→review).
+// Only shown when the conversation has a stage set (i.e. its profile is staged).
+const STAGES: { key: "clarify" | "implement" | "review"; label: string }[] = [
+  { key: "clarify", label: "澄清" },
+  { key: "implement", label: "实现" },
+  { key: "review", label: "审查" },
+];
+const stagedStage = computed(() => activeConvo.value?.staged_stage || null);
+async function switchStage(stage: "clarify" | "implement" | "review") {
+  if (!activeConvo.value || stagedStage.value === stage) return;
+  try {
+    await conversationsApi.setStage(activeConvo.value.id, stage);
+    const idx = chat.conversations.findIndex((c) => c.id === chat.activeId);
+    if (idx !== -1) chat.conversations[idx].staged_stage = stage;
+  } catch (e) {
+    console.error("switch stage failed", e);
+  }
+}
+async function authoriseTool(tool: string) {
+  if (!activeConvo.value) return;
+  try {
+    await conversationsApi.authoriseTool(activeConvo.value.id, tool);
+  } catch (e) {
+    console.error("authorise tool failed", e);
+  }
+}
 const primaryProfile = computed(() => {
   // Priority: conversation's profile_id > conversation's agent > landing
   const pid = activeConvo.value?.profile_id;
@@ -904,6 +930,15 @@ onUnmounted(() => {
               </svg>
               <span class="ctx-label">{{ ctxK }}</span>
             </div>
+            <div v-if="stagedStage" class="stage-switcher" :title="'当前阶段：' + (STAGES.find(s => s.key === stagedStage)?.label || stagedStage)">
+              <button
+                v-for="s in STAGES"
+                :key="s.key"
+                class="stage-step"
+                :class="{ active: stagedStage === s.key, done: STAGES.findIndex(x => x.key === stagedStage) > STAGES.findIndex(x => x.key === s.key) }"
+                @click="switchStage(s.key)"
+              >{{ s.label }}</button>
+            </div>
             <button class="thread-action text-mute-sm" v-if="chat.messages.length" @click="showSearch = !showSearch" style="flex-shrink:0;margin-top:2px" title="搜索消息 ⌘F">
               <Icon name="search" />
             </button>
@@ -1032,6 +1067,24 @@ onUnmounted(() => {
               </div>
             </div>
 
+            <!-- P2-1 chain handoff -->
+            <div v-else-if="chat.messages[row.index].role === 'chain'" class="chain">
+              <div class="chain-label">链式接力 · {{ chat.messages[row.index].content.steps?.length || 0 }} 个环节顺序协作</div>
+              <div v-for="(s, idx) in chat.messages[row.index].content.steps" :key="idx" class="chain-step">
+                <div class="chain-step-head">
+                  <span class="chain-step-num">{{ idx + 1 }}</span>
+                  <span class="rt-avatar" :style="{ background: rtProfileDisplay(s.agent_id, s.profile_id).color }"><Icon :name="rtProfileDisplay(s.agent_id, s.profile_id).icon" :size="11" /></span>
+                  <span class="rt-name">{{ rtProfileDisplay(s.agent_id, s.profile_id).label }}</span>
+                  <span class="rt-status" :class="s.status">{{ s.status === 'streaming' ? '生成中' : s.status === 'pending' ? '等待中' : s.status === 'error' ? '失败' : s.status === 'timeout' ? '超时' : s.status === 'cancelled' ? '已取消' : '完成' }}</span>
+                </div>
+                <div class="rt-card-body">
+                  <span v-if="s.status === 'streaming' && !s.text" class="typing"><span></span><span></span><span></span></span>
+                  <div v-else-if="s.text" class="md-body" v-html="md(s.text)" />
+                </div>
+                <Icon v-if="idx < (chat.messages[row.index].content.steps?.length || 0) - 1" name="chevron_down" :size="14" class="chain-arrow" />
+              </div>
+            </div>
+
             <!-- normal message -->
             <div v-else-if="chat.messages[row.index].role === 'system'" class="msg system-msg">
               <div class="system-msg-body">
@@ -1101,8 +1154,16 @@ onUnmounted(() => {
                     </div>
                   </template>
                 </div>
-                <div v-if="chat.messages[row.index].role === 'agent' && chat.messages[row.index].status === 'cancelled'" class="msg-cancelled-tag">
-                  <Icon name="stop" :size="11" /> 已停止生成
+                <div v-if="chat.messages[row.index].role === 'agent' && chat.messages[row.index].status === 'cancelled'" class="msg-cancelled-tag" :class="{ 'iter-capped': chat.messages[row.index].iter_capped, 'risk-blocked': chat.messages[row.index].risk_blocked }">
+                  <Icon name="stop" :size="11" />
+                  <template v-if="chat.messages[row.index].risk_blocked">
+                    已拦截高危工具「{{ chat.messages[row.index].risk_blocked?.tool }}」调用并停止。
+                    <button class="inline-authorise-btn" @click="authoriseTool(chat.messages[row.index].risk_blocked!.tool); regenerate(chat.messages[row.index].id)">授权并重试</button>
+                  </template>
+                  <template v-else-if="chat.messages[row.index].iter_capped">
+                    已达迭代上限（{{ chat.messages[row.index].iter_capped?.tool_calls }}/{{ chat.messages[row.index].iter_capped?.limit }} 次工具调用），已自动停止
+                  </template>
+                  <template v-else>已停止生成</template>
                 </div>
                 <!-- Unified single-row message actions: reactions + reply + emoji + tools -->
                 <template v-if="!chat.messages[row.index].deleted_at">
@@ -1296,6 +1357,69 @@ onUnmounted(() => {
   border-radius: 4px;
   padding: 1px 7px;
 }
+.msg-cancelled-tag.iter-capped {
+  color: #c0392b;
+  border-color: rgba(192, 57, 43, 0.4);
+  background: rgba(192, 57, 43, 0.1);
+}
+.msg-cancelled-tag.risk-blocked {
+  color: #b8852a;
+  border-color: rgba(184, 133, 42, 0.4);
+  background: rgba(184, 133, 42, 0.1);
+  flex-wrap: wrap;
+}
+.inline-authorise-btn {
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  margin-left: 4px;
+}
+.inline-authorise-btn:hover { opacity: 0.8; }
+
+/* P2-1 chain handoff rendering */
+.chain {
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+}
+.chain-label {
+  font-size: 12px;
+  color: var(--ink-mute, #888);
+  margin-bottom: 10px;
+  text-align: center;
+}
+.chain-step {
+  margin-bottom: 4px;
+}
+.chain-step-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  font-size: 12.5px;
+}
+.chain-step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent, #b8852a);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.chain-arrow {
+  display: block;
+  margin: 2px auto;
+  color: var(--ink-faint, #ccc);
+}
 /* Unified message actions row (replaces separate group-actions + msg-tools) */
 .msg-actions {
   display: flex;
@@ -1363,4 +1487,34 @@ onUnmounted(() => {
   border-radius: 4px;
 }
 .discuss-task-clear:hover { color: var(--ink); background: rgba(0, 0, 0, 0.06); }
+
+/* P1-3 staged conversation role switcher */
+.stage-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  margin-top: 2px;
+  padding: 2px;
+  border-radius: 6px;
+  background: var(--rule, rgba(0,0,0,0.06));
+}
+.stage-step {
+  border: none;
+  background: transparent;
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 4px;
+  color: var(--ink-mute, #888);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.stage-step:hover { color: var(--ink, #333); }
+.stage-step.done { color: var(--ink-faint, #aaa); }
+.stage-step.active {
+  background: var(--accent, #b8852a);
+  color: #fff;
+  font-weight: 500;
+}
 </style>

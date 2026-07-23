@@ -125,6 +125,12 @@ export const conversationsApi = {
   async setSessionModel(id: string, modelId: string): Promise<void> {
     await http.put(`/conversations/${id}/session/model`, { model_id: modelId });
   },
+  async setStage(id: string, stage: "clarify" | "implement" | "review"): Promise<void> {
+    await http.put(`/conversations/${id}/stage`, { stage });
+  },
+  async authoriseTool(id: string, tool: string): Promise<void> {
+    await http.post(`/conversations/${id}/authorise-tool`, { tool });
+  },
 
   // ── Conversation folders (grouping) ──
   async listFolders(type?: "personal" | "group"): Promise<ConversationFolder[]> {

@@ -222,3 +222,13 @@ class SetSessionModeRequest(BaseModel):
 
 class SetSessionModelRequest(BaseModel):
     model_id: str = Field(min_length=1)
+
+
+class SetStageRequest(BaseModel):
+    """P1-3: manually switch a staged conversation's active stage."""
+    stage: str = Field(pattern="^(clarify|implement|review)$")
+
+
+class AuthoriseToolRequest(BaseModel):
+    """P2-3: authorise a high-risk MCP tool for the current conversation."""
+    tool: str = Field(min_length=1)

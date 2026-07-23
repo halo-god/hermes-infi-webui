@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, String, Text
+from sqlalchemy import Boolean, DateTime, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -59,3 +59,21 @@ class Profile(UUIDPrimaryKey, Timestamps, Base):
     # one synthesized reply, instead of answering with default_agent_id itself.
     is_moa: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     moa_target_profile_ids: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    # Per-turn circuit breaker: the runner cancels the ACP session once this
+    # many tool_call events have been emitted in a single turn. Guards against
+    # runaway ReAct loops that would otherwise burn tokens until the 900s
+    # hard timeout. 0 = disabled (use only the hard timeout).
+    max_iterations: Mapped[int] = mapped_column(Integer, default=50, nullable=False)
+    # P1-3 staged system prompts. When staged_enabled, the conversation's
+    # current stage (Conversation.staged_stage) selects which prompt + MCP
+    # subset is active. Shape: {stage: {"prompt": str, "mcp_servers": [str]}}.
+    staged_prompts: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    staged_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # P2-1 chain handoff: selecting this profile runs a sequential chain where
+    # each agent's conclusion is prepended to the next agent's prompt. The
+    # target list is ORDERED (unlike MoA's unordered fan-out).
+    is_chain: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    chain_target_profile_ids: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    # P2-2 research mode: roundtable runs with cascade termination — the first
+    # slot to answer cancels the rest and is returned without merge.
+    is_research: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

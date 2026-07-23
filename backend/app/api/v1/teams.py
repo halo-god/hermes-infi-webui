@@ -493,6 +493,20 @@ async def get_knowledge_content(
     )
 
 
+@router.get("/teams/{team_id}/knowledge/{kid}/chunks-count")
+async def get_knowledge_chunks_count(
+    team_id: uuid.UUID, kid: uuid.UUID,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """P1-1 RAG: how many embedding-indexed chunks a knowledge item has.
+    Drives the "已索引 N 块" badge in the knowledge list. Returns 0 when RAG
+    is off or the item has never been indexed."""
+    await svc.require_membership(db, team_id, user.id)
+    from app.services import rag_service
+    count = await rag_service.count_chunks(db, kid)
+    return {"count": count, "rag_enabled": settings.rag_enabled}
+
+
 @router.get("/teams/{team_id}/knowledge/{kid}/raw")
 async def get_knowledge_raw(
     team_id: uuid.UUID, kid: uuid.UUID,

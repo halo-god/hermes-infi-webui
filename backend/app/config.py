@@ -152,8 +152,49 @@ class Settings(BaseSettings):
     skill_evolution_llm_api_base: str = ""   # optional self-hosted/proxy endpoint
     skill_evolution_llm_max_calls_per_run: int = 60  # hard cap on judge-LM calls, on top of GEPA's own budget
 
+    # ── P1-1 RAG: vector retrieval over team knowledge ──
+    # Off by default. When off, _build_knowledge_prompt keeps the legacy
+    # whole-document injection (truncated at _KNOWLEDGE_TOTAL). When on AND a
+    # knowledge item has chunks indexed, dispatch embeds the user's query and
+    # fetches only the top-k relevant chunks via pgvector cosine search.
+    rag_enabled: bool = False
+    rag_embedding_model: str = "BAAI/bge-small-zh-v1.5"  # 512-dim, ~95MB, CJK-optimised
+    rag_embedding_dim: int = 512                          # must match migration 0057 Vector(N)
+    rag_chunk_size: int = 500        # chars per chunk (CJK ≈ 250 tokens)
+    rag_chunk_overlap: int = 100     # overlap between adjacent chunks
+    rag_top_k: int = 5               # chunks fetched per query
+    # When the combined top-k chunks exceed this many chars, they are
+    # truncated to fit the prompt budget (mirrors the legacy _KNOWLEDGE_TOTAL).
+    rag_max_context_chars: int = 8000
+
+    # ── Auxiliary LLM: shared cheap-model channel for background tasks ──
+    # Used by P1-2 (conversation summarisation) and P1-3 (staged auto-switch).
+    # Off by default; an admin must configure a key before any direct LLM call
+    # is made. Same kill-switch precedent as skill_evolution_llm_*.
+    auxiliary_llm_model: str = ""       # litellm-style, e.g. "openai/gpt-4o-mini"
+    auxiliary_llm_api_key: str = ""     # treat as a secret: never logged
+    auxiliary_llm_api_base: str = ""    # optional proxy endpoint
+
+    # ── P1-2 conversation summarisation ──
+    # Periodically LLM-summarise a conversation's older messages and inject
+    # the summary into the prompt prefix, so long chats don't overflow the
+    # model context window. Never blocks a turn — runs async via Redis Stream.
+    summary_enabled: bool = False
+    summary_trigger_msg_count: int = 30   # summarise once history exceeds this
+    summary_preserve_recent: int = 10     # keep the most-recent N messages verbatim
+    summary_increment_threshold: int = 10  # only re-summarise if ≥N new msgs since last run
+    summary_max_calls_per_conversation: int = 5  # hard cost cap per conversation
+    # Per-message char budget fed to the summariser (mirrors memory_consolidate).
+    summary_msg_chars: int = 400
+    summary_input_chars: int = 12000       # total input budget across messages
+
     # ── Uploads ──
     max_upload_mb: int = 25  # reject uploads larger than this (per file)
+    # P2-file: archive extraction limits (zip bomb defense).
+    archive_max_files: int = 100        # cap on files inside an archive
+    archive_max_total_mb: int = 100     # cap on decompressed total size
+    # P2-file: strip EXIF metadata from uploaded images (privacy: GPS/camera).
+    strip_exif_enabled: bool = True
     # Shared across every upload endpoint (conversation attachments, personal
     # file storage, team knowledge base, project docs): non-office files
     # bigger than this offload to object storage instead of inlining in

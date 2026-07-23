@@ -78,15 +78,23 @@ export const teamsApi = {
   async knowledgeVersions(id: string, kid: string): Promise<WorkspaceFileVersion[]> {
     return (await http.get(`/teams/${id}/knowledge/${kid}/versions`)).data;
   },
+  async knowledgeChunksCount(id: string, kid: string): Promise<{ count: number; rag_enabled: boolean }> {
+    return (await http.get(`/teams/${id}/knowledge/${kid}/chunks-count`)).data;
+  },
   async restoreKnowledgeVersion(id: string, kid: string, versionNum: number): Promise<string> {
     const r = await http.post<{ content: string | null }>(`/teams/${id}/knowledge/${kid}/restore/${versionNum}`);
     return r.data.content || "";
   },
-  async uploadKnowledge(id: string, file: File, folderId?: string | null): Promise<void> {
+  async uploadKnowledge(id: string, file: File, folderId?: string | null, onProgress?: (pct: number) => void): Promise<void> {
     const fd = new FormData();
     fd.append("file", file);
     if (folderId) fd.append("folder_id", folderId);
-    await http.post(`/teams/${id}/knowledge/upload`, fd, { headers: { "Content-Type": "multipart/form-data" } });
+    await http.post(`/teams/${id}/knowledge/upload`, fd, {
+      headers: { "Content-Type": "multipart/form-data" },
+      onUploadProgress: onProgress ? (ev: { loaded?: number; total?: number }) => {
+        if (ev.total) onProgress(Math.round((ev.loaded || 0) / ev.total * 100));
+      } : undefined,
+    });
   },
   async getChannel(id: string): Promise<{ channel: import("@/types").Conversation; channel_mode: string }> {
     return (await http.get(`/teams/${id}/channel`)).data;

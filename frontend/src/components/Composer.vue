@@ -430,22 +430,40 @@ function isKnowledgeSelected(id: string) {
 }
 
 function onFileSelected(e: Event) {
-  const file = (e.target as HTMLInputElement).files?.[0];
-  if (!file) return;
-  const idx = stagedFiles.value.length;
-  stagedFiles.value.push(file);
-  if (file.type.startsWith("image/")) {
-    const reader = new FileReader();
-    reader.onload = () => stagedPreviews.value.set(idx, reader.result as string);
-    reader.readAsDataURL(file);
+  const files = Array.from((e.target as HTMLInputElement).files || []);
+  if (!files.length) return;
+  for (const file of files) {
+    const idx = stagedFiles.value.length;
+    stagedFiles.value.push(file);
+    if (file.type.startsWith("image/")) {
+      const reader = new FileReader();
+      reader.onload = () => stagedPreviews.value.set(idx, reader.result as string);
+      reader.readAsDataURL(file);
+    }
   }
-  const sizeKB = (file.size / 1024).toFixed(1);
-  if (file.size > 100_000) {
-    ns.toast(`已添加 ${file.name} (${sizeKB}KB) — 文件较大，AI 将通过工具分段读取`);
-  } else {
-    ns.toast(`已添加 ${file.name} (${sizeKB}KB)`);
-  }
+  const totalKB = (files.reduce((s, f) => s + f.size, 0) / 1024).toFixed(1);
+  ns.toast(files.length > 1 ? `已添加 ${files.length} 个文件 (${totalKB}KB)` : `已添加 ${files[0].name} (${totalKB}KB)`);
   if (fileInput.value) fileInput.value.value = "";
+}
+
+// P2-file: drag-and-drop file upload onto the composer.
+function onDrop(e: DragEvent) {
+  if (!e.dataTransfer?.files?.length) return;
+  e.preventDefault();
+  const files = Array.from(e.dataTransfer.files);
+  for (const file of files) {
+    const idx = stagedFiles.value.length;
+    stagedFiles.value.push(file);
+    if (file.type.startsWith("image/")) {
+      const reader = new FileReader();
+      reader.onload = () => stagedPreviews.value.set(idx, reader.result as string);
+      reader.readAsDataURL(file);
+    }
+  }
+  ns.toast(`已拖入 ${files.length} 个文件`);
+}
+function onDragOver(e: DragEvent) {
+  if (e.dataTransfer?.types?.includes("Files")) e.preventDefault();
 }
 
 function onPaste(e: ClipboardEvent) {
@@ -473,13 +491,25 @@ function onPaste(e: ClipboardEvent) {
 function isImageFile(f: File) {
   return f.type.startsWith("image/");
 }
+
+// P2-file: file-type icon based on extension.
+function fileIcon(f: File): string {
+  const ext = f.name.split(".").pop()?.toLowerCase() || "";
+  if (f.type.startsWith("image/")) return "image";
+  if (ext === "pdf") return "book";
+  if (["doc", "docx", "txt", "md"].includes(ext)) return "doc";
+  if (["xls", "xlsx", "csv"].includes(ext)) return "grid";
+  if (["zip", "tar", "gz"].includes(ext)) return "folder";
+  if (["py", "js", "ts", "go", "rs", "html", "css"].includes(ext)) return "code";
+  return "paperclip";
+}
 </script>
 
 <template>
-  <div class="composer-wrap" ref="wrap" :style="{ minHeight: composerHeight + 'px' }">
+  <div class="composer-wrap" ref="wrap" :style="{ minHeight: composerHeight + 'px' }" @drop="onDrop" @dragover="onDragOver">
     <!-- Drag handle for resizing composer height -->
     <div class="composer-resize-handle" @mousedown="onResizeStart" title="拖拽调整高度"></div>
-    <input ref="fileInput" type="file" accept="image/*,.pdf,.md,.txt,.json,.csv,.html,.js,.ts,.py,.go,.rs,.yaml,.yml,.toml,.sh,.xml,.css,.diff" style="display:none" @change="onFileSelected" />
+    <input ref="fileInput" type="file" multiple accept="image/*,.pdf,.md,.txt,.json,.csv,.html,.js,.ts,.py,.go,.rs,.yaml,.yml,.toml,.sh,.xml,.css,.diff,.docx,.xlsx,.pptx,.zip" style="display:none" @change="onFileSelected" />
     <!-- reply quote bar -->
     <div v-if="replyTo" class="reply-bar">
       <Icon name="corner-up-left" :size="13" />
@@ -491,7 +521,7 @@ function isImageFile(f: File) {
     <div v-if="stagedFiles.length || stagedKnowledge.length || stagedFileRefs.length" class="staged-files">
       <span v-for="(f, i) in stagedFiles" :key="'f'+i" class="staged-chip" :class="{ 'staged-chip-image': isImageFile(f) }">
         <img v-if="stagedPreviews.has(i)" :src="stagedPreviews.get(i)" class="staged-preview" />
-        <Icon v-else name="paperclip" :size="11" />
+        <Icon v-else :name="fileIcon(f)" :size="11" />
         <span class="staged-name">{{ f.name }}</span>
         <button class="staged-rm" @click="removeStagedFile(i)">&times;</button>
       </span>

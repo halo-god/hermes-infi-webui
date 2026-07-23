@@ -58,6 +58,8 @@ from app.schemas.conversation import (
     SetAgentsRequest,
     SetSessionModeRequest,
     SetSessionModelRequest,
+    SetStageRequest,
+    AuthoriseToolRequest,
     WorkspaceFileDetail,
     WorkspaceFileOut,
     WorkspaceFileVersionOut,
@@ -856,6 +858,22 @@ async def confirm_action(
     return {"status": "ok"}
 
 
+@router.post("/{conversation_id}/authorise-tool")
+async def authorise_tool(
+    conversation_id: uuid.UUID,
+    payload: AuthoriseToolRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """P2-3: authorise a high-risk MCP tool for this conversation. Once
+    authorised, the runner's risk guard lets it through without cancelling."""
+    await _require_convo(db, conversation_id, user)
+    redis = redis_core.get_redis()
+    # Cache for the conversation's lifetime (7d mirrors the ACP session TTL).
+    await redis.set(f"tool_auth:{conversation_id}:{payload.tool}", "1", ex=3600 * 24 * 7)
+    return {"status": "ok", "tool": payload.tool}
+
+
 @router.post("/{conversation_id}/upload", response_model=WorkspaceFileOut, status_code=201)
 async def upload_file(
     conversation_id: uuid.UUID,
@@ -1070,6 +1088,36 @@ async def set_session_mode(
     convo.session_mode = body.mode
     await db.commit()
     return {"ok": True, "mode": body.mode}
+
+
+@router.put("/{conversation_id}/stage")
+async def set_stage(
+    conversation_id: uuid.UUID,
+    body: SetStageRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """P1-3: manually switch a staged conversation's active stage.
+
+    Only effective when the bound profile has staged_enabled=True; otherwise
+    the stage is stored but has no effect on prompt/tool selection. The ACP
+    session is rebuilt on the next turn (namespace includes the stage, and the
+    runner drops the old session when mcp_servers differ)."""
+    from app.core import redis as R
+
+    convo = await _require_convo(db, conversation_id, user)
+    old_stage = convo.staged_stage
+    convo.staged_stage = body.stage
+    await db.commit()
+    # Clear the old stage's cached ACP session so the runner builds a fresh
+    # one with the new stage's prompt + tool subset next turn.
+    if old_stage and old_stage != body.stage and convo.profile_id:
+        try:
+            redis = R.get_redis()
+            await redis.delete(f"acp_session:{conversation_id}:{convo.profile_id}:{old_stage}")
+        except Exception:
+            pass
+    return {"ok": True, "stage": body.stage}
 
 
 @router.put("/{conversation_id}/session/model")

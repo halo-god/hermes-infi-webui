@@ -37,6 +37,7 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
     targets: list[dict] = task["targets"]
     text = task["text"]
     moa = bool(task.get("moa", False))
+    research_mode = bool(task.get("research_mode", False))
     # Resource_link/image blocks for attached files — same structured
     # attachment handling single-agent chat gets. Re-attached to every
     # target's own persona-wrapped text block below.
@@ -61,7 +62,9 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
 
     async def run_one(slot: int, target: dict) -> tuple[str, str]:
         """Run one roundtable reply. Returns (text, status) where status is
-        complete | timeout | error. Partial text is preserved on failure."""
+        complete | timeout | error | cancelled. Partial text is preserved on
+        failure. In research_mode, slots poll is_cancelled so they early-exit
+        once another slot has produced a usable answer."""
         aid = target["agent_id"]
         agent = agents.get(aid) or agents.get("hermes")
         buf = {"text": ""}
@@ -73,6 +76,9 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
             [{"type": "text", "text": prompt_text}, *attachment_blocks]
             if attachment_blocks else prompt_text
         )
+        # P2-2 research cascade: if a sibling already answered, skip this slot.
+        if research_mode and await R.is_cancelled(conversation_id):
+            return buf["text"], "cancelled"
 
         async def on_update(update: dict) -> None:
             if update.get("sessionUpdate") == "agent_message_chunk":
@@ -82,6 +88,15 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
                     await R.publish_event(conversation_id, {
                         "type": "rt_token", "message_id": message_id, "slot": slot, "delta": d
                     })
+                    # P2-2 research cascade: first slot to produce text signals
+                    # the others to stop. request_cancel sets the conv-level flag
+                    # the other slots check before each prompt iteration.
+                    if research_mode and not buf.get("signalled"):
+                        buf["signalled"] = True
+                        try:
+                            await R.request_cancel(conversation_id)
+                        except Exception:  # noqa: BLE001
+                            pass
 
         async def on_fs(path: str, content: str) -> None:
             f = await storage.save_file(uuid.UUID(conversation_id), path, content, aid, uuid.UUID(message_id))
@@ -140,6 +155,24 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
         return
 
     ok_slots = [i for i, s in enumerate(statuses) if s == "complete" and texts[i].strip()]
+
+    # P2-2 research mode: first hit wins — return it directly, skip merge.
+    # Clear the cancel flag the winning slot set so it doesn't leak.
+    if research_mode:
+        await R.clear_cancel(conversation_id)
+        if ok_slots:
+            winner = ok_slots[0]
+            merged_text = texts[winner]
+            await R.publish_event(conversation_id, {"type": "merge_start", "message_id": message_id})
+            await R.publish_event(conversation_id, {
+                "type": "merge_token", "message_id": message_id, "delta": merged_text
+            })
+            await _finalize_roundtable(message_id, targets, texts, statuses, merged_text, "complete", moa)
+            await R.publish_event(conversation_id, {
+                "type": "done", "message_id": message_id, "status": "complete", "text": merged_text,
+            })
+            return
+        # No slot produced text — fall through to the error path below.
     if not ok_slots:
         await _finalize_roundtable(message_id, targets, texts, statuses, "", "error", moa)
         await R.clear_cancel(conversation_id)

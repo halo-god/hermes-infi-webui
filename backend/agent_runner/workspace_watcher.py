@@ -147,7 +147,27 @@ class WorkspaceWatcher:
         try:
             content = await asyncio.to_thread(Path(path).read_text, encoding="utf-8")
         except UnicodeDecodeError:
-            logger.debug("Skipping binary file: %s", path)
+            # P2-file: binary files (images, PDFs, compiled output) can't be
+            # synced as text. Notify the frontend that the file exists (so the
+            # UI can show it / offer download) without storing binary content
+            # in the DB — the agent reads it from disk via read_file.
+            rel = os.path.relpath(path, self.cwd)
+            rel = safe_relative_path(rel)
+            msg_id = self.get_current_msg_id() or self.message_id
+            try:
+                await self.publish_event({
+                    "type": "file",
+                    "message_id": msg_id,
+                    "file_id": None,
+                    "name": os.path.basename(path),
+                    "kind": rel.rsplit(".", 1)[-1].lower() if "." in rel else "bin",
+                    "version": 1,
+                    "diff": None,
+                    "binary": True,
+                    "workspace_path": rel,
+                })
+            except Exception:
+                logger.debug("Failed to publish binary file event for %s", path, exc_info=True)
             return
         except Exception as exc:
             logger.warning("Failed to read watched file %s: %s", path, exc)

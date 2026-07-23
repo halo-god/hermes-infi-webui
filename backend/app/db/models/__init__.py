@@ -5,6 +5,7 @@ from app.db.models.branding import BrandAsset  # noqa: F401
 from app.db.models.conversation import (  # noqa: F401
     Conversation,
     ConversationFolder,
+    ConversationSummary,
     GroupMember,
     Message,
 )
@@ -19,6 +20,7 @@ from app.db.models.team import (  # noqa: F401
     ProjectTask,
     Team,
     TeamKnowledge,
+    TeamKnowledgeChunk,
     TeamKnowledgeVersion,
     TeamMember,
 )
@@ -28,3 +30,4 @@ from app.db.models.memory import AgentMemory, AgentSkill, MemoryEpisode  # noqa:
 from app.db.models.scheduled import ScheduledTask  # noqa: F401
 from app.db.models.subagent import BackgroundSubagent  # noqa: F401
 from app.db.models.skill_evolution import SkillFiring, SkillProposal  # noqa: F401
+from app.db.models.profile_evolution import ProfileFiring, ProfilePromptProposal  # noqa: F401

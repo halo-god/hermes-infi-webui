@@ -25,3 +25,24 @@ class SkillModule(dspy.Module):
 
     def forward(self, trigger_query: str):
         return self.respond(trigger_query=trigger_query)
+
+
+class ProfileReplySignature(dspy.Signature):
+    """Placeholder docstring — overwritten per-instance by Profile.system_prompt
+    via .with_instructions(), never used as-is."""
+
+    trigger_query: str = dspy.InputField(desc="发给该助手（Profile）的用户消息")
+    response: str = dspy.OutputField(desc="AI 依据该助手的人设（system_prompt）给出的回复")
+
+
+class ProfileModule(dspy.Module):
+    """P2-4: same mechanism as SkillModule but the optimizable instructions
+    are seeded from Profile.system_prompt instead of AgentSkill.content.
+    GEPA mutates self.respond.signature.instructions; nothing else changes."""
+
+    def __init__(self, system_prompt: str):
+        super().__init__()
+        self.respond = dspy.Predict(ProfileReplySignature.with_instructions(system_prompt))
+
+    def forward(self, trigger_query: str):
+        return self.respond(trigger_query=trigger_query)

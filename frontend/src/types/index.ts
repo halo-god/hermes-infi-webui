@@ -191,6 +191,17 @@ export interface RoundtableContent {
   merged: { text: string; status: "pending" | "streaming" | "complete" | "cancelled" };
 }
 
+export interface ChainStep {
+  agent_id: string;
+  profile_id?: string | null;
+  text: string;
+  status: "pending" | "streaming" | "complete" | "error" | "timeout" | "cancelled";
+}
+
+export interface ChainContent {
+  steps: ChainStep[];
+}
+
 export interface ReplyRef {
   id: string;
   role: string;
@@ -203,10 +214,10 @@ export interface Message {
   id: string;
   conversation_id: string;
   owner_id: string | null;
-  role: "user" | "agent" | "roundtable" | "system";
+  role: "user" | "agent" | "roundtable" | "chain" | "system";
   agent_id: string | null;
   profile_id?: string | null;
-  content: MessageContent & Partial<RoundtableContent>;
+  content: MessageContent & Partial<RoundtableContent> & Partial<ChainContent>;
   status: "streaming" | "complete" | "cancelled" | "error";
   mentions?: string[] | null;
   created_at: string;
@@ -220,6 +231,8 @@ export interface Message {
   edited_at?: string | null;
   deleted_at?: string | null;
   reactions?: Record<string, string[]>;
+  iter_capped?: { tool_calls: number; limit: number };
+  risk_blocked?: { tool: string; title: string };
 }
 
 export interface Conversation {
@@ -233,6 +246,7 @@ export interface Conversation {
   profile_id: string | null;
   acp_session_id: string | null;
   session_mode?: string | null;
+  staged_stage?: string | null;
   pinned: boolean;
   visibility: string;
   channel_mode?: string;
@@ -377,6 +391,11 @@ export type StreamEvent = (
   | { type: "members_changed" }
   | { type: "notify"; title?: string; snippet?: string; mention?: boolean; unread?: number }
   | { type: "subagent_nudge"; subagent_id: string; status: string }
+  | { type: "iteration_warning"; message_id: string; tool_calls: number; limit: number }
+  | { type: "tool_blocked"; message_id: string; tool: string; title: string }
+  | { type: "chain_start"; message_id: string; agents: { agent_id: string; profile_id: string | null; slot: number; label: string; color: string }[] }
+  | { type: "chain_step_token"; message_id: string; slot: number; delta: string }
+  | { type: "chain_step_done"; message_id: string; slot: number; status: string }
 ) & { conversation_id?: string };
 
 // ── Teams / projects / tasks (P3 backend; frontend added here) ──

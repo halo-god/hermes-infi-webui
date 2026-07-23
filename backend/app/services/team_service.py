@@ -1,6 +1,7 @@
 """Team / membership / governance + project / task persistence."""
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 
@@ -354,6 +355,48 @@ async def list_knowledge(db: AsyncSession, team_id: uuid.UUID) -> list[TeamKnowl
     return list(res.scalars().all())
 
 
+async def _cleanup_storage(storage_key: str) -> None:
+    """P2-storage: best-effort delete of an offloaded object so the DB row's
+    removal doesn't leak an orphan in MinIO/S3. Never raises — a missing or
+    already-deleted object is fine."""
+    try:
+        from app.core import object_storage
+        await asyncio.to_thread(object_storage.delete, storage_key)
+    except Exception:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning(
+            "Failed to clean up storage object %s", storage_key, exc_info=True,
+        )
+
+
+async def _maybe_index_knowledge(db: AsyncSession, knowledge_id: uuid.UUID) -> None:
+    """Best-effort RAG indexing hook. Never raises — embedding/model/pgvector
+    failures only log a warning, so uploads and content edits always succeed
+    even when RAG is misconfigured. The item simply won't be vector-retrievable
+    and _build_knowledge_prompt falls back to whole-doc injection for it."""
+    try:
+        from app.services import rag_service
+        await rag_service.index_knowledge(db, knowledge_id)
+    except Exception:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning(
+            "RAG indexing failed for knowledge %s (falling back to whole-doc)", knowledge_id, exc_info=True,
+        )
+
+
+async def _maybe_index_project_doc(db: AsyncSession, project_doc_id: uuid.UUID) -> None:
+    """P2-file: same best-effort hook for project docs. Mirrors
+    _maybe_index_knowledge but calls index_project_doc."""
+    try:
+        from app.services import rag_service
+        await rag_service.index_project_doc(db, project_doc_id)
+    except Exception:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning(
+            "RAG indexing failed for project doc %s", project_doc_id, exc_info=True,
+        )
+
+
 async def add_knowledge(db: AsyncSession, team_id: uuid.UUID, data, user: User) -> TeamKnowledge:
     k = TeamKnowledge(
         team_id=team_id,
@@ -368,12 +411,20 @@ async def add_knowledge(db: AsyncSession, team_id: uuid.UUID, data, user: User) 
     db.add(k)
     await db.commit()
     await db.refresh(k)
+    # P1-1 RAG: embed the doc for vector retrieval. Best-effort — never blocks
+    # or fails the upload; a missing index just means whole-doc fallback.
+    await _maybe_index_knowledge(db, k.id)
     return k
 
 
 async def delete_knowledge(db: AsyncSession, team_id: uuid.UUID, kid: uuid.UUID) -> None:
     k = await db.get(TeamKnowledge, kid)
     if k and k.team_id == team_id:
+        # P2-storage: clean up the offloaded original bytes so we don't leak
+        # orphan objects in MinIO/S3. Best-effort — a missing object shouldn't
+        # block the DB delete.
+        if k.storage_key:
+            await _cleanup_storage(k.storage_key)
         await db.delete(k)
         await db.commit()
 
@@ -403,10 +454,14 @@ async def update_knowledge(
         for o in old:
             await db.delete(o)
         k.current_version += 1
+    content_changed = "content" in fields
     for f, v in fields.items():
         setattr(k, f, v)
     await db.commit()
     await db.refresh(k)
+    # P1-1 RAG: re-index when content changed (old chunks are stale).
+    if content_changed:
+        await _maybe_index_knowledge(db, k.id)
     return k
 
 
@@ -551,6 +606,8 @@ async def add_doc(db: AsyncSession, project_id: uuid.UUID, data, user: User) -> 
     db.add(d)
     await db.commit()
     await db.refresh(d)
+    # P2-file: index project docs for RAG (previously team-knowledge only).
+    await _maybe_index_project_doc(db, d.id)
     return d
 
 
@@ -584,6 +641,8 @@ async def update_doc_content(
     d.size_bytes = len(content.encode("utf-8"))
     await db.commit()
     await db.refresh(d)
+    # P2-file: re-index when content changed.
+    await _maybe_index_project_doc(db, d.id)
     return d
 
 
@@ -626,6 +685,8 @@ async def set_profile_knowledge(db: AsyncSession, profile, knowledge_ids: list[s
 async def delete_doc(db: AsyncSession, did: uuid.UUID) -> None:
     d = await db.get(ProjectDoc, did)
     if d:
+        if d.storage_key:
+            await _cleanup_storage(d.storage_key)
         await db.delete(d)
         await db.commit()
 

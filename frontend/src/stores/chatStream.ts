@@ -8,7 +8,7 @@ import { useNotificationStore } from "@/stores/notifications";
 import { useBrandingStore } from "@/stores/branding";
 import { getActivePinia } from "pinia";
 import i18n from "@/i18n";
-import type { ConfirmationRequest, Message, StreamEvent } from "@/types";
+import type { ChainStep, ConfirmationRequest, Message, StreamEvent } from "@/types";
 import type { Ref } from "vue";
 
 /** Branding short-name for desktop-notification prefixes. Resolved lazily via
@@ -209,6 +209,37 @@ export function registerStreamHandlers(
     if (merged && merged.status === "streaming") { merged.text += ev.delta; triggerMessages(); }
   }, activeId));
 
+  // P2-1 chain handoff: sequential relay steps.
+  stream.on("chain_start", scoped((ev) => {
+    if (!find(ev.message_id)) {
+      pushMessage({
+        id: ev.message_id,
+        conversation_id: activeId.value || "",
+        owner_id: null,
+        role: "chain",
+        agent_id: ev.agents[0]?.agent_id || null,
+        profile_id: ev.agents[0]?.profile_id ?? null,
+        content: {
+          text: "",
+          steps: ev.agents.map((a) => ({ agent_id: a.agent_id, profile_id: a.profile_id ?? null, text: "", status: "pending" as const })),
+        },
+        status: "streaming",
+        created_at: new Date().toISOString(),
+      });
+    }
+  }, activeId));
+  stream.on("chain_step_token", scoped((ev) => {
+    const m = find(ev.message_id);
+    const step = m?.content.steps?.[ev.slot];
+    if (step && step.status === "pending") step.status = "streaming";
+    if (step) { step.text += ev.delta; triggerMessages(); }
+  }, activeId));
+  stream.on("chain_step_done", scoped((ev) => {
+    const m = find(ev.message_id);
+    const step = m?.content.steps?.[ev.slot];
+    if (step) { step.status = (ev.status as ChainStep["status"]) || "complete"; triggerMessages(); }
+  }, activeId));
+
   const t = i18n.global.t;
 
   stream.on("tool_call", scoped((ev) => {
@@ -294,6 +325,22 @@ export function registerStreamHandlers(
   stream.on("clarify_auto", scoped((ev) => {
     const ns = useNotificationStore();
     ns.push({ title: t("stream.autoConfirmed"), body: `${ev.question} → ${ev.choice}`, kind: "info" });
+  }, activeId));
+
+  stream.on("iteration_warning", scoped((ev) => {
+    const m = find(ev.message_id);
+    if (m) {
+      m.iter_capped = { tool_calls: ev.tool_calls, limit: ev.limit };
+      triggerMessages();
+    }
+  }, activeId));
+
+  stream.on("tool_blocked", scoped((ev) => {
+    const m = find(ev.message_id);
+    if (m) {
+      m.risk_blocked = { tool: ev.tool, title: ev.title };
+      triggerMessages();
+    }
   }, activeId));
 
   stream.on("done", scoped((ev) => {

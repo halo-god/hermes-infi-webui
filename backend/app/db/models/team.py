@@ -11,6 +11,15 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 from app.db.models.mixins import Timestamps, UUIDPrimaryKey
 
+try:
+    from pgvector.sqlalchemy import Vector
+    _PGVECTOR_AVAILABLE = True
+except ImportError:  # pragma: no cover — pgvector is a declared dep but envs
+    # lacking it (e.g. a stripped CI) still import this module for the other
+    # models; Vector-typed columns simply aren't used in such envs.
+    Vector = None  # type: ignore[assignment,misc]
+    _PGVECTOR_AVAILABLE = False
+
 
 class Team(UUIDPrimaryKey, Timestamps, Base):
     __tablename__ = "teams"
@@ -195,3 +204,36 @@ class ProjectActivity(UUIDPrimaryKey, Timestamps, Base):
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
     summary: Mapped[str] = mapped_column(Text, default="")
     meta: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+
+
+class TeamKnowledgeChunk(UUIDPrimaryKey, Timestamps, Base):
+    """One embedding-indexed slice of a TeamKnowledge (or ProjectDoc) item.
+
+    P1-1 RAG: instead of injecting whole documents into the system prompt,
+    _build_knowledge_prompt() embeds the user's query and fetches the top-k
+    most relevant chunks via pgvector cosine search. `embedding` is nullable
+    so indexing can fail per-chunk without losing the text.
+    """
+    __tablename__ = "team_knowledge_chunks"
+    __table_args__ = (
+        # Unique per source: (knowledge_id, chunk_index) for team knowledge,
+        # (project_doc_id, chunk_index) for project docs. Each source type uses
+        # its own unique partial index implicitly via the nullable FK columns.
+        Index("ix_team_knowledge_chunks_knowledge_idx", "knowledge_id", "chunk_index", unique=True),
+    )
+
+    knowledge_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("team_knowledge.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    # P2-file: project docs share this chunk table for RAG indexing.
+    project_doc_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("project_docs.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    # 512 = BAAI/bge-small-zh-v1.5 output dim. See migration 0057 for the
+    # rationale on keeping the dim explicit.
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(512) if _PGVECTOR_AVAILABLE else JSONB,
+        nullable=True,
+    )

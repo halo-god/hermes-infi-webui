@@ -36,6 +36,12 @@ dependencies = [
     # PyPI's `dspy-ai` is now just a compatibility alias for this package;
     # `dspy` is the real, current distribution.
     "dspy>=3.2.1",
+    # Vector retrieval (P1-1 RAG). pgvector gives the SQL Vector type + HNSW
+    # cosine index; sentence-transformers loads the local bge-small-zh model
+    # (~95MB, pulls torch CPU ~200MB on first install). Both optional at
+    # runtime — rag_enabled defaults to False.
+    "pgvector>=0.3",
+    "sentence-transformers>=3.0",
 ]
 
 [project.optional-dependencies]

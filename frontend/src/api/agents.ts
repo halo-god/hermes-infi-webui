@@ -23,6 +23,12 @@ export interface Profile {
   mcp_server_names?: string[];
   is_moa?: boolean;
   moa_target_profile_ids?: string[];
+  max_iterations?: number;
+  staged_prompts?: Record<string, { prompt?: string; mcp_servers?: string[] }> | null;
+  staged_enabled?: boolean;
+  is_chain?: boolean;
+  chain_target_profile_ids?: string[];
+  is_research?: boolean;
 }
 
 export interface ScanResult {
@@ -83,6 +89,12 @@ export interface ProfileUpdate {
   mcp_server_names?: string[];
   is_moa?: boolean;
   moa_target_profile_ids?: string[];
+  max_iterations?: number;
+  staged_prompts?: Record<string, { prompt?: string; mcp_servers?: string[] }> | null;
+  staged_enabled?: boolean;
+  is_chain?: boolean;
+  chain_target_profile_ids?: string[];
+  is_research?: boolean;
 }
 
 export const agentsApi = {

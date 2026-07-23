@@ -41,6 +41,8 @@ const teamProfiles = ref<Profile[]>([]);
 const currentFolderId = ref<string | null>(null);
 const folderTrail = ref<{ id: string; name: string }[]>([]);
 const knowledgeItems = ref<Knowledge[]>([]);
+// P1-1 RAG: per-item chunk counts for the "已索引 N 块" badge. Keyed by item id.
+const knowledgeChunks = ref<Record<string, number>>({});
 const loadingKnowledge = ref(false);
 const movingKnowledgeItem = ref<Knowledge | null>(null);
 
@@ -128,6 +130,17 @@ async function loadKnowledge() {
   } finally {
     loadingKnowledge.value = false;
   }
+  // P1-1 RAG: fetch chunk counts in the background (non-blocking) so the list
+  // renders immediately. Only file items (not folders) have chunks.
+  loadKnowledgeChunks();
+}
+
+async function loadKnowledgeChunks() {
+  const items = knowledgeItems.value.filter((f) => !f.is_folder);
+  const entries = await Promise.all(
+    items.map((f) => teamsApi.knowledgeChunksCount(teamId.value, f.id).then((r) => [f.id, r.count] as const).catch(() => [f.id, 0] as const)),
+  );
+  knowledgeChunks.value = Object.fromEntries(entries);
 }
 watch([tab, currentFolderId], ([t]) => {
   if (t === "knowledge") loadKnowledge();
@@ -652,7 +665,13 @@ async function deleteTeam() {
             <div class="file-ico"><Icon :name="f.is_folder ? 'folder' : 'doc'" /></div>
             <div class="flex-1-min">
               <div class="row-title">{{ f.name }}</div>
-              <div class="file-meta">{{ f.is_folder ? "文件夹" : `${fmtSize(f.size_bytes)} · 由 ${f.uploaded_by_name || "成员"} 上传` }}</div>
+              <div class="file-meta">
+                <template v-if="f.is_folder">文件夹</template>
+                <template v-else>
+                  {{ fmtSize(f.size_bytes) }} · 由 {{ f.uploaded_by_name || "成员" }} 上传
+                  <span v-if="knowledgeChunks[f.id]" style="color:var(--accent);font-weight:500" title="已建立向量索引">· 已索引 {{ knowledgeChunks[f.id] }} 块</span>
+                </template>
+              </div>
             </div>
             <span v-if="!f.is_folder" class="file-kind">{{ f.kind }}</span>
             <div class="row-actions" @click.stop>

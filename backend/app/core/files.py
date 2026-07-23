@@ -344,6 +344,175 @@ class ProcessedUpload:
     size_bytes: int
 
 
+def _decode_text(raw: bytes) -> str:
+    """Decode bytes to text using charset detection (charset-normalizer) so
+    GBK/Big5/Shift-JIS files aren't silently truncated by utf-8 ignore.
+
+    Short Chinese text often misfires as Korean cp949 (overlapping byte
+    ranges); we retry constrained to Chinese encodings when that happens."""
+    try:
+        from charset_normalizer import from_bytes
+        result = from_bytes(raw).best()
+        if result is not None:
+            enc = (result.encoding or "").lower()
+            if enc in ("cp949", "euc-kr", "iso-2022-kr"):
+                cn = from_bytes(raw, cp_isolation=["utf-8", "gb18030", "gbk", "big5"]).best()
+                if cn is not None:
+                    return str(cn)
+            return str(result)
+    except Exception:  # noqa: BLE001 — fall back to utf-8 ignore
+        pass
+    return raw.decode("utf-8", "ignore")
+
+
+def _strip_exif(raw: bytes, ext: str) -> bytes:
+    """P2-file: strip EXIF metadata from images (GPS, camera, timestamps).
+    Returns the original bytes if Pillow is missing or the file isn't an
+    image / can't be processed — never blocks the upload."""
+    if ext.lower().lstrip(".") not in ("jpg", "jpeg", "png", "webp"):
+        return raw
+    try:
+        from io import BytesIO
+        from PIL import Image
+        img = Image.open(BytesIO(raw))
+        # Re-create the image without metadata. Using the pixel data copy
+        # approach (not getdata which is deprecated in Pillow 14).
+        cleaned = Image.new(img.mode, img.size)
+        cleaned.paste(img)
+        buf = BytesIO()
+        # Preserve format; PNG has no EXIF so this is mainly for JPEG.
+        fmt = "PNG" if ext.lower().lstrip(".") == "png" else "JPEG"
+        cleaned.save(buf, format=fmt)
+        return buf.getvalue()
+    except Exception:  # noqa: BLE001
+        return raw
+
+
+def _extract_archive(raw: bytes, ext: str) -> str | None:
+    """P2-file: extract text from a zip/tar/gz archive by recursively
+    processing each member. Returns a single concatenated text with file
+    separators, or None if empty/unreadable.
+
+    Zip-bomb defense: caps total file count and decompressed size (config).
+    Path-traversal defense: rejects members with absolute paths or `..`.
+    Sync — caller wraps in asyncio.to_thread.
+    """
+    from app.config import settings
+    import zipfile
+    import tarfile
+    from io import BytesIO
+
+    ext = ext.lower().lstrip(".")
+    max_files = settings.archive_max_files
+    max_bytes = settings.archive_max_total_mb * 1024 * 1024
+
+    members: list[tuple[str, bytes]] = []
+    total = 0
+
+    def _safe_name(name: str) -> str | None:
+        # Reject absolute paths and traversal — never extract outside the root.
+        if name.startswith("/") or ".." in name.split("/"):
+            return None
+        return name
+
+    try:
+        if ext == "zip":
+            with zipfile.ZipFile(BytesIO(raw)) as zf:
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    name = _safe_name(info.filename)
+                    if not name:
+                        continue
+                    if len(members) >= max_files:
+                        break
+                    data = zf.read(info)
+                    total += len(data)
+                    if total > max_bytes:
+                        break
+                    members.append((name, data))
+        elif ext in ("tar", "gz", "tgz"):
+            mode = "r:gz" if ext in ("gz", "tgz") else "r:"
+            with tarfile.open(fileobj=BytesIO(raw), mode=mode) as tf:
+                for info in tf:
+                    if not info.isfile():
+                        continue
+                    name = _safe_name(info.name)
+                    if not name:
+                        continue
+                    if len(members) >= max_files:
+                        break
+                    f = tf.extractfile(info)
+                    if f is None:
+                        continue
+                    data = f.read()
+                    total += len(data)
+                    if total > max_bytes:
+                        break
+                    members.append((name, data))
+        else:
+            return None
+    except Exception:  # noqa: BLE001 — corrupt/unsupported archive
+        return None
+
+    if not members:
+        return None
+
+    parts: list[str] = []
+    for name, data in members:
+        m_ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+        if m_ext in OFFICE_EXTRACTORS or m_ext == "pdf":
+            text = _extract_doc_content_sync(data, m_ext)
+        elif m_ext in PLAIN_TEXT_EXTS:
+            text = _decode_text(data)
+        else:
+            continue  # skip binaries inside archives
+        if text and text.strip():
+            parts.append(f"=== {name} ===\n{text}")
+    return "\n\n".join(parts) if parts else None
+
+
+def _extract_doc_content_sync(raw: bytes, ext: str) -> str | None:
+    """Sync version of _extract_doc_content for use inside _extract_archive
+    (which is already running in a thread)."""
+    ext = ext.lower().lstrip(".")
+    if ext in OFFICE_EXTRACTORS:
+        return OFFICE_EXTRACTORS[ext](raw)
+    if ext == "pdf":
+        return extract_pdf_text(raw)
+    if ext in PLAIN_TEXT_EXTS:
+        return _decode_text(raw)
+    return None
+
+
+async def _extract_doc_content(
+    raw: bytes, ext: str, *, prefer_docling: bool = True,
+) -> str | None:
+    """Unified document extraction: Docling first (Markdown + tables + OCR),
+    falling back to the legacy per-format extractors.
+
+    Docling handles pdf/docx/pptx/html. xlsx/csv stay on openpyxl (Docling is
+    weak on pure data tables). Returns the extracted text, or a fallback error
+    placeholder for Office, or None for PDF failures."""
+    ext = ext.lower().lstrip(".")
+    # Docling path: only for formats it handles well.
+    if prefer_docling:
+        from app.core.docling_converter import is_supported, convert_bytes_to_markdown_sync
+        if is_supported(ext):
+            md = await asyncio.to_thread(convert_bytes_to_markdown_sync, raw, ext)
+            if md:
+                return md
+            # else: Docling failed or unavailable — fall through to legacy.
+    # Legacy extractors.
+    if ext in OFFICE_EXTRACTORS:
+        return await asyncio.to_thread(OFFICE_EXTRACTORS[ext], raw) or "<p><em>(无法解析文档内容)</em></p>"
+    if ext == "pdf":
+        return await asyncio.to_thread(extract_pdf_text, raw)
+    if ext in PLAIN_TEXT_EXTS:
+        return _decode_text(raw)
+    return None
+
+
 async def process_upload(
     raw: bytes,
     ext: str,
@@ -375,12 +544,27 @@ async def process_upload(
     """
     from app.config import settings
     from app.core import object_storage
+    from app.core.file_validation import validate_upload
 
     ext = ext.lower()
+    # P2-security: cross-check the declared extension against magic bytes so a
+    # renamed executable can't slip through. No-op if python-magic is missing.
+    validate_upload(raw, ext)
     ctype = content_type or "application/octet-stream"
     threshold_bytes = settings.file_offload_threshold_kb * 1024
     storage_key: str | None = None
     content: str | None = None
+
+    # P2-file: strip EXIF from images (privacy: GPS/camera metadata).
+    if settings.strip_exif_enabled and ext in ("jpg", "jpeg", "png", "webp"):
+        raw = await asyncio.to_thread(_strip_exif, raw, ext)
+
+    # P2-file: archives (zip/tar/gz) — extract and concatenate member text.
+    if ext in ("zip", "tar", "gz", "tgz"):
+        storage_key = f"{storage_key_prefix}/{uuid.uuid4().hex}/{name}"
+        await asyncio.to_thread(object_storage.put, storage_key, raw, ctype)
+        content = await asyncio.to_thread(_extract_archive, raw, ext)
+        return ProcessedUpload(content=content, storage_key=storage_key, size_bytes=len(raw))
 
     if ext in OFFICE_EXTRACTORS:
         storage_key = f"{storage_key_prefix}/{uuid.uuid4().hex}/{name}"
@@ -390,22 +574,22 @@ async def process_upload(
             raise HTTPException(
                 status_code=503, detail="文件预览服务不可用，请检查对象存储配置"
             ) from exc
-        # Office extraction (zipfile + XML parse + base64 images) is CPU-bound;
-        # offload to a thread so it doesn't block the event loop and stall
-        # concurrent SSE token streams.
-        content = await asyncio.to_thread(OFFICE_EXTRACTORS[ext], raw) or "<p><em>(无法解析文档内容)</em></p>"
+        # P2-file: prefer Docling (Markdown, tables, OCR) over the legacy
+        # per-format HTML extractors. Falls back transparently if Docling is
+        # unavailable or the conversion fails.
+        content = await _extract_doc_content(raw, ext, prefer_docling=True)
     elif len(raw) > threshold_bytes or settings.storage_backend == "minio":
         storage_key = f"{storage_key_prefix}/{uuid.uuid4().hex}/{name}"
         await asyncio.to_thread(object_storage.put, storage_key, raw, ctype)
         if ext == "pdf":
-            content = await asyncio.to_thread(extract_pdf_text, raw)
+            content = await _extract_doc_content(raw, ext, prefer_docling=True)
         elif ext in PLAIN_TEXT_EXTS:
-            content = raw.decode("utf-8", "ignore")
+            content = _decode_text(raw)
     else:
         if ext in PLAIN_TEXT_EXTS:
-            content = raw.decode("utf-8", "ignore")
+            content = _decode_text(raw)
         elif ext == "pdf":
-            content = await asyncio.to_thread(extract_pdf_text, raw)
+            content = await _extract_doc_content(raw, ext, prefer_docling=True)
         else:
             content = base64.b64encode(raw).decode("ascii")
 

@@ -14,6 +14,7 @@ import { agentsApi, profilesApi, type Profile, type ProfileCreate } from "@/api/
 import { teamsApi } from "@/api/teams";
 import { logsApi, type LogEntry } from "@/api/logs";
 import { skillEvolutionApi, type AdminSkill, type DatasetPreview, type SkillProposal } from "@/api/skillEvolution";
+import { profileEvolutionApi, type ProfileProposal } from "@/api/profileEvolution";
 import { colorDiff, computeLineDiff } from "@/utils/diff";
 import { useAuthStore } from "@/stores/auth";
 import { useBrandingStore } from "@/stores/branding";
@@ -37,7 +38,7 @@ const ns = useNotificationStore();
 const isSuperAdmin = computed(() => authStore.user?.role === "super_admin");
 const { queryPresence, getStatus } = usePresence();
 
-type AdminTab = "overview" | "users" | "roles" | "identity" | "audit" | "assistants" | "system" | "mcp" | "performance" | "usage" | "skill-evolution";
+type AdminTab = "overview" | "users" | "roles" | "identity" | "audit" | "assistants" | "system" | "mcp" | "performance" | "usage" | "skill-evolution" | "profile-evolution";
 const tab = ref<AdminTab>("overview");
 const stats = ref<AdminStats | null>(null);
 const users = ref<User[]>([]);
@@ -151,11 +152,11 @@ const createError = ref("");
 const showCreate = ref(false);
 
 // ── MCP Servers ──
-interface McpServer { name: string; transport: string; command: string | null; url: string | null; env: Record<string, string> | null }
+interface McpServer { name: string; transport: string; command: string | null; url: string | null; env: Record<string, string> | null; risk_level: string }
 const mcpServers = ref<McpServer[]>([]);
 const mcpStatuses = ref<Record<string, { reachable: boolean; status: string }>>({});
 const mcpLoading = ref(false);
-const mcpForm = reactive({ name: "", transport: "stdio", command: "", url: "", envStr: "" });
+const mcpForm = reactive({ name: "", transport: "stdio", command: "", url: "", envStr: "", risk_level: "read" });
 const mcpSaving = ref(false);
 const mcpError = ref("");
 const showMcpForm = ref(false);
@@ -301,6 +302,54 @@ async function evoReview(proposal: SkillProposal, status: "approved" | "rejected
     evoReviewing.value.delete(proposal.id);
   }
 }
+
+// ── P2-4 Profile prompt evolution ──
+const pevoProposals = ref<ProfileProposal[]>([]);
+const pevoLoading = ref(false);
+const pevoStatus = ref<Record<string, { status: string; detail?: string | null }>>({});
+const pevoReviewNotes = reactive<Record<string, string>>({});
+const pevoReviewing = reactive<Set<string>>(new Set());
+const pevoFilter = ref<"pending" | "approved" | "rejected">("pending");
+
+async function loadPevoProposals() {
+  pevoLoading.value = true;
+  try {
+    pevoProposals.value = await profileEvolutionApi.listProposals({ status: pevoFilter.value });
+  } catch {
+    pevoProposals.value = [];
+  } finally {
+    pevoLoading.value = false;
+  }
+}
+async function pevoTrigger(profileId: string) {
+  try {
+    await profileEvolutionApi.triggerEvolve(profileId);
+    ns.toast("已提交演化任务");
+    setTimeout(() => pevoPoll(profileId), 1500);
+  } catch (e: any) {
+    ns.toast(e?.response?.data?.detail || e?.message || "提交失败", "error");
+  }
+}
+async function pevoPoll(profileId: string) {
+  try {
+    const st = await profileEvolutionApi.evolveStatus(profileId);
+    pevoStatus.value[profileId] = st;
+    if (st.status === "running") setTimeout(() => pevoPoll(profileId), 2000);
+    else if (st.status === "done") await loadPevoProposals();
+  } catch { /* ignore */ }
+}
+async function pevoReview(proposal: ProfileProposal, status: "approved" | "rejected") {
+  pevoReviewing.add(proposal.id);
+  try {
+    await profileEvolutionApi.reviewProposal(proposal.id, status, pevoReviewNotes[proposal.id] || undefined);
+    ns.toast(status === "approved" ? "已批准，助手提示词已更新" : "已驳回");
+    await loadPevoProposals();
+  } catch (e: any) {
+    ns.toast(e?.response?.data?.detail || "操作失败", "error");
+  } finally {
+    pevoReviewing.delete(proposal.id);
+  }
+}
 async function checkMcpStatus(name: string) {
   try {
     const r = await http.get(`/admin/mcp-servers/${name}/status`);
@@ -324,9 +373,10 @@ async function addMcpServer() {
       command: mcpForm.transport === "stdio" ? mcpForm.command || null : null,
       url: mcpForm.transport === "http" ? mcpForm.url || null : null,
       env,
+      risk_level: mcpForm.risk_level,
     });
     showMcpForm.value = false;
-    Object.assign(mcpForm, { name: "", transport: "stdio", command: "", url: "", envStr: "" });
+    Object.assign(mcpForm, { name: "", transport: "stdio", command: "", url: "", envStr: "", risk_level: "read" });
     await loadMcpServers();
   } catch (e: any) {
     mcpError.value = e?.response?.data?.detail || "添加失败";
@@ -343,12 +393,14 @@ watch(tab, (t) => {
   if (t === "performance") loadPerformance();
   if (t === "usage") loadUsage();
   if (t === "skill-evolution") { loadEvoSkills(); loadEvoProposals(); }
+  if (t === "profile-evolution") loadPevoProposals();
 });
 watch([usagePeriod, usageBreakdown], () => { if (tab.value === "usage") loadUsage(); });
 watch(logCategory, (c) => {
   if (c === "runtime" && !logEntries.value.length) loadLogs();
 });
 watch(evoStatusFilter, loadEvoProposals);
+watch(pevoFilter, loadPevoProposals);
 
 onMounted(load);
 onUnmounted(() => {
@@ -672,6 +724,7 @@ const TABS = computed(() => {
   // Super-admin only: the sole gate that lets an automated, real-money
   // optimization pipeline's output ever take effect — hidden from plain admins.
   if (isSuperAdmin.value) base.push(["skill-evolution", "技能演化"]);
+  if (isSuperAdmin.value) base.push(["profile-evolution", "助手提示词演化"]);
   return base;
 });
 
@@ -685,12 +738,14 @@ const editingProfileId = ref<string | null>(null);
 const profileForm = reactive<ProfileCreate & {
   knowledge_ids: string[]; knowledge_folder_ids: string[]; knowledge_team_ids: string[];
   mcp_server_names: string[]; is_moa: boolean; moa_target_profile_ids: string[];
+  is_chain: boolean; chain_target_profile_ids: string[]; is_research: boolean;
 }>({
   name: "", handle: "", scope: "global", color: "#b8852a",
   icon: "sparkle", desc: "", default_model: "hermes-4", team_id: null,
   system_prompt: null, skills: [], featured: false,
   knowledge_ids: [], knowledge_folder_ids: [], knowledge_team_ids: [], mcp_server_names: [],
   is_moa: false, moa_target_profile_ids: [],
+  is_chain: false, chain_target_profile_ids: [], is_research: false,
 });
 // Selectable knowledge entries (team knowledge, labeled by team) for prompt injection.
 const knowledgeOptions = ref<{ id: string; label: string }[]>([]);
@@ -736,6 +791,12 @@ function toggleMcpServer(name: string) {
 }
 function toggleMoaTarget(id: string) {
   const arr = profileForm.moa_target_profile_ids;
+  const i = arr.indexOf(id);
+  if (i >= 0) arr.splice(i, 1);
+  else arr.push(id);
+}
+function toggleChainTarget(id: string) {
+  const arr = profileForm.chain_target_profile_ids;
   const i = arr.indexOf(id);
   if (i >= 0) arr.splice(i, 1);
   else arr.push(id);
@@ -799,6 +860,7 @@ function openCreateProfile() {
     system_prompt: null, skills: [], featured: false,
     knowledge_ids: [], knowledge_folder_ids: [], knowledge_team_ids: [], mcp_server_names: [],
     is_moa: false, moa_target_profile_ids: [],
+    is_chain: false, chain_target_profile_ids: [], is_research: false,
   });
   skillInput.value = "";
   profileError.value = "";
@@ -815,6 +877,7 @@ function openEditProfile(p: Profile) {
     knowledge_ids: [...(p.knowledge_ids || [])], knowledge_folder_ids: [...(p.knowledge_folder_ids || [])],
     knowledge_team_ids: [...(p.knowledge_team_ids || [])], mcp_server_names: [...(p.mcp_server_names || [])],
     is_moa: p.is_moa ?? false, moa_target_profile_ids: [...(p.moa_target_profile_ids || [])],
+    is_chain: (p as any).is_chain ?? false, chain_target_profile_ids: [...((p as any).chain_target_profile_ids || [])], is_research: (p as any).is_research ?? false,
   });
   skillInput.value = "";
   profileError.value = "";
@@ -847,6 +910,7 @@ async function saveProfile() {
         knowledge_team_ids: profileForm.knowledge_team_ids,
         mcp_server_names: profileForm.mcp_server_names,
         is_moa: profileForm.is_moa, moa_target_profile_ids: profileForm.moa_target_profile_ids,
+        is_chain: profileForm.is_chain, chain_target_profile_ids: profileForm.chain_target_profile_ids, is_research: profileForm.is_research,
       });
     } else {
       await profilesApi.create({ ...profileForm });
@@ -1701,6 +1765,26 @@ async function confirmImport() {
               </label>
             </div>
           </label>
+          <!-- P2-1 chain handoff: sequential relay A→B→C -->
+          <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:12.5px;color:var(--ink-mute);cursor:pointer">
+            <input type="checkbox" v-model="profileForm.is_chain" style="width:14px;height:14px;cursor:pointer" />
+            链式接力（选中该助手时，按顺序向下方助手接力提问，每环结论传给下一环）
+          </label>
+          <label v-if="profileForm.is_chain" class="text-mute-sm" style="display:block;margin-top:8px">
+            接力顺序（勾选顺序即接力顺序，至少 2 个）
+            <div v-if="profiles.filter((p) => p.id !== editingProfileId).length === 0" style="margin-top:6px;font-size:12px;color:var(--ink-mute)">暂无其他可选助手。</div>
+            <div v-else style="margin-top:6px;max-height:160px;overflow-y:auto;border:1px solid var(--rule);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:4px">
+              <label v-for="p in profiles.filter((p) => p.id !== editingProfileId)" :key="p.id" style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;color:var(--ink)">
+                <input type="checkbox" :checked="profileForm.chain_target_profile_ids.includes(p.id)" @change="toggleChainTarget(p.id)" style="width:13px;height:13px;cursor:pointer" />
+                {{ p.name }}
+              </label>
+            </div>
+          </label>
+          <!-- P2-2 research mode: roundtable with cascade termination -->
+          <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:12.5px;color:var(--ink-mute);cursor:pointer">
+            <input type="checkbox" v-model="profileForm.is_research" style="width:14px;height:14px;cursor:pointer" />
+            研究模式（多助手并行，首个给出有效答案后其余自动停止，不综合）
+          </label>
           <!-- featured toggle -->
           <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:12.5px;color:var(--ink-mute);cursor:pointer">
             <input type="checkbox" v-model="profileForm.featured" style="width:14px;height:14px;cursor:pointer" />
@@ -1738,6 +1822,7 @@ async function confirmImport() {
             <span style="font-size:10.5px;color:var(--ink-mute);font-family:var(--font-mono)">{{ p.default_model }}</span>
             <button class="icon-btn" title="克隆" @click="cloneProfile(p)"><Icon name="copy" :size="13" /></button>
             <button class="icon-btn" title="导出" @click="exportProfile(p)"><Icon name="download" :size="13" /></button>
+            <button v-if="isSuperAdmin" class="icon-btn" title="演化提示词（GEPA）" @click="pevoTrigger(p.id)"><Icon name="sparkle" :size="13" /></button>
             <button class="icon-btn" title="编辑" @click="openEditProfile(p)"><Icon name="edit" :size="13" /></button>
             <button class="icon-btn" title="删除" style="color:var(--danger)" @click="deleteProfileItem(p)"><Icon name="close" :size="13" /></button>
           </div>
@@ -1773,6 +1858,12 @@ async function confirmImport() {
             <div class="text-mute">环境变量</div>
             <textarea class="cfg-input" style="min-height: 64px; padding-top: 8px; resize: vertical"
               v-model="mcpForm.envStr" placeholder="每行一个，格式：KEY=VALUE"></textarea>
+            <div class="text-mute">风险等级</div>
+            <select class="cfg-input" style="height: 34px" v-model="mcpForm.risk_level" title="高危工具调用时会拦截并要求用户授权">
+              <option value="read">read（只读，不拦截）</option>
+              <option value="write">write（写入，首次需授权）</option>
+              <option value="destructive">destructive（破坏性，首次需授权）</option>
+            </select>
           </div>
           <div v-if="mcpError" style="padding: 0 16px 12px; font-size: 12.5px; color: var(--danger)">{{ mcpError }}</div>
           <div style="padding: 0 16px 16px; display: flex; gap: 8px">
@@ -1801,6 +1892,7 @@ async function confirmImport() {
                 </div>
                 <div style="font-size: 11.5px; color: var(--ink-mute); margin-top: 3px; display: flex; gap: 10px; flex-wrap: wrap">
                   <span class="role-pill" style="font-size: 10px; padding: 1px 6px">{{ s.transport }}</span>
+                  <span class="role-pill" style="font-size: 10px; padding: 1px 6px" :style="{ color: s.risk_level === 'destructive' ? '#c0392b' : s.risk_level === 'write' ? '#b8852a' : undefined, borderColor: 'currentColor' }">{{ s.risk_level || 'read' }}</span>
                   <span v-if="s.command" style="font-family: monospace">{{ s.command }}</span>
                   <span v-else-if="s.url">{{ s.url }}</span>
                 </div>
@@ -2132,9 +2224,46 @@ async function confirmImport() {
           </div>
         </div>
       </template>
-    </div>
 
-    <!-- Import preview modal -->
+      <!-- P2-4 Profile prompt evolution -->
+      <template v-else-if="tab === 'profile-evolution'">
+        <div style="margin-bottom: 14px"><div class="heading-serif">助手提示词演化</div><div class="text-mute-sm" style="margin-top:2px">基于真实对话样本，用 GEPA 优化助手的 system_prompt，产出待审批的提案。审批通过后写回助手人设。</div></div>
+        <div class="section-card">
+          <div class="section-body flush">
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+              <select class="cfg-input" style="height:32px;width:auto" v-model="pevoFilter" @change="loadPevoProposals">
+                <option value="pending">待审批</option>
+                <option value="approved">已批准</option>
+                <option value="rejected">已驳回</option>
+              </select>
+              <button class="btn" style="font-size: 12px" @click="loadPevoProposals" :disabled="pevoLoading">刷新</button>
+              <span class="text-mute-sm" style="margin-left:auto">{{ pevoProposals.length }} 条提案</span>
+            </div>
+            <div v-if="pevoLoading" style="padding:24px;text-align:center;color:var(--ink-mute);font-size:13px">加载中…</div>
+            <div v-else-if="!pevoProposals.length" style="padding:24px;text-align:center;color:var(--ink-mute);font-size:13px">暂无提案。可在「助手管理」中选择一个助手触发演化。</div>
+            <div v-for="p in pevoProposals" :key="p.id" class="row-item" style="padding:14px 16px;flex-direction:column;align-items:stretch;gap:8px">
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                <span class="role-pill" :style="{ fontSize: '10px' }">{{ p.status }}</span>
+                <span style="font-size:12px;color:var(--ink-mute)">助手 {{ p.profile_id.slice(0, 8) }}</span>
+                <span style="font-size:12px;color:var(--ink-mute)">分数 {{ p.eval_score_before.toFixed(2) }} → {{ p.eval_score_after.toFixed(2) }}（+{{ (p.eval_score_after - p.eval_score_before).toFixed(2) }}）</span>
+                <span style="font-size:12px;color:var(--ink-mute)">改动 {{ (p.diff_ratio * 100).toFixed(0) }}%</span>
+                <span style="font-size:11px;color:var(--ink-faint);margin-left:auto">{{ new Date(p.created_at).toLocaleString() }}</span>
+              </div>
+              <div v-if="p.rationale" style="font-size:12px;color:var(--ink-mute)">{{ p.rationale }}</div>
+              <details style="font-size:12px">
+                <summary style="cursor:pointer;color:var(--accent)">查看候选提示词</summary>
+                <pre style="margin-top:6px;white-space:pre-wrap;background:var(--rule);padding:8px;border-radius:6px;max-height:240px;overflow-y:auto;font-size:11.5px">{{ p.proposed_prompt }}</pre>
+              </details>
+              <div v-if="p.status === 'pending'" style="display:flex;gap:8px;align-items:center">
+                <input class="cfg-input" style="flex:1;font-size:12px" v-model="pevoReviewNotes[p.id]" placeholder="审批备注（可选）" />
+                <button class="btn primary" style="font-size: 12px" :disabled="pevoReviewing.has(p.id)" @click="pevoReview(p, 'approved')">批准</button>
+                <button class="btn text-danger" style="font-size: 12px" :disabled="pevoReviewing.has(p.id)" @click="pevoReview(p, 'rejected')">驳回</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
     <Teleport to="body">
       <div v-if="importPreview.visible" class="ctx-menu-scrim" style="z-index: 9999" @click="importPreview.visible = false">
         <div class="import-preview" @click.stop>

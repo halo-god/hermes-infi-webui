@@ -374,6 +374,10 @@ class McpServerIn(_BaseModel):
     command: str | None = None
     url: str | None = None
     env: dict | None = None
+    # P2-3: risk classification drives runner-side confirmation for high-risk
+    # tools. "read" = no prompt; "write" = prompt once per conversation;
+    # "destructive" = prompt once per conversation (cached after allow).
+    risk_level: str = "read"
 
 
 class McpServerOut(_BaseModel):
@@ -382,13 +386,15 @@ class McpServerOut(_BaseModel):
     command: str | None
     url: str | None
     env: dict | None
+    risk_level: str = "read"
 
 
 @router.get("/mcp-servers", response_model=list[McpServerOut])
 async def list_mcp_servers(db: AsyncSession = Depends(get_db)):
     settings = await settings_service.get(db)
     servers: list[dict] = (settings.data or {}).get("mcp_servers", [])
-    return [McpServerOut(**s) for s in servers]
+    # Older entries may lack risk_level — default to "read" for safety.
+    return [McpServerOut(**{**{"risk_level": "read"}, **s}) for s in servers]
 
 
 @router.post("/mcp-servers", response_model=McpServerOut, status_code=201)

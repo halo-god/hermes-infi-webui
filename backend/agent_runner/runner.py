@@ -504,6 +504,26 @@ class Runner:
             from agent_runner.runner_skill_evolution import handle_skill_evolution
             await handle_skill_evolution(task, self.agents)
             return
+        if task.get("type") == "profile_evolution":
+            from agent_runner.runner_profile_evolution import handle_profile_evolution
+            await handle_profile_evolution(task, self.agents)
+            return
+        if task.get("type") == "roundtable":
+            from agent_runner.runner_roundtable import handle_roundtable
+            await handle_roundtable(task, self.agents)
+            return
+        if task.get("type") == "chain":
+            from agent_runner.runner_chain import handle_chain
+            await handle_chain(task, self.agents)
+            return
+        if task.get("type") == "conversation_summary":
+            # P1-2: background summarisation. Detached like subagents so a slow
+            # LLM call never blocks the chat concurrency slots.
+            from agent_runner.runner_conversation_summary import handle_conversation_summary
+            t = asyncio.create_task(handle_conversation_summary(task))
+            self._bg_tasks.add(t)
+            t.add_done_callback(self._bg_tasks.discard)
+            return
         if task.get("type") in ("subagent_spawn", "subagent_send"):
             # Fire-and-forget: a persistent subagent can run far longer than a
             # normal chat turn, so it must not hold a MAX_CONCURRENT semaphore
@@ -551,7 +571,13 @@ class Runner:
         # Use profile-specific session namespace so that different agents in a
         # group chat don't share the same ACP history.
         profile_id = task.get("profile_id") or ""
-        session_namespace = str(profile_id) if profile_id else ""
+        # P1-3 staged: each stage gets its own session namespace + Redis key,
+        # because the tool subset (mcpServers) differs per stage and ACP only
+        # accepts mcpServers at session creation. Switching stages thus forces
+        # a fresh session (the pool also respawns when mcp_servers change).
+        stage = task.get("stage") or ""
+        ns_parts = [p for p in (profile_id, stage) if p]
+        session_namespace = ":".join(ns_parts)
 
         # If a profile-specific session exists in Redis, use it instead of the
         # conversation-level one so that group-chat agents are isolated.
@@ -560,7 +586,8 @@ class Runner:
         # and hermes CLI will refuse with stop_reason=refusal).
         if profile_id:
             redis = R.get_redis()
-            key = f"acp_session:{conversation_id}:{profile_id}"
+            # Key mirrors session_namespace so stages stay isolated.
+            key = f"acp_session:{conversation_id}:{session_namespace}" if session_namespace else f"acp_session:{conversation_id}:{profile_id}"
             try:
                 sid = await redis.get(key)
                 if sid:
@@ -572,8 +599,19 @@ class Runner:
             except Exception:
                 pass
 
-        acc = {"text": "", "cancelled": False, "current_msg_id": message_id, "tool_since_split": False, "thinking": "", "plan": None, "files": [], "total_tokens": 0, "usage": None}
+        acc = {"text": "", "cancelled": False, "current_msg_id": message_id, "tool_since_split": False, "thinking": "", "plan": None, "files": [], "total_tokens": 0, "usage": None, "tool_calls": 0, "iter_capped": False}
         steps: list[dict] = []
+        # Circuit breaker: cancel the ACP session once a turn emits this many
+        # tool_call events. Guards against runaway ReAct loops. 0 = disabled.
+        max_iterations = task.get("max_iterations") or 0
+        # Late-bound ref so on_update (defined before `client` is assigned) can
+        # reach the ACPClient to fire session/cancel when the cap is hit.
+        client_ref: dict = {"client": None}
+        # P2-3 tool risk: names of MCP servers flagged write/destructive in the
+        # admin catalog. A tool_call whose title contains such a name triggers
+        # a one-time confirmation (cached per-conversation in Redis).
+        high_risk_names = await self._load_high_risk_server_names()
+        risk_checked: set[str] = set()  # names already authorised this turn
 
         async def on_update(update: dict) -> None:
             kind = update.get("sessionUpdate")
@@ -588,6 +626,7 @@ class Runner:
                     )
             elif kind == "tool_call":
                 acc["tool_since_split"] = True
+                acc["tool_calls"] = int(acc.get("tool_calls", 0)) + 1
                 step = {"title": update.get("title"), "status": update.get("status")}
                 steps.append(step)
                 await R.publish_event(
@@ -599,6 +638,66 @@ class Runner:
                         "status": step["status"],
                     },
                 )
+                # Circuit breaker: once a turn crosses the per-profile cap, mark
+                # the turn cancelled and fire session/cancel so the ACP loop
+                # unwinds instead of burning tokens until the 900s hard timeout.
+                if (
+                    max_iterations
+                    and not acc["iter_capped"]
+                    and acc["tool_calls"] >= max_iterations
+                ):
+                    acc["iter_capped"] = True
+                    acc["cancelled"] = True
+                    logger.warning(
+                        "Iteration cap hit: %s tool_calls >= %s for conv=%s — cancelling session",
+                        acc["tool_calls"], max_iterations, conversation_id[:8],
+                    )
+                    c = client_ref["client"]
+                    if c is not None:
+                        try:
+                            await c.cancel()
+                        except Exception:
+                            logger.debug("session/cancel failed during iteration cap", exc_info=True)
+                    await R.publish_event(
+                        conversation_id,
+                        {
+                            "type": "iteration_warning",
+                            "message_id": acc["current_msg_id"],
+                            "tool_calls": acc["tool_calls"],
+                            "limit": max_iterations,
+                        },
+                    )
+                # P2-3 tool risk guard: a tool_call whose title references a
+                # high-risk MCP server (write/destructive) and hasn't been
+                # authorised for this conversation yet blocks the turn. ACP
+                # can't intercept a single tool pre-execution, so we cancel the
+                # session to stop further actions and surface the block to the
+                # user — they can re-run after authorising via the UI.
+                if high_risk_names and not acc["cancelled"]:
+                    title = (step.get("title") or "")
+                    hit = next((n for n in high_risk_names if n and n in title), None)
+                    if hit and hit not in risk_checked:
+                        authorised = await self._is_tool_authorised(conversation_id, hit)
+                        if authorised:
+                            risk_checked.add(hit)
+                        else:
+                            acc["cancelled"] = True
+                            acc["risk_blocked"] = hit
+                            c = client_ref["client"]
+                            if c is not None:
+                                try:
+                                    await c.cancel()
+                                except Exception:
+                                    logger.debug("session/cancel failed during risk block", exc_info=True)
+                            await R.publish_event(
+                                conversation_id,
+                                {
+                                    "type": "tool_blocked",
+                                    "message_id": acc["current_msg_id"],
+                                    "tool": hit,
+                                    "title": title,
+                                },
+                            )
             elif kind == "agent_thought":
                 delta = (update.get("content") or {}).get("text", "") or update.get("delta", "")
                 if delta:
@@ -773,6 +872,9 @@ class Runner:
                 mcp_servers=mcp_servers,
                 session_namespace=session_namespace,
             )
+            # Publish the client into the late-bound ref so on_update can fire
+            # session/cancel when the iteration cap is reached.
+            client_ref["client"] = client
             logger.info(
                 "handle_single: conv=%s msg=%s ns=%s client_pid=%s new_session=%s",
                 conversation_id[:8], message_id[:8], session_namespace,
@@ -797,7 +899,7 @@ class Runner:
             await watcher.scan_existing()
             self._watchers[watcher_key] = watcher
             if new_session:
-                await self._set_session_id(conversation_id, new_session, profile_id=profile_id)
+                await self._set_session_id(conversation_id, new_session, profile_id=profile_id, stage=stage)
                 # No manual approval UI anymore — conversations without an explicit
                 # mode (the vast majority) default to full-auto (dont_ask) rather
                 # than the ACP agent's own default (typically "ask").
@@ -892,6 +994,12 @@ class Runner:
         if status == "complete" and matched_skill_ids:
             await self._record_skill_firings(
                 conversation_id, acc["current_msg_id"], matched_skill_ids, skill_firing_excerpt,
+            )
+        # P2-4: record profile firings for prompt evolution. Only complete
+        # turns with a bound profile_id contribute to the eval corpus.
+        if status == "complete" and profile_id:
+            await self._record_profile_firing(
+                conversation_id, acc["current_msg_id"], profile_id, skill_firing_excerpt,
             )
         await R.clear_cancel(conversation_id)
         await R.publish_event(
@@ -1078,19 +1186,69 @@ class Runner:
                 ))
             await db.commit()
 
-    async def _set_session_id(self, conversation_id: str, session_id: str, profile_id: str = "") -> None:
+    async def _record_profile_firing(
+        self, conversation_id: str, message_id: str, profile_id: str, trigger_excerpt: str,
+    ) -> None:
+        """P2-4: feeds the profile-prompt eval-dataset builder. Records each
+        complete turn attributed to a Profile."""
+        from app.db.models.profile_evolution import ProfileFiring
+        try:
+            profile_uuid = uuid.UUID(profile_id)
+        except (ValueError, TypeError):
+            return
+        async with async_session_maker() as db:
+            db.add(ProfileFiring(
+                profile_id=profile_uuid,
+                message_id=uuid.UUID(message_id),
+                conversation_id=uuid.UUID(conversation_id),
+                trigger_query_excerpt=trigger_excerpt,
+            ))
+            await db.commit()
+
+    async def _set_session_id(
+        self, conversation_id: str, session_id: str, profile_id: str = "", stage: str = "",
+    ) -> None:
         async with async_session_maker() as db:
             convo = await db.get(Conversation, uuid.UUID(conversation_id))
             if convo:
                 if profile_id:
                     # Profile-specific session → Redis so different agents in a
                     # group chat don't overwrite each other's ACP session.
+                    # P1-3: the key includes the stage so each stage's session
+                    # (with its own tool subset) is stored separately.
                     redis = R.get_redis()
-                    key = f"acp_session:{conversation_id}:{profile_id}"
+                    suffix = f":{stage}" if stage else ""
+                    key = f"acp_session:{conversation_id}:{profile_id}{suffix}"
                     await redis.set(key, session_id, ex=3600 * 24 * 7)  # 7d TTL
                 else:
                     convo.acp_session_id = session_id
                 await db.commit()
+
+    async def _load_high_risk_server_names(self) -> set[str]:
+        """P2-3: names of MCP servers flagged write/destructive in the admin
+        catalog. Read once per turn (cheap single-row system_settings lookup)."""
+        try:
+            async with async_session_maker() as db:
+                from app.services import settings_service
+                row = await settings_service.get(db)
+                servers = (row.data or {}).get("mcp_servers", []) if row else []
+                return {
+                    s["name"] for s in servers
+                    if s.get("risk_level") in ("write", "destructive") and s.get("name")
+                }
+        except Exception:  # noqa: BLE001 — never break a turn over the risk map
+            logger.debug("failed to load high-risk server names", exc_info=True)
+            return set()
+
+    async def _is_tool_authorised(self, conversation_id: str, tool_name: str) -> bool:
+        """P2-3: check the per-conversation authorisation cache. Set by the
+        authorise-tool API after the user confirms a high-risk tool once."""
+        try:
+            redis = R.get_redis()
+            val = await redis.get(f"tool_auth:{conversation_id}:{tool_name}")
+            return val is not None
+        except Exception:
+            return False
 
     async def _update_conv_title(self, conversation_id: str, title: str) -> None:
         from sqlalchemy import update as sa_upd

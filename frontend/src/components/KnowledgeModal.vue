@@ -16,6 +16,7 @@ const form = ref({ name: "", kind: "pdf", size_bytes: 0 });
 const saving = ref(false);
 const selectedFile = ref<File | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
+const uploadProgress = ref(0);
 
 const KIND_MAP: Record<string, string> = {
   pdf: "pdf", doc: "doc", docx: "doc", txt: "txt", csv: "csv",
@@ -54,7 +55,10 @@ async function save() {
         size_bytes: form.value.size_bytes,
       });
     } else if (selectedFile.value) {
-      await teamsApi.uploadKnowledge(props.teamId, selectedFile.value, props.folderId);
+      uploadProgress.value = 0;
+      await teamsApi.uploadKnowledge(props.teamId, selectedFile.value, props.folderId, (pct) => {
+        uploadProgress.value = pct;
+      });
     } else {
       await teamsApi.addKnowledge(props.teamId, {
         name: form.value.name.trim(),
@@ -88,6 +92,12 @@ async function save() {
         </button>
         <div style="font-size:11.5px;color:var(--ink-mute);margin-top:4px;text-align:center">
           支持 PDF · Word · TXT · CSV · Markdown · JSON · HTML · Excel
+        </div>
+        <div v-if="saving && uploadProgress > 0 && uploadProgress < 100" style="margin-top:8px">
+          <div style="height:4px;background:var(--rule);border-radius:2px;overflow:hidden">
+            <div :style="{ width: uploadProgress + '%', height: '100%', background: 'var(--accent)', transition: 'width 0.2s' }"></div>
+          </div>
+          <div style="font-size:11px;color:var(--ink-mute);text-align:center;margin-top:2px">上传中 {{ uploadProgress }}%</div>
         </div>
       </div>
 

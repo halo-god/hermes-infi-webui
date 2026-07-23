@@ -17,7 +17,7 @@ from app.config import settings
 from app.core import redis as redis_core
 from app.core.files import confine_to_dir, safe_relative_path, OFFICE_EXTRACTORS
 from app.db.models.agent import Profile
-from app.db.models.conversation import Conversation, GroupMember, Message
+from app.db.models.conversation import Conversation, ConversationSummary, GroupMember, Message
 from app.db.models.workspace import WorkspaceFile, WorkspaceFileVersion
 
 
@@ -544,16 +544,60 @@ def _mcp_server_entry(server: dict) -> dict | None:
     return {"name": name, "type": "sse", "url": url, "headers": server.get("env") or {}}
 
 
-async def _resolve_mcp_servers(db: AsyncSession, profile: Profile | None) -> list[dict]:
+# P1-3: ordered stage keys. A staged conversation flows clarify → implement →
+# review, but users can jump manually via the stage API/indicator.
+_STAGED_ORDER = ("clarify", "implement", "review")
+_STAGED_DEFAULT = "clarify"
+
+
+def _resolve_staged_profile(
+    profile: Profile, stage: str | None,
+) -> tuple[str | None, set[str] | None]:
+    """P1-3: pick the prompt + tool subset for the conversation's current stage.
+
+    Returns (prompt_override, allowed_tool_names):
+      - prompt_override: the stage's prompt, or None to inherit profile.system_prompt.
+      - allowed_tool_names: the stage's tool subset, or None to inherit the full set.
+
+    When staged_enabled is off, or the resolved stage has no config entry,
+    returns (None, None) so callers fall through to the single-prompt path.
+    """
+    if not getattr(profile, "staged_enabled", False):
+        return None, None
+    staged = getattr(profile, "staged_prompts", None) or {}
+    if not isinstance(staged, dict) or not staged:
+        return None, None
+    key = stage or _STAGED_DEFAULT
+    entry = staged.get(key)
+    if not isinstance(entry, dict):
+        # Stage not configured — inherit defaults.
+        return None, None
+    prompt = entry.get("prompt")
+    tools = entry.get("mcp_servers")
+    allowed = set(tools) if isinstance(tools, list) and tools else None
+    return (prompt if isinstance(prompt, str) and prompt.strip() else None), allowed
+
+
+async def _resolve_mcp_servers(
+    db: AsyncSession, profile: Profile | None, allowed_names: set[str] | None = None,
+) -> list[dict]:
     """Resolve a Profile's enabled MCP server names against the admin-managed
     catalog, converted to the ACP session-param shape.
 
     No profile or no servers enabled -> [] (default off, not default-all —
     a chat session shouldn't silently gain tool access just because the admin
-    registered a server somewhere)."""
+    registered a server somewhere).
+
+    `allowed_names`: when set (P1-3 staged tools), further restricts the
+    profile's full server set to this subset — used so a review stage can see
+    fewer tools than an implement stage. None = no extra restriction."""
     names = set(getattr(profile, "mcp_server_names", None) or []) if profile else set()
     if not names:
         return []
+    if allowed_names is not None:
+        names = names & allowed_names
+        if not names:
+            return []
     from app.services import settings_service
 
     settings_row = await settings_service.get(db)
@@ -564,6 +608,7 @@ async def _resolve_mcp_servers(db: AsyncSession, profile: Profile | None) -> lis
 
 async def _build_moa_targets(
     db: AsyncSession, target_profile_ids: list[str], memory_prompt: str | None,
+    query: str | None = None,
 ) -> list[dict]:
     """Resolve an MoA Profile's reference profiles into roundtable `targets`,
     each with its own persona/env/tools — same shape send_roundtable already
@@ -574,7 +619,39 @@ async def _build_moa_targets(
         if not target_profile or not target_profile.is_active:
             continue
         t_system_prompt = target_profile.system_prompt or None
-        t_knowledge_prompt = await _build_knowledge_prompt(db, target_profile)
+        t_knowledge_prompt = await _build_knowledge_prompt(db, target_profile, query=query)
+        if t_knowledge_prompt:
+            t_system_prompt = (
+                f"{t_system_prompt}\n\n{t_knowledge_prompt}" if t_system_prompt else t_knowledge_prompt
+            )
+        if memory_prompt:
+            t_system_prompt = f"{t_system_prompt}\n\n{memory_prompt}" if t_system_prompt else memory_prompt
+        targets.append({
+            "agent_id": target_profile.default_agent_id,
+            "profile_id": str(target_profile.id),
+            "system_prompt": t_system_prompt,
+            "profile_dir": _profile_dir(target_profile),
+            "mcp_servers": await _resolve_mcp_servers(db, target_profile),
+        })
+    return targets
+
+
+async def _build_chain_targets(
+    db: AsyncSession, target_profile_ids: list[str], memory_prompt: str | None,
+    query: str | None = None,
+) -> list[dict]:
+    """P2-1: resolve a chain Profile's ordered reference profiles into targets.
+
+    Same shape as _build_moa_targets, but the ORDER of target_profile_ids is
+    preserved — it defines the relay sequence (A→B→C). No merge step: the
+    runner prepends each agent's conclusion to the next's prompt."""
+    targets: list[dict] = []
+    for target_pid in target_profile_ids:
+        target_profile = await db.get(Profile, target_pid)
+        if not target_profile or not target_profile.is_active:
+            continue
+        t_system_prompt = target_profile.system_prompt or None
+        t_knowledge_prompt = await _build_knowledge_prompt(db, target_profile, query=query)
         if t_knowledge_prompt:
             t_system_prompt = (
                 f"{t_system_prompt}\n\n{t_knowledge_prompt}" if t_system_prompt else t_knowledge_prompt
@@ -667,6 +744,8 @@ async def send_message(
     profile_id: str | None = None,
     task_id: uuid.UUID | None = None,
     matched_skill_ids: list[uuid.UUID] | None = None,
+    max_iterations: int | None = None,
+    stage: str | None = None,
 ) -> tuple[Message, Message]:
     """Persist the user turn + an empty streaming agent turn, then enqueue ACP work.
 
@@ -761,6 +840,8 @@ async def send_message(
             "mcp_servers": mcp_servers or [],
             "matched_skill_ids": [str(sid) for sid in (matched_skill_ids or [])],
             "skill_firing_excerpt": text[:500],
+            "max_iterations": max_iterations,
+            "stage": stage,
         }
     )
     return user_msg, agent_msg
@@ -778,6 +859,7 @@ async def send_roundtable(
     existing_user_msg: Message | None = None,
     task_id: uuid.UUID | None = None,
     moa: bool = False,
+    research_mode: bool = False,
 ) -> tuple[Message, Message]:
     """Multi-agent turn: one roundtable message holding per-agent replies + a
     synthesized merge. The runner streams each reply in parallel — each with
@@ -862,9 +944,91 @@ async def send_roundtable(
             "text": prompt_text,
             "content_blocks": attachment_blocks or None,
             "moa": moa,
+            "research_mode": research_mode,
         }
     )
     return user_msg, rt_msg
+
+
+async def send_chain(
+    db: AsyncSession,
+    convo: Conversation,
+    text: str,
+    targets: list[dict],
+    attached_file_ids: list[str] | None = None,
+    knowledge_ids: list[str] | None = None,
+    owner_id: uuid.UUID | None = None,
+    owner_id_override: uuid.UUID | None = None,
+    mentions: list[str] | None = None,
+    existing_user_msg: Message | None = None,
+    task_id: uuid.UUID | None = None,
+) -> tuple[Message, Message]:
+    """P2-1 chain handoff: a sequential relay message holding ordered steps.
+
+    Unlike roundtable (parallel + merge), the runner runs targets one at a
+    time, prepending each agent's conclusion to the next's prompt. The last
+    agent's output is the final answer — no merge step. `targets` order is
+    the relay sequence and must be preserved.
+    """
+    attached = await _resolve_attached_files(db, attached_file_ids or [], conversation_id=str(convo.id), owner_id=owner_id)
+    if existing_user_msg is None:
+        user_content: dict = {"text": text}
+        if attached:
+            user_content["files"] = [
+                {"id": f["id"], "name": f["name"], "kind": f.get("kind")}
+                for f in attached
+            ]
+        if knowledge_ids:
+            _knames = await _resolve_knowledge_names(db, knowledge_ids)
+            user_content["knowledge_refs"] = [{"id": kid, "name": _knames.get(kid, kid[:8])} for kid in knowledge_ids]
+        user_msg = Message(
+            conversation_id=convo.id, owner_id=owner_id, role="user", content=user_content, mentions=mentions or [], status="complete", task_id=task_id
+        )
+    else:
+        user_msg = existing_user_msg
+    chain_msg = Message(
+        conversation_id=convo.id,
+        role="chain",
+        agent_id=targets[0]["agent_id"],
+        content={
+            "steps": [
+                {
+                    "agent_id": t["agent_id"],
+                    "profile_id": t.get("profile_id"),
+                    "text": "",
+                    "status": "pending",
+                }
+                for t in targets
+            ],
+        },
+        status="streaming",
+    )
+    if existing_user_msg is None:
+        db.add_all([user_msg, chain_msg])
+    else:
+        db.add(chain_msg)
+    if convo.title == "新会话":
+        convo.title = text[:40]
+    await db.commit()
+    await db.refresh(user_msg)
+    await db.refresh(chain_msg)
+
+    prompt_text = _build_attached_prompt(text, attached)
+    prompt_text = f"{_FILE_WRITE_PREAMBLE}{_NO_CLARIFY_ROUNDTABLE}\n\n{prompt_text}"
+    attachment_blocks = _build_attachment_content_blocks(convo, attached)
+
+    await redis_core.clear_cancel(str(convo.id))
+    await redis_core.enqueue_prompt(
+        {
+            "type": "chain",
+            "conversation_id": str(convo.id),
+            "message_id": str(chain_msg.id),
+            "targets": targets,
+            "text": prompt_text,
+            "content_blocks": attachment_blocks or None,
+        }
+    )
+    return user_msg, chain_msg
 
 
 async def _build_memory_prompt(db: AsyncSession, owner_id: uuid.UUID | None) -> str | None:
@@ -1060,13 +1224,21 @@ async def _batch_load_knowledge_entries(
     return result
 
 
-async def _build_knowledge_prompt(db: AsyncSession, profile: Profile | None) -> str | None:
+async def _build_knowledge_prompt(
+    db: AsyncSession, profile: Profile | None, query: str | None = None,
+) -> str | None:
     """Inject the content of a Profile's bound knowledge into the prompt.
 
     Supports:
     - knowledge_ids: individual item IDs (backward compat)
     - knowledge_folder_ids: folder IDs — all items under these folders are injected
     - knowledge_team_ids: team IDs — every non-folder item under these teams is injected
+
+    P1-1 RAG: when settings.rag_enabled AND a non-empty query is given AND at
+    least one bound item has been indexed, switches to vector retrieval — only
+    the top-k chunks relevant to `query` are injected, instead of whole docs.
+    Falls back to the legacy whole-doc injection on any failure path (RAG off,
+    nothing indexed, embedding unavailable, pgvector missing).
     """
     if not profile:
         return None
@@ -1113,6 +1285,13 @@ async def _build_knowledge_prompt(db: AsyncSession, profile: Profile | None) -> 
     if not all_ids:
         return None
 
+    # ── P1-1 RAG path ──
+    if settings.rag_enabled and query and query.strip():
+        rag_prompt = await _build_knowledge_prompt_rag(db, all_ids, query)
+        if rag_prompt is not None:
+            return rag_prompt
+        # else: fall through to legacy whole-doc injection.
+
     parts: list[str] = []
     used = 0
     entries_by_id = await _batch_load_knowledge_entries(db, all_ids)
@@ -1139,6 +1318,63 @@ async def _build_knowledge_prompt(db: AsyncSession, profile: Profile | None) -> 
     return (
         "【团队知识库】请在回答时参考以下资料，不要向用户复述这段说明：\n"
         + "\n\n".join(parts)
+    )
+
+
+async def _build_knowledge_prompt_rag(
+    db: AsyncSession, knowledge_ids: list[uuid.UUID], query: str,
+) -> str | None:
+    """P1-1: vector-retrieve the top-k chunks relevant to `query` across the
+    given knowledge items and assemble them into the knowledge prompt.
+
+    Returns None to signal "fall back to legacy whole-doc injection" when:
+      - no item has been indexed yet (nothing to search)
+      - the embedding model / pgvector is unavailable
+      - search returns zero hits
+    Never raises — _build_knowledge_prompt must stay robust.
+    """
+    from app.core.embedding import EmbeddingUnavailable
+    from app.services import rag_service
+
+    # Only bother searching if at least one item is indexed. Avoids the cost
+    # of embedding the query when the whole corpus is un-indexed.
+    indexed: list[uuid.UUID] = []
+    for kid in knowledge_ids:
+        try:
+            if await rag_service.is_indexed(db, kid):
+                indexed.append(kid)
+        except Exception:  # noqa: BLE001 — pgvector missing etc.
+            return None
+    if not indexed:
+        return None
+
+    try:
+        hits = await rag_service.search(db, query, indexed)
+    except EmbeddingUnavailable:
+        return None
+    except Exception:  # noqa: BLE001 — pgvector/SQL errors: silently fall back
+        return None
+    if not hits:
+        return None
+
+    # Truncate the assembled chunks to the prompt budget (mirrors the legacy
+    # _KNOWLEDGE_TOTAL guard so RAG never blows the context window either).
+    budget = settings.rag_max_context_chars
+    parts: list[str] = []
+    used = 0
+    for content, _distance in hits:
+        remaining = budget - used
+        if remaining <= 0:
+            break
+        body = content[:remaining]
+        parts.append(body)
+        used += len(body)
+    if not parts:
+        return None
+    return (
+        "【团队知识库·检索】以下是根据你的问题检索到的相关资料片段，"
+        "不要向用户复述这段说明：\n"
+        + "\n\n---\n\n".join(parts)
     )
 
 
@@ -1202,104 +1438,47 @@ async def _resolve_knowledge_names(db, knowledge_ids: list[str]) -> dict[str, st
 
 
 # ---------------------------------------------------------------------------
-# Context compression — tiered sliding-window summarisation so that very long
-# conversations don't silently overflow the model context.
+# P1-2 conversation summarisation trigger.
+# Replaces the dead-code _compress_conversation_history (which was never
+# called). Real compression now happens asynchronously via the
+# conversation_summary runner worker, whose output is injected into the prompt
+# prefix by dispatch — see _maybe_trigger_summary below.
 # ---------------------------------------------------------------------------
 
-_CONTEXT_COMPRESSION_CONFIG = {
-    "preserve_recent": 10,          # most-recent messages kept verbatim
-    "summary_window": 20,           # older messages batched in groups of N
-    "max_history_messages": 100,    # hard cap before compression kicks in
-    "max_prompt_chars": 80_000,     # hard cap on total prompt chars
-}
 
-_SUMMARY_KEYWORDS = (
-    "决定", "确认", "方案", "选择", "结果", "同意", "拒绝",
-    "执行", "完成", "待办", "todo", "任务", "重点",
-)
+async def _maybe_trigger_summary(db: AsyncSession, conversation_id: uuid.UUID) -> None:
+    """Enqueue a background summary task when the conversation is long enough.
 
-
-def _summarize_message_batch(batch: list[Message]) -> str:
-    """Zero-cost rule-based summary of a batch of messages.
-
-    Extracts lines that contain key decisions, actions, or numeric data.
-    Falls back to a generic sentence when nothing salient is found.
+    Non-blocking: SETs a Redis lock (NX) so at most one summary runs per
+    conversation at a time, then enqueues and returns immediately. The actual
+    summarisation runs in the runner worker; its result lands next turn.
     """
-    key_points: list[str] = []
-    for m in batch:
-        text = ""
-        content = m.content or {}
-        if isinstance(content, dict):
-            text = content.get("text", "")
-        elif isinstance(content, str):
-            text = content
-        lines = text.splitlines()
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            # decision / action keywords
-            if any(kw in line for kw in _SUMMARY_KEYWORDS):
-                key_points.append(line[:200])
-                continue
-            # numeric / temporal / monetary hints
-            if any(c.isdigit() for c in line[:50]):
-                key_points.append(line[:200])
-    if not key_points:
-        return "该段对话主要围绕日常交流展开，无关键决策。"
-    return "；".join(key_points[:5])
-
-
-async def _compress_conversation_history(
-    db: AsyncSession,
-    convo: Conversation,
-    messages: list[Message],
-) -> list[Message]:
-    """Return a compressed view of *messages* when the history is very long.
-
-    The algorithm:
-    1. If <= preserve_recent + 5 → no change.
-    2. Keep the most-recent ``preserve_recent`` messages verbatim.
-    3. Older messages are grouped into ``summary_window`` chunks; each chunk
-       is collapsed into a single pseudo-system message that carries a
-       rule-based summary.
-    4. The summaries are assembled into one synthetic Message inserted at the
-       front of the returned list.
-    """
-    cfg = _CONTEXT_COMPRESSION_CONFIG
-    target_recent = cfg["preserve_recent"]
-    window = cfg["summary_window"]
-
-    if len(messages) <= target_recent + 5:
-        return messages
-
-    recent = messages[-target_recent:]
-    older = messages[:-target_recent]
-
-    summaries: list[str] = []
-    for i in range(0, len(older), window):
-        batch = older[i:i + window]
-        summaries.append(_summarize_message_batch(batch))
-
-    running_summary = "\n\n".join(
-        f"【第{i + 1}段历史摘要】{s}"
-        for i, s in enumerate(summaries)
-    )
-
-    summary_msg = Message(
-        conversation_id=convo.id,
-        role="system",
-        content={
-            "text": (
-                "以下是本对话的早期历史摘要：\n\n"
-                f"{running_summary}\n\n"
-                "---\n"
-                "【注意】以上内容为历史摘要，"
-                "细节可能不完整。如有需要可要求展开。"
-            ),
-        },
-    )
-    return [summary_msg] + recent
+    # Count messages cheaply — a single aggregate query, no row hydration.
+    msg_count = (await db.execute(
+        select(func.count()).select_from(Message)
+        .where(Message.conversation_id == conversation_id)
+    )).scalar() or 0
+    if msg_count < settings.summary_trigger_msg_count:
+        return
+    # SET NX lock prevents overlapping runs for the same conversation.
+    lock_key = f"summary:lock:{conversation_id}"
+    try:
+        got = await redis_core.get_redis().set(lock_key, "1", ex=600, nx=True)
+        if not got:
+            return  # a summary is already running
+    except Exception:
+        return
+    try:
+        await redis_core.enqueue_prompt({
+            "type": "conversation_summary",
+            "conversation_id": str(conversation_id),
+        })
+    except Exception:
+        # Best-effort: clear the lock so the next turn can retry.
+        try:
+            await redis_core.get_redis().delete(lock_key)
+        except Exception:
+            pass
 
 
 async def dispatch(
@@ -1313,6 +1492,7 @@ async def dispatch(
     profile_id_override: str | None = None,
     task_id: uuid.UUID | None = None,
     agent_id_override: str | None = None,
+    stage: str | None = None,
 ) -> tuple[Message, Message | None]:
     """Route to single or roundtable based on the conversation's active agents.
 
@@ -1338,15 +1518,53 @@ async def dispatch(
     if effective_profile_id:
         profile = await db.get(Profile, effective_profile_id)
         if profile:
-            system_prompt = profile.system_prompt or None
+            # P1-3 staged: honour a manual stage switch requested this turn.
+            # Updating convo.staged_stage persists it; the Redis session key
+            # for the OLD stage is cleared so the runner rebuilds the session
+            # (the tool subset may differ per stage).
+            if stage and getattr(profile, "staged_enabled", False) and stage != convo.staged_stage:
+                if stage in _STAGED_ORDER:
+                    old_stage = convo.staged_stage
+                    convo.staged_stage = stage
+                    await db.commit()
+                    await db.refresh(convo)
+                    if old_stage:
+                        try:
+                            redis = redis_core.get_redis()
+                            await redis.delete(
+                                f"acp_session:{convo.id}:{effective_profile_id}:{old_stage}"
+                            )
+                        except Exception:
+                            pass
+            # P1-3 staged system prompts: if the profile is staged, the
+            # conversation's current stage selects which prompt + tool subset
+            # is active. Falls through to the normal single-prompt path when
+            # staged_enabled is off or the stage config is missing.
+            stage_prompt, stage_tools = _resolve_staged_profile(profile, convo.staged_stage)
+            system_prompt = stage_prompt or profile.system_prompt or None
             profile_dir = _profile_dir(profile)
-            mcp_servers = await _resolve_mcp_servers(db, profile)
-            # Inject the Profile's bound knowledge-base content (reuse loop)
-            knowledge_prompt = await _build_knowledge_prompt(db, profile)
+            mcp_servers = await _resolve_mcp_servers(db, profile, allowed_names=stage_tools)
+            # Inject the Profile's bound knowledge-base content (reuse loop).
+            # Pass the user's query so RAG can retrieve only relevant chunks.
+            knowledge_prompt = await _build_knowledge_prompt(db, profile, query=text)
             if knowledge_prompt:
                 system_prompt = (
                     f"{system_prompt}\n\n{knowledge_prompt}" if system_prompt else knowledge_prompt
                 )
+
+    # P1-2: inject a cached summary of the conversation's early history at the
+    # very front of the prompt (it's the oldest context layer). Produced
+    # asynchronously by the conversation_summary worker; absent until the
+    # conversation crosses summary_trigger_msg_count. Never blocks a turn.
+    if settings.summary_enabled:
+        summary_row = (await db.execute(
+            select(ConversationSummary).where(ConversationSummary.conversation_id == convo.id)
+        )).scalar_one_or_none()
+        if summary_row and summary_row.summary:
+            summary_block = f"【早期对话摘要】\n{summary_row.summary}"
+            system_prompt = (
+                f"{summary_block}\n\n{system_prompt}" if system_prompt else summary_block
+            )
 
     # Inject request-level knowledge references (user-selected knowledge items).
     if knowledge_ids:
@@ -1378,13 +1596,39 @@ async def dispatch(
     # multi-agent compare/group roundtable, then synthesizes one reply — no
     # new merge logic, just a different way of building `targets`.
     if profile is not None and profile.is_moa and profile.moa_target_profile_ids:
-        moa_targets = await _build_moa_targets(db, profile.moa_target_profile_ids, memory_prompt)
+        moa_targets = await _build_moa_targets(db, profile.moa_target_profile_ids, memory_prompt, query=text)
         if moa_targets:
             return await send_roundtable(
                 db, convo, text, moa_targets,
                 attached_file_ids=attached_file_ids, knowledge_ids=knowledge_ids,
                 owner_id=owner_id, task_id=task_id, moa=True,
             )
+
+    # P2-1 chain handoff: sequential relay A→B→C, each agent's conclusion
+    # prepended to the next's prompt. Distinct from MoA (fan-out + merge).
+    if profile is not None and profile.is_chain and profile.chain_target_profile_ids:
+        chain_targets = await _build_chain_targets(db, profile.chain_target_profile_ids, memory_prompt, query=text)
+        if chain_targets:
+            return await send_chain(
+                db, convo, text, chain_targets,
+                attached_file_ids=attached_file_ids, knowledge_ids=knowledge_ids, owner_id=owner_id,
+            )
+
+    # P2-2 research mode: roundtable with cascade termination — first slot to
+    # answer cancels the rest. Reuses send_roundtable with a research flag.
+    if profile is not None and profile.is_research and len(agents) > 1:
+        targets = [
+            {
+                "agent_id": aid, "profile_id": None, "system_prompt": system_prompt,
+                "profile_dir": profile_dir, "mcp_servers": mcp_servers,
+            }
+            for aid in agents
+        ]
+        return await send_roundtable(
+            db, convo, text, targets,
+            attached_file_ids=attached_file_ids, knowledge_ids=knowledge_ids,
+            owner_id=owner_id, task_id=task_id, research_mode=True,
+        )
 
     # Anti-clarify guidance only on follow-up turns — the first turn carries the
     # clarify preamble, and sending both contradicted each other.
@@ -1407,11 +1651,19 @@ async def dispatch(
             attached_file_ids=attached_file_ids, knowledge_ids=knowledge_ids,
             owner_id=owner_id, task_id=task_id,
         )
+    # P1-2: fire-and-forget a summary task when the conversation is long enough.
+    # Non-blocking — uses the last summary this turn, the fresh one lands next
+    # turn. Gated by summary_enabled and a message-count threshold.
+    if settings.summary_enabled:
+        await _maybe_trigger_summary(db, convo.id)
+
     return await send_message(
         db, convo, text,
         attached_file_ids=attached_file_ids, knowledge_ids=knowledge_ids, owner_id=owner_id,
         system_prompt=system_prompt, profile_dir=profile_dir, mcp_servers=mcp_servers,
         task_id=task_id, profile_id=effective_profile_id, matched_skill_ids=matched_skill_ids,
+        max_iterations=profile.max_iterations if profile else None,
+        stage=convo.staged_stage if (profile and getattr(profile, "staged_enabled", False)) else None,
     )
 
 

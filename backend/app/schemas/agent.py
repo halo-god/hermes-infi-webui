@@ -45,6 +45,14 @@ class ProfileOut(BaseModel):
     mcp_server_names: list[str] = []
     is_moa: bool = False
     moa_target_profile_ids: list[str] = []
+    # P0-2: per-turn tool_call circuit breaker (0 = disabled).
+    max_iterations: int = 50
+    # P1-3: per-stage prompt + tool subset (see migration 0059 for shape).
+    staged_prompts: dict | None = None
+    staged_enabled: bool = False
+    is_chain: bool = False
+    chain_target_profile_ids: list[str] = []
+    is_research: bool = False
 
     @field_validator("skills", mode="before")
     @classmethod
@@ -78,6 +86,12 @@ class ProfileCreate(BaseModel):
     knowledge_ids: list[str] = []
     knowledge_folder_ids: list[str] = []
     knowledge_team_ids: list[str] = []
+    max_iterations: int = 50
+    staged_prompts: dict | None = None
+    staged_enabled: bool = False
+    is_chain: bool = False
+    chain_target_profile_ids: list[str] = []
+    is_research: bool = False
 
 
 class ProfileUpdate(BaseModel):
@@ -101,6 +115,12 @@ class ProfileUpdate(BaseModel):
     mcp_server_names: list[str] | None = None
     is_moa: bool | None = None
     moa_target_profile_ids: list[str] | None = None
+    max_iterations: int | None = None
+    staged_prompts: dict | None = None
+    staged_enabled: bool | None = None
+    is_chain: bool | None = None
+    chain_target_profile_ids: list[str] | None = None
+    is_research: bool | None = None
 
 
 class ProfileExport(BaseModel):
