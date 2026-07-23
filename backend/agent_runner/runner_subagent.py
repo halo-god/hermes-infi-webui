@@ -67,11 +67,28 @@ async def _create_subagent_message(conversation_id: uuid.UUID, agent_id: str) ->
         return str(msg.id)
 
 
-async def _finalize_message(message_id: str, text: str, status: str) -> None:
+async def _finalize_message(
+    message_id: str, text: str, status: str,
+    steps: list[dict] | None = None,
+    thinking: str | None = None,
+    plan: list[dict] | None = None,
+    usage: dict | None = None,
+) -> None:
     async with async_session_maker() as db:
         msg = await db.get(Message, uuid.UUID(message_id))
         if msg:
-            msg.content = {"text": text}
+            content: dict = {"text": text}
+            if steps:
+                content["tool_calls"] = steps
+            if thinking:
+                content["thinking"] = thinking
+            if plan:
+                content["plan"] = plan
+            if usage:
+                content["usage"] = usage
+                msg.tokens_in = usage.get("input_tokens", 0)
+                msg.tokens_out = usage.get("output_tokens", 0)
+            msg.content = content
             msg.status = status
             convo = await db.get(Conversation, msg.conversation_id)
             if convo:
@@ -109,14 +126,56 @@ async def _run_turn(
     Message row, stream into evt:conv:{subconv_id} exactly like a normal chat
     turn, then update orchestration status and nudge the parent."""
     message_id = await _create_subagent_message(uuid.UUID(subconv_id), agent_id)
-    acc = {"text": ""}
+    acc: dict = {"text": "", "steps": [], "thinking": "", "plan": None, "usage": None}
 
     async def on_update(update: dict) -> None:
-        if update.get("sessionUpdate") == "agent_message_chunk":
+        kind = update.get("sessionUpdate")
+        if kind == "agent_message_chunk":
             delta = (update.get("content") or {}).get("text", "")
             if delta:
                 acc["text"] += delta
                 await R.publish_event(subconv_id, {"type": "token", "message_id": message_id, "delta": delta})
+        elif kind == "tool_call":
+            title = update.get("title", "工具调用")
+            step_status = update.get("status", "running")
+            acc["steps"].append({"title": title, "status": step_status})
+            await R.publish_event(subconv_id, {
+                "type": "tool_call", "message_id": message_id,
+                "title": title, "status": step_status,
+            })
+        elif kind == "agent_thought":
+            delta = (update.get("content") or {}).get("text", "")
+            if delta:
+                acc["thinking"] += delta
+                await R.publish_event(subconv_id, {
+                    "type": "thought", "message_id": message_id, "delta": delta,
+                })
+        elif kind == "plan":
+            acc["plan"] = update.get("entries", [])
+            await R.publish_event(subconv_id, {
+                "type": "plan", "message_id": message_id,
+                "entries": update.get("entries", []),
+            })
+        elif kind == "usage":
+            input_tokens = update.get("input_tokens", 0)
+            output_tokens = update.get("output_tokens", 0)
+            acc["usage"] = {"input_tokens": input_tokens, "output_tokens": output_tokens}
+            await R.publish_event(subconv_id, {
+                "type": "usage", "message_id": message_id,
+                "input_tokens": input_tokens, "output_tokens": output_tokens,
+            })
+        elif kind == "usage_update":
+            size = update.get("size", 0)
+            used = update.get("used", 0)
+            if acc["usage"]:
+                acc["usage"]["context_size"] = size
+                acc["usage"]["context_used"] = used
+            else:
+                acc["usage"] = {"input_tokens": 0, "output_tokens": 0, "context_size": size, "context_used": used}
+            await R.publish_event(subconv_id, {
+                "type": "usage", "message_id": message_id,
+                "context_size": size, "context_used": used,
+            })
         pool.touch(subagent_id)
 
     async def on_fs_write(path: str, content: str) -> None:
@@ -154,7 +213,13 @@ async def _run_turn(
         acc["text"] = acc["text"] or f"（执行失败：{exc.__class__.__name__}）"
         error_detail = acc["text"]
 
-    await _finalize_message(message_id, acc["text"], msg_status)
+    await _finalize_message(
+        message_id, acc["text"], msg_status,
+        steps=acc["steps"] or None,
+        thinking=acc["thinking"] or None,
+        plan=acc["plan"],
+        usage=acc["usage"],
+    )
     await R.publish_event(subconv_id, {"type": "done", "message_id": message_id, "status": msg_status})
     await _set_status(subagent_id, subagent_status, error_detail=error_detail)
 

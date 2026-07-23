@@ -127,11 +127,11 @@ export const conversationsApi = {
   },
 
   // ── Conversation folders (grouping) ──
-  async listFolders(): Promise<ConversationFolder[]> {
-    return (await http.get<ConversationFolder[]>("/conversations/folders")).data;
+  async listFolders(type?: "personal" | "group"): Promise<ConversationFolder[]> {
+    return (await http.get<ConversationFolder[]>("/conversations/folders", { params: type ? { type } : {} })).data;
   },
-  async createFolder(name: string): Promise<ConversationFolder> {
-    return (await http.post<ConversationFolder>("/conversations/folders", { name })).data;
+  async createFolder(name: string, type: "personal" | "group" = "personal"): Promise<ConversationFolder> {
+    return (await http.post<ConversationFolder>("/conversations/folders", { name, type })).data;
   },
   async updateFolder(id: string, payload: { name?: string; sort_order?: number; pinned?: boolean }): Promise<ConversationFolder> {
     return (await http.patch<ConversationFolder>(`/conversations/folders/${id}`, payload)).data;

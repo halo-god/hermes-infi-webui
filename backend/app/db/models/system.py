@@ -24,6 +24,9 @@ DEFAULT_SETTINGS = {
         "rate_limit_per_min": 30,
         "overage": "soft",  # soft | hard | warn
     },
+    "model_pricing": {
+        "hermes-4": {"input_per_1k": 0.0, "output_per_1k": 0.0},
+    },
 }
 
 

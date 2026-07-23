@@ -23,6 +23,16 @@ const spawning = ref(false);
 const followUpText = ref("");
 const sending = ref(false);
 
+// Helpers to extract rich content fields from Message.content (typed as unknown).
+function getToolCalls(m: Message): { title: string; status: string }[] {
+  const tc = (m.content as Record<string, unknown>)?.tool_calls;
+  return Array.isArray(tc) ? tc as { title: string; status: string }[] : [];
+}
+function getThinking(m: Message): string | null {
+  const t = (m.content as Record<string, unknown>)?.thinking;
+  return typeof t === "string" && t ? t : null;
+}
+
 const STATUS_LABEL: Record<string, string> = {
   starting: "启动中", running: "运行中", idle: "已完成",
   waiting_input: "等待输入", done: "已完成", error: "失败",
@@ -135,7 +145,11 @@ onUnmounted(() => {
       <div v-for="s in subagents" :key="s.id" class="sap-item">
         <div class="sap-item-head" @click="expand(s)">
           <span class="sap-st-pill" :class="s.status">{{ STATUS_LABEL[s.status] || s.status }}</span>
-          <span style="flex:1;min-width:0;font-size:12.5px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.purpose }}</span>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:12.5px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.purpose }}</div>
+            <div v-if="s.last_snippet" style="font-size:11px;color:var(--ink-mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">{{ s.last_snippet }}</div>
+          </div>
+          <span v-if="s.step_count > 0" class="sap-step-count" title="工具调用次数">{{ s.step_count }} 步</span>
           <span v-if="s.unread_count > 0" class="sap-unread">{{ s.unread_count }}</span>
         </div>
         <div v-if="expandedId === s.id" class="sap-transcript">
@@ -143,6 +157,20 @@ onUnmounted(() => {
           <template v-else>
             <div v-for="m in transcript" :key="m.id" class="sap-msg" :class="m.role">
               <div class="sap-msg-role">{{ m.role === 'user' ? '指令' : '回复' }}</div>
+              <!-- Tool call steps -->
+              <div v-if="getToolCalls(m).length" class="sap-steps">
+                <div v-for="(step, si) in getToolCalls(m)" :key="si" class="sap-step">
+                  <Icon :name="step.status === 'complete' ? 'check' : 'refresh'" :size="10" />
+                  <span>{{ step.title }}</span>
+                </div>
+              </div>
+              <!-- Thinking -->
+              <div v-if="getThinking(m)" class="sap-thinking">
+                <details>
+                  <summary style="cursor:pointer;font-size:11px;color:var(--ink-mute)">思考过程</summary>
+                  <div style="white-space:pre-wrap;font-size:11.5px;color:var(--ink-mute);padding:4px 0">{{ getThinking(m) }}</div>
+                </details>
+              </div>
               <div class="sap-msg-text">{{ m.content?.text || '' }}</div>
             </div>
             <div v-if="s.error_detail" style="font-size:12px;color:var(--danger)">{{ s.error_detail }}</div>
@@ -212,6 +240,31 @@ onUnmounted(() => {
 .sap-st-pill.running, .sap-st-pill.starting { border-color: var(--accent); color: var(--accent); }
 .sap-st-pill.idle, .sap-st-pill.done { border-color: #3a7a4a; color: #3a7a4a; }
 .sap-st-pill.error, .sap-st-pill.timeout, .sap-st-pill.interrupted { border-color: var(--danger); color: var(--danger); }
+.sap-step-count {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--ink-mute);
+  background: var(--bg-hover);
+  padding: 1px 5px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.sap-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+}
+.sap-step {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--ink-mute);
+}
+.sap-thinking {
+  padding: 2px 0;
+}
 .sap-st-pill.stopped, .sap-st-pill.waiting_input { border-color: var(--ink-mute); color: var(--ink-mute); }
 .sap-unread {
   flex-shrink: 0;

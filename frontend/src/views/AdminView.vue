@@ -6,7 +6,7 @@
    Wired to the real /admin API. */
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import Icon from "@/components/Icon.vue";
-import { adminApi } from "@/api/admin";
+import { adminApi, type UsageData } from "@/api/admin";
 import { brandingApi } from "@/api/branding";
 import { http } from "@/api/client";
 import { fmtDate } from "@/utils/format";
@@ -37,7 +37,7 @@ const ns = useNotificationStore();
 const isSuperAdmin = computed(() => authStore.user?.role === "super_admin");
 const { queryPresence, getStatus } = usePresence();
 
-type AdminTab = "overview" | "users" | "roles" | "identity" | "audit" | "assistants" | "system" | "mcp" | "performance" | "skill-evolution";
+type AdminTab = "overview" | "users" | "roles" | "identity" | "audit" | "assistants" | "system" | "mcp" | "performance" | "usage" | "skill-evolution";
 const tab = ref<AdminTab>("overview");
 const stats = ref<AdminStats | null>(null);
 const users = ref<User[]>([]);
@@ -178,6 +178,22 @@ async function loadPerformance() {
   perfLoading.value = true;
   try { perfData.value = (await http.get("/admin/performance")).data; } catch { perfData.value = null; } finally { perfLoading.value = false; }
 }
+
+// ── Usage dashboard ──
+const usageData = ref<UsageData | null>(null);
+const usageLoading = ref(false);
+const usagePeriod = ref<"month" | "week">("month");
+const usageBreakdown = ref<"user" | "profile" | "model">("profile");
+async function loadUsage() {
+  usageLoading.value = true;
+  try {
+    usageData.value = await adminApi.getUsage({ period: usagePeriod.value, breakdown: usageBreakdown.value });
+  } catch { usageData.value = null; } finally { usageLoading.value = false; }
+}
+const usageMaxDaily = computed(() => {
+  if (!usageData.value?.daily?.length) return 1;
+  return Math.max(...usageData.value.daily.map((d) => d.tokens_in + d.tokens_out), 1);
+});
 // ── Skill evolution (自我进化技能): admin-wide skill list + trigger + proposal review ──
 const evoSkills = ref<AdminSkill[]>([]);
 const evoSkillsLoading = ref(false);
@@ -325,8 +341,10 @@ async function deleteMcpServer(name: string) {
 watch(tab, (t) => {
   if (t === "mcp") loadMcpServers();
   if (t === "performance") loadPerformance();
+  if (t === "usage") loadUsage();
   if (t === "skill-evolution") { loadEvoSkills(); loadEvoProposals(); }
 });
+watch([usagePeriod, usageBreakdown], () => { if (tab.value === "usage") loadUsage(); });
 watch(logCategory, (c) => {
   if (c === "runtime" && !logEntries.value.length) loadLogs();
 });
@@ -649,7 +667,7 @@ const providersOn = computed(() => providers.value.filter((p) => p.enabled).leng
 const TABS = computed(() => {
   const base: [AdminTab, string][] = [
     ["overview", "概览"], ["users", "用户管理"], ["roles", "权限管理"],
-    ["identity", "身份与连接"], ["audit", "审计日志"], ["assistants", "助手管理"], ["mcp", "MCP 服务器"], ["system", "系统设置"], ["performance", "性能监控"],
+    ["identity", "身份与连接"], ["audit", "审计日志"], ["assistants", "助手管理"], ["mcp", "MCP 服务器"], ["system", "系统设置"], ["performance", "性能监控"], ["usage", "用量看板"],
   ];
   // Super-admin only: the sole gate that lets an automated, real-money
   // optimization pipeline's output ever take effect — hidden from plain admins.
@@ -1917,6 +1935,92 @@ async function confirmImport() {
                 <div>内存: <strong>{{ perfData?.redis?.used_memory_mb }}MB</strong></div>
               </div>
             </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- ───────────── USAGE ───────────── -->
+      <template v-else-if="tab === 'usage'">
+        <div class="flex-between" style="align-items:flex-end;margin-bottom:14px">
+          <div>
+            <div class="heading-serif">用量看板</div>
+            <div class="text-mute-sm" style="margin-top:2px">Token 消耗与成本统计，支持按助手/用户/模型维度分析。</div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <button class="btn" :class="{ primary: usagePeriod === 'week' }" style="font-size:12px" @click="usagePeriod = 'week'">近 7 天</button>
+            <button class="btn" :class="{ primary: usagePeriod === 'month' }" style="font-size:12px" @click="usagePeriod = 'month'">近 30 天</button>
+            <button class="btn" @click="loadUsage"><Icon name="refresh" :size="12" /> 刷新</button>
+          </div>
+        </div>
+
+        <!-- Summary cards -->
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:16px">
+          <div class="section-card" style="padding:16px">
+            <div class="text-mute-sm" style="font-size:11px">输入 Token</div>
+            <div style="font-size:22px;font-weight:700;color:var(--ink);margin-top:4px">{{ usageData?.total_tokens_in?.toLocaleString() || 0 }}</div>
+          </div>
+          <div class="section-card" style="padding:16px">
+            <div class="text-mute-sm" style="font-size:11px">输出 Token</div>
+            <div style="font-size:22px;font-weight:700;color:var(--ink);margin-top:4px">{{ usageData?.total_tokens_out?.toLocaleString() || 0 }}</div>
+          </div>
+          <div class="section-card" style="padding:16px">
+            <div class="text-mute-sm" style="font-size:11px">总成本 (USD)</div>
+            <div style="font-size:22px;font-weight:700;color:var(--accent-deep);margin-top:4px">${{ usageData?.total_cost?.toFixed(2) || '0.00' }}</div>
+          </div>
+        </div>
+
+        <!-- Breakdown dimension switcher -->
+        <div class="section-card" style="margin-bottom:16px">
+          <div style="padding:12px 18px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--rule-soft)">
+            <span style="font-size:13px;font-weight:600;color:var(--ink)">维度分析</span>
+            <div style="flex:1"></div>
+            <button class="btn" :class="{ primary: usageBreakdown === 'profile' }" style="font-size:12px;padding:3px 10px" @click="usageBreakdown = 'profile'">按助手</button>
+            <button class="btn" :class="{ primary: usageBreakdown === 'user' }" style="font-size:12px;padding:3px 10px" @click="usageBreakdown = 'user'">按用户</button>
+            <button class="btn" :class="{ primary: usageBreakdown === 'model' }" style="font-size:12px;padding:3px 10px" @click="usageBreakdown = 'model'">按模型</button>
+          </div>
+          <div v-if="usageLoading" style="padding:32px;text-align:center;color:var(--ink-mute)">加载中…</div>
+          <div v-else-if="!usageData?.by_dimension?.length" style="padding:32px;text-align:center;color:var(--ink-mute)">暂无用量数据</div>
+          <table v-else style="width:100%;font-size:12.5px;border-collapse:collapse">
+            <thead>
+              <tr style="border-bottom:1px solid var(--rule)">
+                <th style="text-align:left;padding:8px 18px;color:var(--ink-mute);font-weight:600">{{ usageBreakdown === 'profile' ? '助手' : usageBreakdown === 'user' ? '用户' : '模型' }}</th>
+                <th style="text-align:right;padding:8px 12px;color:var(--ink-mute);font-weight:600">输入</th>
+                <th style="text-align:right;padding:8px 12px;color:var(--ink-mute);font-weight:600">输出</th>
+                <th style="text-align:right;padding:8px 12px;color:var(--ink-mute);font-weight:600">消息数</th>
+                <th style="text-align:right;padding:8px 18px;color:var(--ink-mute);font-weight:600">成本</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in usageData.by_dimension" :key="item.key" style="border-bottom:1px solid var(--rule-soft)">
+                <td style="padding:7px 18px;color:var(--ink)">{{ item.key }}</td>
+                <td style="text-align:right;padding:7px 12px;color:var(--ink-soft);font-family:var(--font-mono)">{{ item.tokens_in.toLocaleString() }}</td>
+                <td style="text-align:right;padding:7px 12px;color:var(--ink-soft);font-family:var(--font-mono)">{{ item.tokens_out.toLocaleString() }}</td>
+                <td style="text-align:right;padding:7px 12px;color:var(--ink-mute)">{{ item.count }}</td>
+                <td style="text-align:right;padding:7px 18px;color:var(--accent-deep);font-family:var(--font-mono)">${{ item.cost.toFixed(4) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Daily trend bar chart -->
+        <div class="section-card">
+          <div class="section-head"><div class="section-title">每日趋势</div></div>
+          <div v-if="usageLoading" style="padding:32px;text-align:center;color:var(--ink-mute)">加载中…</div>
+          <div v-else-if="!usageData?.daily?.length" style="padding:32px;text-align:center;color:var(--ink-mute)">暂无趋势数据</div>
+          <div v-else style="padding:16px 18px;display:flex;align-items:flex-end;gap:2px;height:140px;overflow-x:auto">
+            <div
+              v-for="d in usageData.daily"
+              :key="d.date"
+              style="flex:1;min-width:8px;display:flex;flex-direction:column;align-items:center;gap:2px"
+              :title="`${d.date}\n输入: ${d.tokens_in}\n输出: ${d.tokens_out}`"
+            >
+              <div style="width:100%;border-radius:2px 2px 0 0;background:var(--accent);opacity:0.7;min-height:2px" :style="{ height: Math.max(2, (d.tokens_in / usageMaxDaily) * 100) + 'px' }"></div>
+              <div style="width:100%;border-radius:0 0 2px 2px;background:var(--accent-deep);opacity:0.5;min-height:1px" :style="{ height: Math.max(1, (d.tokens_out / usageMaxDaily) * 100) + 'px' }"></div>
+            </div>
+          </div>
+          <div style="padding:4px 18px 12px;display:flex;gap:16px;font-size:11px;color:var(--ink-mute)">
+            <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--accent);opacity:0.7;margin-right:4px"></span>输入</span>
+            <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--accent-deep);opacity:0.5;margin-right:4px"></span>输出</span>
           </div>
         </div>
       </template>

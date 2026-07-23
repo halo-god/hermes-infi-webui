@@ -23,6 +23,7 @@ const route = useRoute();
 const { t } = useI18n();
 const showNewTeam = ref(false);
 const showNewGroup = ref(false);
+const convoTab = ref<"personal" | "group">("personal");
 
 // Infinite scroll: load the next conversation page when the sentinel appears.
 const loadMoreSentinel = ref<HTMLElement | null>(null);
@@ -105,6 +106,44 @@ const folderGroups = computed(() => {
 const pinnedFolderGroups = computed(() => folderGroups.value.filter((g) => g.folder.pinned));
 /** Unpinned folders shown below the date buckets. */
 const unpinnedFolderGroups = computed(() => folderGroups.value.filter((g) => !g.folder.pinned));
+
+// ── Group chat folders (mirrors personal folder logic but for groupConversations) ──
+const groupedGroupConvos = computed((): ConvoGroup[] => {
+  const pinned = groupConversations.value.filter((c) => c.pinned);
+  const unpinned = groupConversations.value.filter((c) => !c.pinned);
+  const unfiled = unpinned.filter((c) => !c.folder_id);
+
+  const buckets: Record<string, Conversation[]> = { today: [], yesterday: [], week: [], earlier: [] };
+  for (const c of unfiled) buckets[dateGroup(c.updated_at || c.created_at)].push(c);
+
+  const groups: ConvoGroup[] = [];
+  if (pinned.length) groups.push({ key: "pinned", label: DATE_LABELS.pinned, items: pinned });
+  (["today", "yesterday", "week", "earlier"] as const).forEach((k) => {
+    if (buckets[k].length) groups.push({ key: k, label: DATE_LABELS[k], items: buckets[k] });
+  });
+  return groups;
+});
+
+const groupFolderGroups = computed(() => {
+  const byFolder = new Map<string, Conversation[]>();
+  for (const c of groupConversations.value) {
+    if (c.pinned || !c.folder_id) continue;
+    const arr = byFolder.get(c.folder_id);
+    if (arr) arr.push(c);
+    else byFolder.set(c.folder_id, [c]);
+  }
+  return chat.groupFolders.map((f) => ({
+    folder: f,
+    items: byFolder.get(f.id) || [],
+  }));
+});
+
+const pinnedGroupFolderGroups = computed(() => groupFolderGroups.value.filter((g) => g.folder.pinned));
+const unpinnedGroupFolderGroups = computed(() => groupFolderGroups.value.filter((g) => !g.folder.pinned));
+
+// Track which tab's folder bar is shown.
+const showNewGroupFolderInput = ref(false);
+const newGroupFolderName = ref("");
 
 // Collapsed state for folders (persisted to localStorage).
 const collapsedFolders = ref<Set<string>>(new Set(
@@ -217,9 +256,22 @@ async function createFolder() {
   const name = newFolderName.value.trim();
   if (!name) return;
   try {
-    await chat.createFolder(name);
+    await chat.createFolder(name, "personal");
     newFolderName.value = "";
     showNewFolderInput.value = false;
+    ns.toast("文件夹已创建");
+  } catch {
+    ns.toast("创建失败（可能同名）", "error");
+  }
+}
+
+async function createGroupFolder() {
+  const name = newGroupFolderName.value.trim();
+  if (!name) return;
+  try {
+    await chat.createFolder(name, "group");
+    newGroupFolderName.value = "";
+    showNewGroupFolderInput.value = false;
     ns.toast("文件夹已创建");
   } catch {
     ns.toast("创建失败（可能同名）", "error");
@@ -464,56 +516,179 @@ function doDeleteFolder() {
         <div v-if="!chat.teams.length" style="padding: 4px 12px; font-size: 12px; color: var(--ink-mute)">还没有团队</div>
       </div>
 
-      <div class="side-label">
-        群聊
-        <button title="创建群聊" @click="showNewGroup = true">+</button>
-      </div>
-      <div class="convo-list group-list" style="margin-bottom: 8px">
-        <div
-          v-for="c in groupConversations"
-          :key="c.id"
-          class="convo"
-          :class="{ active: onChat && c.id === chat.activeId }"
-          @click="openConvo(c.id)"
-          @contextmenu="onCtxMenu($event, c.id)"
-        >
-          <div class="convo-ico group-ico">
-            <span v-if="c.id === chat.streamingConvoId" class="convo-live-ring"></span>
-            <Icon v-else name="users" />
-          </div>
-          <template v-if="renamingId === c.id">
-            <input
-              v-model="renameVal"
-              class="convo-rename-input"
-              @keydown.enter="confirmRename"
-              @keydown.escape="renamingId = null"
-              @blur="confirmRename"
-              autofocus
-            />
-          </template>
-          <template v-else>
-            <div class="convo-title">{{ c.title }}</div>
-          </template>
-          <span v-if="c.id === chat.streamingConvoId" class="convo-live-label">生成中</span>
+      <!-- Conversation tabs: personal + group unified -->
+      <div class="convo-tabs">
+        <button :class="{ active: convoTab === 'personal' }" @click="convoTab = 'personal'">
+          会话 <span class="pill">{{ personalConversations.length }}</span>
+        </button>
+        <div class="convo-tab-group">
+          <button :class="{ active: convoTab === 'group' }" @click="convoTab = 'group'">
+            群聊 <span class="pill">{{ groupConversations.length }}</span>
+          </button>
+          <button class="convo-tab-add" title="创建群聊" @click.stop="showNewGroup = true"><Icon name="plus" :size="11" /></button>
         </div>
-        <div v-if="!groupConversations.length" style="padding: 4px 12px; font-size: 11px; color: var(--ink-mute)">暂无群聊</div>
       </div>
 
-      <div class="side-label">
-        {{ t('nav.conversations') }}
-        <button class="side-label-btn" title="新建文件夹" @click.stop="showNewFolderInput = !showNewFolderInput"><Icon name="folder" :size="14" /></button>
+      <!-- ── Group chat list (with folder grouping) ── -->
+      <div v-show="convoTab === 'group'" class="convo-list group-list">
+        <!-- New folder input row -->
+        <div v-if="showNewGroupFolderInput" class="new-folder-row">
+          <input
+            v-model="newGroupFolderName"
+            class="convo-rename-input"
+            placeholder="群聊文件夹名称"
+            @keydown.enter="createGroupFolder"
+            @keydown.escape="showNewGroupFolderInput = false"
+          />
+          <button class="btn mini" @click="createGroupFolder">确定</button>
+        </div>
+        <div v-if="!showNewGroupFolderInput" class="convo-folder-bar">
+          <button class="convo-folder-btn" title="新建群聊文件夹" @click.stop="showNewGroupFolderInput = true"><Icon name="folder" :size="12" /> 新建文件夹</button>
+        </div>
+
+        <!-- Pinned group folders -->
+        <template v-for="fg in pinnedGroupFolderGroups" :key="fg.folder.id">
+          <div
+            class="convo-date-sep folder-sep"
+            :class="{ 'folder-drop-target': dragOverFolderId === fg.folder.id, 'folder-sort-target': dropTargetFolderId === fg.folder.id, dragging: draggingFolderId === fg.folder.id }"
+            draggable="true"
+            @contextmenu="onFolderCtxMenu($event, fg.folder.id, fg.folder.name)"
+            @dragover="onFolderHeaderDragOver($event, fg.folder.id)"
+            @dragleave="onFolderHeaderDragLeave(fg.folder.id)"
+            @drop="onFolderHeaderDrop($event, fg.folder.id)"
+            @dragstart="onFolderSortDragStart($event, fg.folder.id)"
+            @dragend="onFolderSortDragEnd"
+          >
+            <Icon v-if="fg.folder.pinned" name="pin" :size="9" style="color:var(--accent-deep)" />
+            <Icon
+              :name="collapsedFolders.has(fg.folder.id) ? 'chevron_right' : 'chevron_down'"
+              :size="9"
+              style="cursor:pointer"
+              @click.stop="toggleFolderCollapse(fg.folder.id)"
+            />
+            <span class="folder-name" @click.stop="toggleFolderCollapse(fg.folder.id)">{{ fg.folder.name }}</span>
+            <span class="folder-count">{{ fg.items.length }}</span>
+          </div>
+          <template v-if="!collapsedFolders.has(fg.folder.id)">
+            <div
+              v-for="c in fg.items"
+              :key="c.id"
+              class="convo"
+              :class="{ active: onChat && c.id === chat.activeId, 'drag-over': dragOverId === c.id, dragging: draggingConvoId === c.id }"
+              draggable="true"
+              @click="openConvo(c.id)"
+              @contextmenu="onCtxMenu($event, c.id)"
+              @dragstart="onDragStart($event, c.id)"
+              @dragend="onDragEnd"
+            >
+              <div class="convo-ico group-ico">
+                <span v-if="c.id === chat.streamingConvoId" class="convo-live-ring"></span>
+                <Icon v-else name="users" />
+              </div>
+              <div class="convo-title">{{ c.title }}</div>
+              <span v-if="c.id === chat.streamingConvoId" class="convo-live-label">生成中</span>
+            </div>
+          </template>
+        </template>
+
+        <!-- Unfiled group conversations (date buckets) -->
+        <template v-for="group in groupedGroupConvos" :key="group.key">
+          <div class="convo-date-sep" @dragover.prevent="dragOverUnfiled = true" @dragleave="dragOverUnfiled = false" @drop="onUnfiledDrop">
+            <Icon v-if="group.key === 'pinned'" name="pin" :size="9" style="color:var(--accent-deep)" />
+            {{ group.label }}
+          </div>
+          <div
+            v-for="c in group.items"
+            :key="c.id"
+            class="convo"
+            :class="{ active: onChat && c.id === chat.activeId, 'drag-over': dragOverId === c.id, dragging: draggingConvoId === c.id }"
+            draggable="true"
+            @click="openConvo(c.id)"
+            @contextmenu="onCtxMenu($event, c.id)"
+            @dragstart="onDragStart($event, c.id)"
+            @dragend="onDragEnd"
+          >
+            <div class="convo-ico group-ico">
+              <span v-if="c.id === chat.streamingConvoId" class="convo-live-ring"></span>
+              <Icon v-else name="users" />
+            </div>
+            <template v-if="renamingId === c.id">
+              <input v-model="renameVal" class="convo-rename-input" @keydown.enter="confirmRename" @keydown.escape="renamingId = null" @blur="confirmRename" autofocus />
+            </template>
+            <template v-else>
+              <div class="convo-title">{{ c.title }}</div>
+            </template>
+            <span v-if="c.id === chat.streamingConvoId" class="convo-live-label">生成中</span>
+          </div>
+        </template>
+
+        <!-- Unpinned group folders -->
+        <template v-for="fg in unpinnedGroupFolderGroups" :key="fg.folder.id">
+          <div
+            class="convo-date-sep folder-sep"
+            :class="{ 'folder-drop-target': dragOverFolderId === fg.folder.id, 'folder-sort-target': dropTargetFolderId === fg.folder.id, dragging: draggingFolderId === fg.folder.id }"
+            draggable="true"
+            @contextmenu="onFolderCtxMenu($event, fg.folder.id, fg.folder.name)"
+            @dragover="onFolderHeaderDragOver($event, fg.folder.id)"
+            @dragleave="onFolderHeaderDragLeave(fg.folder.id)"
+            @drop="onFolderHeaderDrop($event, fg.folder.id)"
+            @dragstart="onFolderSortDragStart($event, fg.folder.id)"
+            @dragend="onFolderSortDragEnd"
+          >
+            <Icon
+              :name="collapsedFolders.has(fg.folder.id) ? 'chevron_right' : 'chevron_down'"
+              :size="9"
+              style="cursor:pointer"
+              @click.stop="toggleFolderCollapse(fg.folder.id)"
+            />
+            <span class="folder-name" @click.stop="toggleFolderCollapse(fg.folder.id)">{{ fg.folder.name }}</span>
+            <span class="folder-count">{{ fg.items.length }}</span>
+          </div>
+          <template v-if="!collapsedFolders.has(fg.folder.id)">
+            <div
+              v-for="c in fg.items"
+              :key="c.id"
+              class="convo"
+              :class="{ active: onChat && c.id === chat.activeId, 'drag-over': dragOverId === c.id, dragging: draggingConvoId === c.id }"
+              draggable="true"
+              @click="openConvo(c.id)"
+              @contextmenu="onCtxMenu($event, c.id)"
+              @dragstart="onDragStart($event, c.id)"
+              @dragend="onDragEnd"
+            >
+              <div class="convo-ico group-ico">
+                <span v-if="c.id === chat.streamingConvoId" class="convo-live-ring"></span>
+                <Icon v-else name="users" />
+              </div>
+              <div class="convo-title">{{ c.title }}</div>
+              <span v-if="c.id === chat.streamingConvoId" class="convo-live-label">生成中</span>
+            </div>
+          </template>
+        </template>
+
+        <div v-if="!groupConversations.length" class="convo-empty">
+          <Icon name="users" :size="22" style="color:var(--ink-faint);margin-bottom:6px" />
+          <div>暂无群聊</div>
+          <div style="font-size:10.5px;margin-top:2px">点击「+」创建群聊</div>
+        </div>
       </div>
-      <div v-if="showNewFolderInput" class="new-folder-row">
-        <input
-          v-model="newFolderName"
-          class="convo-rename-input"
-          placeholder="文件夹名称"
-          @keydown.enter="createFolder"
-          @keydown.escape="showNewFolderInput = false"
-        />
-        <button class="btn mini" @click="createFolder">确定</button>
-      </div>
-      <div class="convo-list">
+
+      <!-- ── Personal conversation list ── -->
+      <div v-show="convoTab === 'personal'" class="convo-list">
+        <!-- New folder input row -->
+        <div v-if="showNewFolderInput" class="new-folder-row">
+          <input
+            v-model="newFolderName"
+            class="convo-rename-input"
+            placeholder="文件夹名称"
+            @keydown.enter="createFolder"
+            @keydown.escape="showNewFolderInput = false"
+          />
+          <button class="btn mini" @click="createFolder">确定</button>
+        </div>
+        <div v-if="showNewFolderInput === false" class="convo-folder-bar">
+          <button class="convo-folder-btn" title="新建文件夹" @click.stop="showNewFolderInput = true"><Icon name="folder" :size="12" /> 新建文件夹</button>
+        </div>
         <!-- Pinned folders (above date buckets) -->
         <template v-for="fg in pinnedFolderGroups" :key="fg.folder.id">
           <div
@@ -694,7 +869,7 @@ function doDeleteFolder() {
               <span class="m-name">未分组</span>
             </button>
             <button
-              v-for="f in chat.folders"
+              v-for="f in (convoTab === 'group' ? chat.groupFolders : chat.folders)"
               :key="f.id"
               class="menu-item"
               @click="moveToFolder(ctxMenu!.id, f.id)"
@@ -753,6 +928,103 @@ function doDeleteFolder() {
 </template>
 
 <style scoped>
+/* ── Conversation tabs (personal / group) ── */
+.convo-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 4px;
+  margin: 6px 10px;
+  background: var(--bg-hover);
+  border-radius: var(--r-sm);
+  flex-shrink: 0;
+}
+.convo-tabs > button {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-mute);
+  border-radius: 7px;
+  transition: all 120ms;
+  position: relative;
+}
+.convo-tabs > button:hover { color: var(--ink-soft); }
+.convo-tabs > button.active {
+  background: var(--bg-card);
+  color: var(--ink);
+  box-shadow: var(--shadow-sm);
+}
+.convo-tab-group {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.convo-tab-group > button:first-child {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-mute);
+  border-radius: 7px;
+  transition: all 120ms;
+}
+.convo-tab-group > button:first-child:hover { color: var(--ink-soft); }
+.convo-tab-group > button:first-child.active {
+  background: var(--bg-card);
+  color: var(--ink);
+  box-shadow: var(--shadow-sm);
+}
+.convo-tabs .pill {
+  font-size: 10px;
+  color: var(--ink-faint);
+  background: var(--bg-hover);
+  padding: 0 5px;
+  border-radius: 999px;
+  line-height: 14px;
+}
+.convo-tabs > button.active .pill {
+  background: var(--accent-tint);
+  color: var(--accent-deep);
+}
+.convo-tab-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  color: var(--ink-mute);
+  background: transparent;
+}
+.convo-tab-add:hover { background: var(--bg-hover); color: var(--ink); }
+
+/* ── Folder bar in personal tab ── */
+.convo-folder-bar {
+  display: flex;
+  padding: 4px 10px;
+  flex-shrink: 0;
+}
+.convo-folder-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--ink-mute);
+  padding: 3px 8px;
+  border-radius: 5px;
+}
+.convo-folder-btn:hover { background: var(--bg-hover); color: var(--ink); }
+
+/* ── Context menu ── */
 .convo-rename-input {
   flex: 1;
   min-width: 0;
@@ -768,6 +1040,7 @@ function doDeleteFolder() {
   position: fixed;
   inset: 0;
   z-index: 999;
+  background: rgba(0, 0, 0, 0.15);
 }
 .ctx-menu {
   position: fixed;

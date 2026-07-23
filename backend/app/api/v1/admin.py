@@ -468,3 +468,160 @@ async def mcp_server_status(name: str, db: AsyncSession = Depends(get_db)):
                 }
     except Exception as e:  # noqa: BLE001
         return {"name": name, "status": "unreachable", "reachable": False, "error": str(e)}
+
+
+# ── Usage / billing dashboard ────────────────────────────────────────────
+@router.get("/usage")
+async def get_usage(
+    period: str = Query("month", pattern="^(month|week)$"),
+    breakdown: str = Query("profile", pattern="^(user|profile|model)$"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Token usage breakdown for the billing dashboard.
+
+    Aggregates Message.tokens_in + tokens_out by user / profile / model,
+    with a daily trend for the selected period.
+    """
+    from datetime import datetime, timedelta, timezone
+    from app.db.models.conversation import Message
+    from app.db.models.agent import Profile
+    from app.services import settings_service
+
+    now = datetime.now(tz=timezone.utc)
+    if period == "week":
+        since = now - timedelta(days=7)
+    else:
+        since = now - timedelta(days=30)
+
+    # Daily trend
+    daily_rows = (
+        await db.execute(
+            select(
+                func.date_trunc("day", Message.created_at).label("date"),
+                func.sum(Message.tokens_in).label("tin"),
+                func.sum(Message.tokens_out).label("tout"),
+                func.count(Message.id).label("cnt"),
+            )
+            .where(Message.created_at >= since, Message.role == "agent")
+            .group_by("date")
+            .order_by("date")
+        )
+    ).all()
+    daily = [
+        {"date": str(r.date), "tokens_in": int(r.tin or 0), "tokens_out": int(r.tout or 0), "count": int(r.cnt)}
+        for r in daily_rows
+    ]
+
+    # Breakdown by dimension
+    if breakdown == "user":
+        dim_rows = (
+            await db.execute(
+                select(
+                    Message.owner_id.label("key"),
+                    func.sum(Message.tokens_in).label("tin"),
+                    func.sum(Message.tokens_out).label("tout"),
+                    func.count(Message.id).label("cnt"),
+                )
+                .where(Message.created_at >= since, Message.role == "agent")
+                .group_by("key")
+                .order_by(func.sum(Message.tokens_in + Message.tokens_out).desc())
+            )
+        ).all()
+        # Resolve user names
+        from app.db.models.user import User
+        user_ids = [r.key for r in dim_rows if r.key]
+        users_map = {}
+        if user_ids:
+            users = (await db.execute(select(User).where(User.id.in_(user_ids)))).scalars().all()
+            users_map = {u.id: u.name for u in users}
+        by_dimension = [
+            {
+                "key": users_map.get(r.key, str(r.key)[:8]) if r.key else "unknown",
+                "tokens_in": int(r.tin or 0),
+                "tokens_out": int(r.tout or 0),
+                "count": int(r.cnt),
+            }
+            for r in dim_rows
+        ]
+    elif breakdown == "model":
+        dim_rows = (
+            await db.execute(
+                select(
+                    Profile.default_model.label("key"),
+                    func.sum(Message.tokens_in).label("tin"),
+                    func.sum(Message.tokens_out).label("tout"),
+                    func.count(Message.id).label("cnt"),
+                )
+                .select_from(Message)
+                .outerjoin(Profile, Message.profile_id == Profile.id)
+                .where(Message.created_at >= since, Message.role == "agent")
+                .group_by("key")
+                .order_by(func.sum(Message.tokens_in + Message.tokens_out).desc())
+            )
+        ).all()
+        by_dimension = [
+            {
+                "key": r.key or "unknown",
+                "tokens_in": int(r.tin or 0),
+                "tokens_out": int(r.tout or 0),
+                "count": int(r.cnt),
+            }
+            for r in dim_rows
+        ]
+    else:  # profile
+        dim_rows = (
+            await db.execute(
+                select(
+                    Message.profile_id.label("key"),
+                    func.sum(Message.tokens_in).label("tin"),
+                    func.sum(Message.tokens_out).label("tout"),
+                    func.count(Message.id).label("cnt"),
+                )
+                .where(Message.created_at >= since, Message.role == "agent")
+                .group_by("key")
+                .order_by(func.sum(Message.tokens_in + Message.tokens_out).desc())
+            )
+        ).all()
+        # Resolve profile names
+        profile_ids = [r.key for r in dim_rows if r.key]
+        profiles_map = {}
+        if profile_ids:
+            profiles = (await db.execute(select(Profile).where(Profile.id.in_(profile_ids)))).scalars().all()
+            profiles_map = {p.id: p.name for p in profiles}
+        by_dimension = [
+            {
+                "key": profiles_map.get(r.key, "未绑定") if r.key else "未绑定",
+                "tokens_in": int(r.tin or 0),
+                "tokens_out": int(r.tout or 0),
+                "count": int(r.cnt),
+            }
+            for r in dim_rows
+        ]
+
+    # Model pricing for cost calculation
+    settings = await settings_service.get(db)
+    pricing = (settings.data or {}).get("model_pricing", {})
+    # For cost: match by_dimension key against pricing keys (model breakdown uses model directly;
+    # for profile/user, we don't have model-level cost without an extra join, so cost is 0 for those).
+    def calc_cost(key: str, tin: int, tout: int) -> float:
+        p = pricing.get(key)
+        if not p:
+            return 0.0
+        return (tin / 1000) * p.get("input_per_1k", 0) + (tout / 1000) * p.get("output_per_1k", 0)
+
+    for item in by_dimension:
+        item["cost"] = round(calc_cost(item["key"], item["tokens_in"], item["tokens_out"]), 4)
+
+    total_in = sum(d["tokens_in"] for d in daily)
+    total_out = sum(d["tokens_out"] for d in daily)
+    total_cost = sum(item["cost"] for item in by_dimension)
+
+    return {
+        "period": period,
+        "breakdown": breakdown,
+        "total_tokens_in": total_in,
+        "total_tokens_out": total_out,
+        "total_cost": round(total_cost, 4),
+        "daily": daily,
+        "by_dimension": by_dimension,
+    }

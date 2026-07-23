@@ -119,7 +119,7 @@
   /* Group chat list is a fixed-priority block: it can shrink when vertical
      space is tight (low-res laptops) but never grows beyond its content,
      keeping it from squeezing the main conversation list to zero height. */
-  .side .convo-list.group-list { flex: 0 1 auto; max-height: 200px; min-height: 0; }
+  .side .convo-list.group-list { flex: 1; min-height: 0; overflow-y: auto; }
   .convo {
     display: flex; align-items: center; gap: 9px;
     padding: 7px 10px;
@@ -178,9 +178,9 @@
      each section independently scrollable. */
   @media (max-height: 640px) {
     .side-inner { overflow-y: auto; }
-    .side .team-scroll,
-    .side .convo-list.group-list { max-height: none; flex: 0 0 auto; }
-    .side .convo-list { flex: 0 0 auto; }
+    .side .team-scroll { max-height: none; flex: 0 0 auto; }
+    .side .convo-list,
+    .side .convo-list.group-list { flex: 0 0 auto; }
     .side-foot { flex-shrink: 0; }
   }
   /* Narrow-width screens (e.g. 1280×720 with side panel docked): slim the
@@ -734,6 +734,9 @@
     --bg-canvas: #16140f;
     --bg-side:   #1c1a14;
     --bg-panel:  #211e18;
+    --surface:   #252525;
+    --surface-raised: #2a2820;
+    --border:    #2c2820;
     --ink:       #f0ebde;
     --ink-soft:  #c8c1ae;
     --ink-mute:  #847c69;

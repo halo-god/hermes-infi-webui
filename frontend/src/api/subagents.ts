@@ -11,6 +11,8 @@ export interface Subagent {
   last_active_at: string | null;
   error_detail: string | null;
   unread_count: number;
+  last_snippet: string | null;
+  step_count: number;
   created_at: string;
 }
 

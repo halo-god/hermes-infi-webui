@@ -13,16 +13,20 @@ from app.db.models.mixins import Timestamps, UUIDPrimaryKey
 
 
 class ConversationFolder(UUIDPrimaryKey, Timestamps, Base):
-    """User-defined folder for grouping personal conversations in the sidebar."""
+    """User-defined folder for grouping conversations in the sidebar.
+
+    ``type`` distinguishes personal vs group chat folders so the sidebar's
+    tab-switched lists each have their own independent folder set."""
     __tablename__ = "conversation_folders"
     __table_args__ = (
-        UniqueConstraint("owner_id", "name", name="uq_convo_folder_owner_name"),
+        UniqueConstraint("owner_id", "name", "type", name="uq_convo_folder_owner_name_type"),
     )
 
     owner_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
     name: Mapped[str] = mapped_column(String(80), nullable=False)
+    type: Mapped[str] = mapped_column(String(16), default="personal", nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     pinned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 

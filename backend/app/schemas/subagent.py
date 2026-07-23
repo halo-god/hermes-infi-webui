@@ -35,4 +35,6 @@ class SubagentOut(BaseModel):
     last_active_at: datetime | None
     error_detail: str | None
     unread_count: int = 0
+    last_snippet: str | None = None
+    step_count: int = 0
     created_at: datetime

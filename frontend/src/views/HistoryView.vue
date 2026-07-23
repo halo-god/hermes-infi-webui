@@ -60,7 +60,8 @@ function updatedLabel(iso: string): string {
 const base = computed(() => {
   let list = conversations.value.slice();
   if (scope.value === "pinned") list = list.filter((c) => c.pinned);
-  else if (scope.value === "team") list = list.filter(() => false);
+  else if (scope.value === "team") list = list.filter((c) => c.type === "group" || c.team_id);
+  else if (scope.value === "personal") list = list.filter((c) => c.type !== "group");
   if (sortBy.value === "name") list.sort((a, b) => a.title.localeCompare(b.title, "zh"));
   else if (sortBy.value === "agent") list.sort((a, b) => agentLookup(a.primary_agent_id).label.localeCompare(agentLookup(b.primary_agent_id).label, "zh"));
   else list.sort((a, b) => +new Date(b.updated_at) - +new Date(a.updated_at));

@@ -241,6 +241,8 @@ export function registerStreamHandlers(
         context_size: ev.context_size,
         context_used: ev.context_used,
       };
+      // Also persist into content.usage so openConversation can restore it.
+      m.content = { ...m.content, usage: m.usage };
       triggerMessages();
     }
     if (ev.context_size) {

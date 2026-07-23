@@ -249,6 +249,7 @@ export interface Conversation {
 export interface ConversationFolder {
   id: string;
   name: string;
+  type?: "personal" | "group";
   sort_order: number;
   pinned: boolean;
   created_at: string;

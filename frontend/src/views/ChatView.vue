@@ -1137,6 +1137,8 @@ onUnmounted(() => {
                       <button v-if="canConsolidate && activeConvo?.team_id" title="沉淀为团队知识" @click="consolidateOutput(chat.messages[row.index], 'team_knowledge')"><Icon name="pin" :size="12" /></button>
                       <button v-if="canConsolidate && activeConvo?.project_id" title="从此消息生成任务" @click="deriveTasks(chat.messages[row.index])"><Icon name="check" :size="12" /></button>
                     </template>
+                  </div>
+                </template>
                 <div v-if="chat.messages[row.index].role === 'agent' && chat.messages[row.index].content.files?.length" class="msg-files" style="margin-top:6px">
                   <div v-for="f in chat.messages[row.index].content.files" :key="f.id" class="msg-file-chip-wrap">
                     <button class="msg-file-chip" @click="openFile(f.id)">
@@ -1294,25 +1296,6 @@ onUnmounted(() => {
   border-radius: 4px;
   padding: 1px 7px;
 }
-.group-actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  margin-top: 3px;
-  opacity: 0;
-  transition: opacity 120ms;
-}
-.msg:hover .group-actions { opacity: 1; }
-.group-actions button {
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  color: var(--ink-mute);
-  padding: 3px;
-  border-radius: 5px;
-  display: inline-flex;
-}
-.group-actions button:hover { background: var(--accent-tint); color: var(--accent); }
 /* Unified message actions row (replaces separate group-actions + msg-tools) */
 .msg-actions {
   display: flex;
@@ -1338,7 +1321,7 @@ onUnmounted(() => {
   position: absolute;
   bottom: 120%;
   left: 0;
-  display: none;
+  display: flex;
   gap: 2px;
   padding: 4px;
   background: var(--surface);
@@ -1347,7 +1330,6 @@ onUnmounted(() => {
   box-shadow: var(--shadow-md);
   z-index: 20;
 }
-.react-pop { display: flex; }
 .react-pop button { font-size: 15px; padding: 2px 4px; border: none; background: transparent; cursor: pointer; border-radius: 5px; }
 .react-pop button:hover { background: var(--accent-tint); }
 .typing-indicator {

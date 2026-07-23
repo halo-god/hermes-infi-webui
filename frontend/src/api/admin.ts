@@ -9,6 +9,31 @@ import type {
   User,
 } from "@/types";
 
+export interface UsageDimensionItem {
+  key: string;
+  tokens_in: number;
+  tokens_out: number;
+  count: number;
+  cost: number;
+}
+
+export interface UsageDailyItem {
+  date: string;
+  tokens_in: number;
+  tokens_out: number;
+  count: number;
+}
+
+export interface UsageData {
+  period: string;
+  breakdown: string;
+  total_tokens_in: number;
+  total_tokens_out: number;
+  total_cost: number;
+  daily: UsageDailyItem[];
+  by_dimension: UsageDimensionItem[];
+}
+
 export const adminApi = {
   async stats(): Promise<AdminStats> {
     return (await http.get<AdminStats>("/admin/stats")).data;
@@ -36,6 +61,9 @@ export const adminApi = {
   },
   async audit(params?: { action?: string; result?: string; limit?: number; date_from?: string; date_to?: string }): Promise<AuditEntry[]> {
     return (await http.get<AuditEntry[]>("/admin/audit", { params: params || {} })).data;
+  },
+  async getUsage(params?: { period?: string; breakdown?: string }): Promise<UsageData> {
+    return (await http.get<UsageData>("/admin/usage", { params: params || {} })).data;
   },
   async getSettings(): Promise<SystemSettings> {
     return (await http.get<SystemSettings>("/admin/settings")).data;

@@ -80,6 +80,8 @@ class MessageOut(BaseModel):
     profile_id: uuid.UUID | None = None
     content: dict
     status: str
+    tokens_in: int = 0
+    tokens_out: int = 0
     mentions: list[str] | None = None
     created_at: datetime
     reply_to_id: uuid.UUID | None = None
@@ -120,6 +122,7 @@ class ConversationFolderOut(BaseModel):
 
     id: uuid.UUID
     name: str
+    type: str = "personal"
     sort_order: int
     pinned: bool = False
     created_at: datetime
@@ -128,6 +131,7 @@ class ConversationFolderOut(BaseModel):
 
 class ConversationFolderCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
+    type: str = Field(default="personal", pattern="^(personal|group)$")
 
 
 class ConversationFolderUpdate(BaseModel):

@@ -46,6 +46,7 @@ export const useChatStore = defineStore("chat", () => {
   const hasMoreConversations = ref(true);
   const loadingMoreConvos = ref(false);
   const folders = ref<ConversationFolder[]>([]);
+  const groupFolders = ref<ConversationFolder[]>([]);
   // Group chat: persistent WS id + live typing indicators for the open group.
   const groupStreamId = ref<string | null>(null);
   const typingUsers = ref<{ user_id: string; name: string }[]>([]);
@@ -121,16 +122,23 @@ export const useChatStore = defineStore("chat", () => {
 
   async function loadFolders() {
     try {
-      folders.value = await conversationsApi.listFolders();
+      const [personal, group] = await Promise.all([
+        conversationsApi.listFolders("personal"),
+        conversationsApi.listFolders("group"),
+      ]);
+      folders.value = personal;
+      groupFolders.value = group;
     } catch (e) {
       console.error("[chat] loadFolders failed:", e);
       folders.value = [];
+      groupFolders.value = [];
     }
   }
 
-  async function createFolder(name: string) {
-    const f = await conversationsApi.createFolder(name);
-    folders.value.push(f);
+  async function createFolder(name: string, type: "personal" | "group" = "personal") {
+    const f = await conversationsApi.createFolder(name, type);
+    if (type === "group") groupFolders.value.push(f);
+    else folders.value.push(f);
     return f;
   }
 
@@ -138,6 +146,8 @@ export const useChatStore = defineStore("chat", () => {
     const f = await conversationsApi.updateFolder(id, { name });
     const i = folders.value.findIndex((x) => x.id === id);
     if (i >= 0) folders.value[i] = f;
+    const gi = groupFolders.value.findIndex((x) => x.id === id);
+    if (gi >= 0) groupFolders.value[gi] = f;
     return f;
   }
 
@@ -145,11 +155,14 @@ export const useChatStore = defineStore("chat", () => {
     // Optimistic update.
     const i = folders.value.findIndex((x) => x.id === id);
     if (i >= 0) folders.value[i] = { ...folders.value[i], pinned };
+    const gi = groupFolders.value.findIndex((x) => x.id === id);
+    if (gi >= 0) groupFolders.value[gi] = { ...groupFolders.value[gi], pinned };
     try {
       await conversationsApi.updateFolder(id, { pinned });
     } catch (err) {
       // Revert on failure.
       if (i >= 0) folders.value[i] = { ...folders.value[i], pinned: !pinned };
+      if (gi >= 0) groupFolders.value[gi] = { ...groupFolders.value[gi], pinned: !pinned };
       throw err;
     }
   }
@@ -158,6 +171,9 @@ export const useChatStore = defineStore("chat", () => {
     // Optimistic update.
     const map = new Map(items.map((it) => [it.id, it.sort_order]));
     folders.value = folders.value.map((f) =>
+      map.has(f.id) ? { ...f, sort_order: map.get(f.id)! } : f
+    );
+    groupFolders.value = groupFolders.value.map((f) =>
       map.has(f.id) ? { ...f, sort_order: map.get(f.id)! } : f
     );
     try {
@@ -172,6 +188,7 @@ export const useChatStore = defineStore("chat", () => {
   async function deleteFolder(id: string) {
     await conversationsApi.deleteFolder(id);
     folders.value = folders.value.filter((f) => f.id !== id);
+    groupFolders.value = groupFolders.value.filter((f) => f.id !== id);
     // Clear folder_id on local conversations (backend already SET NULL).
     for (const c of conversations.value) {
       if (c.folder_id === id) c.folder_id = null;
@@ -242,6 +259,19 @@ export const useChatStore = defineStore("chat", () => {
       }));
       hasMoreMessages.value = detail.messages.length >= 50;
       activeAgents.value = detail.active_agent_ids || ["hermes"];
+
+      // Restore context ring from the last agent message's usage data.
+      const lastAgentMsg = [...messages.value].reverse().find(
+        (m) => m.role === "agent" && (m.content as Record<string, unknown>)?.usage,
+      );
+      if (lastAgentMsg) {
+        const u = (lastAgentMsg.content as Record<string, unknown>).usage as
+          { input_tokens?: number; output_tokens?: number; context_size?: number; context_used?: number } | undefined;
+        if (u) {
+          if (u.context_size) contextSize.value = u.context_size;
+          contextTokens.value = u.context_used || ((u.input_tokens || 0) + (u.output_tokens || 0));
+        }
+      }
       // Ensure the conversation is in the sidebar list (covers newly created convos)
       const idx = conversations.value.findIndex((c) => c.id === id);
       if (idx !== -1) {
@@ -309,7 +339,14 @@ export const useChatStore = defineStore("chat", () => {
       if (older.length === 0) {
         hasMoreMessages.value = false;
       } else {
-        messages.value = [...older, ...messages.value];
+        // Map content fields to steps/thinking/plan for older messages (same as openConversation).
+        const mapped = older.map((m: Message) => ({
+          ...m,
+          steps: m.content?.tool_calls as { title: string; status: string }[] | undefined,
+          thinking: (m.content as Record<string, unknown>)?.thinking as string | undefined,
+          plan: (m.content as Record<string, unknown>)?.plan as PlanEntry[] | undefined,
+        }));
+        messages.value = [...mapped, ...messages.value];
         if (older.length < 50) hasMoreMessages.value = false;
       }
     } catch (e) {
@@ -644,6 +681,7 @@ export const useChatStore = defineStore("chat", () => {
     hasMoreConversations,
     loadingMoreConvos,
     folders,
+    groupFolders,
     loadFolders,
     createFolder,
     renameFolder,

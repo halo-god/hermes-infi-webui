@@ -572,7 +572,7 @@ class Runner:
             except Exception:
                 pass
 
-        acc = {"text": "", "cancelled": False, "current_msg_id": message_id, "tool_since_split": False, "thinking": "", "plan": None, "files": [], "total_tokens": 0}
+        acc = {"text": "", "cancelled": False, "current_msg_id": message_id, "tool_since_split": False, "thinking": "", "plan": None, "files": [], "total_tokens": 0, "usage": None}
         steps: list[dict] = []
 
         async def on_update(update: dict) -> None:
@@ -629,6 +629,11 @@ class Runner:
                 output_tokens = update.get("output_tokens", 0)
                 total = input_tokens + output_tokens
                 acc["total_tokens"] = total
+                # Persist usage in acc for _finalize to write to DB.
+                acc["usage"] = {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                }
 
                 # Warn when approaching the context limit so the UI can show a
                 # heads-up and the next turn may trigger compression.
@@ -668,6 +673,12 @@ class Runner:
             elif kind == "usage_update":
                 size = update.get("size", 0)
                 used = update.get("used", 0)
+                # Merge context size/used into the persisted usage dict.
+                if acc["usage"]:
+                    acc["usage"]["context_size"] = size
+                    acc["usage"]["context_used"] = used
+                else:
+                    acc["usage"] = {"input_tokens": 0, "output_tokens": 0, "context_size": size, "context_used": used}
                 await R.publish_event(conversation_id, {
                     "type": "usage",
                     "message_id": acc["current_msg_id"],
@@ -876,7 +887,7 @@ class Runner:
         await self._finalize(
             acc["current_msg_id"], acc["text"], status, steps,
             acc.get("thinking") or "", acc.get("plan"), acc.get("files"),
-            acc.get("clarifies"),
+            acc.get("clarifies"), acc.get("usage"),
         )
         if status == "complete" and matched_skill_ids:
             await self._record_skill_firings(
@@ -1014,6 +1025,7 @@ class Runner:
         self, message_id: str, text: str, status: str, steps: list[dict] | None = None,
         thinking: str | None = None, plan: list[dict] | None = None,
         files: list[dict] | None = None, clarifies: list[dict] | None = None,
+        usage: dict | None = None,
     ) -> None:
         async with async_session_maker() as db:
             msg = await db.get(Message, uuid.UUID(message_id))
@@ -1029,6 +1041,10 @@ class Runner:
                     content["files"] = files
                 if clarifies:
                     content["clarifies"] = clarifies
+                if usage:
+                    content["usage"] = usage
+                    msg.tokens_in = usage.get("input_tokens", 0)
+                    msg.tokens_out = usage.get("output_tokens", 0)
                 msg.content = content
                 msg.status = status
                 convo = await db.get(Conversation, msg.conversation_id)

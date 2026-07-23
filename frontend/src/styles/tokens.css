@@ -5,6 +5,10 @@
   --bg-panel: #ffffff;
   --bg-card: #fffdf8;
   --bg-hover: rgba(0,0,0,0.04);
+  --surface: var(--bg-card);
+  --surface-raised: var(--bg-panel);
+  --surface-hover: var(--bg-hover);
+  --border: var(--rule);
   --ink: #1d1a14;
   --ink-soft: #4b463c;
   --ink-mute: #8a8474;
@@ -36,6 +40,10 @@
 [data-theme="dark"] {
   --bg-card: #252525;
   --bg-hover: rgba(255,255,255,0.06);
+  --surface: var(--bg-card);
+  --surface-raised: #2a2820;
+  --surface-hover: var(--bg-hover);
+  --border: var(--rule);
   --ink-on-accent: #111111;
   --danger: #e05a48;
   --ok: #5a9a48;

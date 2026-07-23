@@ -159,20 +159,19 @@ async def list_conversations(
 # ── conversation folders (grouping) ──────────────────────────────────
 @router.get("/folders", response_model=list[ConversationFolderOut])
 async def list_folders(
+    type: str | None = Query(None),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    rows = (
-        await db.execute(
-            select(ConversationFolder)
-            .where(ConversationFolder.owner_id == user.id)
-            .order_by(
-                ConversationFolder.pinned.desc(),
-                ConversationFolder.sort_order,
-                ConversationFolder.created_at,
-            )
-        )
-    ).scalars().all()
+    stmt = select(ConversationFolder).where(ConversationFolder.owner_id == user.id)
+    if type:
+        stmt = stmt.where(ConversationFolder.type == type)
+    stmt = stmt.order_by(
+        ConversationFolder.pinned.desc(),
+        ConversationFolder.sort_order,
+        ConversationFolder.created_at,
+    )
+    rows = (await db.execute(stmt)).scalars().all()
     return rows
 
 
@@ -182,11 +181,12 @@ async def create_folder(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    # Next sort_order = current max + 1
+    # Next sort_order = current max + 1 (within same type)
     max_order = (
         await db.execute(
             select(func.max(ConversationFolder.sort_order)).where(
-                ConversationFolder.owner_id == user.id
+                ConversationFolder.owner_id == user.id,
+                ConversationFolder.type == payload.type,
             )
         )
     ).scalar_one_or_none() or 0
@@ -194,6 +194,7 @@ async def create_folder(
     folder = ConversationFolder(
         owner_id=user.id,
         name=payload.name.strip(),
+        type=payload.type,
         sort_order=max_order + 1,
     )
     db.add(folder)
@@ -1308,7 +1309,27 @@ async def toggle_reaction(
 
 # ── Background subagents (persistent, non-blocking ACP peer sessions) ──────
 
-def _subagent_out(row, unread_count: int = 0) -> SubagentOut:
+async def _subagent_out(row, db: AsyncSession, unread_count: int = 0) -> SubagentOut:
+    # Fetch last agent message snippet + step count from sub-conversation.
+    from app.db.models.conversation import Message
+    last_msg = (
+        await db.execute(
+            select(Message)
+            .where(Message.conversation_id == row.subagent_conversation_id, Message.role == "agent")
+            .order_by(Message.created_at.desc())
+            .limit(1)
+        )
+    ).scalars().first()
+
+    last_snippet = None
+    step_count = 0
+    if last_msg:
+        content = last_msg.content or {}
+        text = content.get("text", "") if isinstance(content, dict) else ""
+        last_snippet = text[:100] if text else None
+        tool_calls = content.get("tool_calls", []) if isinstance(content, dict) else []
+        step_count = len(tool_calls) if isinstance(tool_calls, list) else 0
+
     return SubagentOut(
         id=row.id,
         parent_conversation_id=row.parent_conversation_id,
@@ -1320,6 +1341,8 @@ def _subagent_out(row, unread_count: int = 0) -> SubagentOut:
         last_active_at=row.last_active_at,
         error_detail=row.error_detail,
         unread_count=unread_count,
+        last_snippet=last_snippet,
+        step_count=step_count,
         created_at=row.created_at,
     )
 
@@ -1344,7 +1367,7 @@ async def spawn_subagent(
         purpose=payload.purpose, initial_prompt=payload.initial_prompt,
         agent_id=payload.agent_id, profile_id=payload.profile_id,
     )
-    return _subagent_out(row)
+    return await _subagent_out(row, db)
 
 
 @router.get("/{conversation_id}/subagents", response_model=list[SubagentOut])
@@ -1355,7 +1378,7 @@ async def list_subagents(
 ):
     await _require_convo(db, conversation_id, user)
     pairs = await subagent_service.list_subagents(db, conversation_id)
-    return [_subagent_out(row, unread) for row, unread in pairs]
+    return [await _subagent_out(row, db, unread) for row, unread in pairs]
 
 
 @router.get("/{conversation_id}/subagents/{subagent_id}", response_model=SubagentOut)
@@ -1367,7 +1390,7 @@ async def get_subagent(
 ):
     await _require_convo(db, conversation_id, user)
     row = await _require_subagent(db, conversation_id, subagent_id, user)
-    return _subagent_out(row)
+    return await _subagent_out(row, db)
 
 
 @router.post("/{conversation_id}/subagents/{subagent_id}/messages", status_code=202)
