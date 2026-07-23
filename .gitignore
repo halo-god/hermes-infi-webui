@@ -15,3 +15,4 @@ build/
 __MACOSX/
 workspaces/
 CA/
+.workbuddy/
