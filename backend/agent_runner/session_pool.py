@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
+from collections import deque
 
 from app.config import settings
 from agent_runner.acp_client import ACPClient, OnFsWrite, OnUpdate, profile_env
@@ -28,12 +30,13 @@ class SessionPool:
     def __init__(self) -> None:
         self._clients: dict[str, ACPClient] = {}
         self._last_used: dict[str, float] = {}
-        # profile_dir the client was spawned with — HERMES_HOME is fixed at
-        # spawn, so a profile switch must drop and respawn the subprocess.
         self._profile_dirs: dict[str, str | None] = {}
-        # mcpServers the client's session was created with — also fixed at
-        # session creation, so a change requires a respawn just like profile_dir.
         self._mcp_servers: dict[str, list | None] = {}
+        # Warm pool: pre-initialized ACP clients keyed by profile_dir.
+        # Eliminates spawn+init cold start for new conversations.
+        self._warm_pool: dict[str | None, deque[ACPClient]] = {}
+        self._warm_lock = asyncio.Lock()
+        self._agents: dict = {}  # set by Runner before warmup()
 
     def _alive(self, c: ACPClient) -> bool:
         return (
@@ -41,6 +44,101 @@ class SessionPool:
             and c._proc is not None
             and c._proc.returncode is None
         )
+
+    # ── Warm pool: pre-initialized clients for fast cold-start ──
+
+    def set_agents(self, agents: dict) -> None:
+        """Called by Runner after agent discovery, before warmup()."""
+        self._agents = agents
+
+    async def _spawn_warm_one(self, command: list[str], cwd: str, profile_dir: str | None = None) -> ACPClient | None:
+        """Spawn + initialize a client (no session yet). Returns None on failure."""
+        c = ACPClient(
+            list(command), cwd,
+            protocol_version=settings.acp_protocol_version,
+            on_update=lambda u: None, on_fs_write=lambda p, c2: None,
+            env=profile_env(profile_dir),
+        )
+        try:
+            await asyncio.wait_for(c.start(), timeout=POOL_START_TIMEOUT)
+            init_result = await asyncio.wait_for(c.initialize(), timeout=POOL_INIT_TIMEOUT)
+            c._init_result = init_result  # cached for resume capability check
+            return c
+        except Exception:  # noqa: BLE001
+            logger.warning("Warm pool: failed to spawn a warm client", exc_info=True)
+            try:
+                await c.stop()
+            except Exception:
+                pass
+            return None
+
+    async def warmup(self) -> None:
+        """Pre-spawn idle clients at Runner startup. Warms the default profile
+        (None) plus any active profiles found in the DB so most conversations
+        hit a warm client. Non-blocking on failure."""
+        n = settings.session_pool_warm_size
+        # Allow runtime override via SystemSettings.data.runner.warm_pool_size
+        try:
+            from app.services import settings_service
+            from app.db.base import async_session_maker
+            async with async_session_maker() as db:
+                s = await settings_service.get(db)
+                runner_cfg = (s.data or {}).get("runner", {})
+                if "warm_pool_size" in runner_cfg:
+                    n = int(runner_cfg["warm_pool_size"])
+        except Exception:
+            logger.debug("Warm pool: could not read runner config from DB", exc_info=True)
+
+        if n <= 0 or not self._agents:
+            return
+        agent = self._agents.get("hermes")
+        if agent is None:
+            return
+        cwd = os.path.join(settings.workspace_root, "_warmup")
+        os.makedirs(cwd, exist_ok=True)
+
+        # Collect profile_dirs to warm: default (None) + active profiles from DB.
+        profile_dirs: list[str | None] = [None]
+        try:
+            from app.db.base import async_session_maker
+            from app.db.models.agent import Profile
+            from sqlalchemy import select
+            async with async_session_maker() as db:
+                rows = (await db.execute(
+                    select(Profile.path).where(Profile.is_active.is_(True))
+                )).scalars().all()
+                for path in rows:
+                    if path:
+                        import os as _os
+                        pd = _os.path.dirname(_os.path.expanduser(path))
+                        if pd not in profile_dirs:
+                            profile_dirs.append(pd)
+        except Exception:
+            logger.debug("Warm pool: could not load profiles from DB", exc_info=True)
+
+        logger.info("Warm pool: pre-spawning %d per profile for %d profile(s)...", n, len(profile_dirs))
+        for pd in profile_dirs:
+            for _ in range(n):
+                c = await self._spawn_warm_one(agent.command, cwd, pd)
+                if c is not None:
+                    self._warm_pool.setdefault(pd, deque()).append(c)
+        total = sum(len(v) for v in self._warm_pool.values())
+        logger.info("Warm pool: %d clients ready across %d profiles", total, len(self._warm_pool))
+
+    async def _refill_warm_pool(self, profile_dir: str | None = None) -> None:
+        """Replenish the warm pool for a given profile after a client is taken."""
+        target = settings.session_pool_warm_size
+        agent = self._agents.get("hermes")
+        if agent is None or target <= 0:
+            return
+        async with self._warm_lock:
+            dq = self._warm_pool.setdefault(profile_dir, deque())
+            if len(dq) >= target:
+                return
+            cwd = os.path.join(settings.workspace_root, "_warmup")
+            c = await self._spawn_warm_one(agent.command, cwd, profile_dir)
+            if c is not None:
+                dq.append(c)
 
     async def get(
         self,
@@ -88,31 +186,62 @@ class SessionPool:
         if c is not None:
             await self.drop(pool_key)
 
-        # Build command
-        effective_command = list(command)
+        # ── Warm pool fast path: if this is a default-config session
+        # (no profile_dir, no MCP servers), grab a pre-initialized client
+        # from the warm pool to skip the spawn+initialize cold start. ──
+        c = None
+        init_result = None
+        if not mcp_servers:
+            warm_deque = self._warm_pool.get(profile_dir)
+            if warm_deque:
+                try:
+                    c = warm_deque.popleft()
+                    if self._alive(c):
+                        c.on_update = on_update
+                        c.on_fs_write = on_fs_write
+                        c.cwd = cwd
+                        init_result = getattr(c, "_init_result", {}) or {}
+                        logger.info(
+                            "Warm pool hit for conv %s (ns=%s, profile=%s) - skipping spawn+init",
+                            conversation_id[:8], session_namespace, profile_dir or "default",
+                        )
+                        asyncio.create_task(self._refill_warm_pool(profile_dir))
+                    else:
+                        try:
+                            await c.stop()
+                        except Exception:
+                            pass
+                        c = None
+                except IndexError:
+                    c = None
 
-        c = ACPClient(
-            effective_command,
-            cwd,
-            protocol_version=settings.acp_protocol_version,
-            on_update=on_update,
-            on_fs_write=on_fs_write,
-            env=profile_env(profile_dir),
-        )
+        # Cold path: spawn a fresh subprocess
+        if c is None:
+            effective_command = list(command)
+            c = ACPClient(
+                effective_command,
+                cwd,
+                protocol_version=settings.acp_protocol_version,
+                on_update=on_update,
+                on_fs_write=on_fs_write,
+                env=profile_env(profile_dir),
+            )
+            try:
+                await asyncio.wait_for(c.start(), timeout=POOL_START_TIMEOUT)
+                init_result = await asyncio.wait_for(c.initialize(), timeout=POOL_INIT_TIMEOUT)
+                if settings.hermes_acp_auth_method:
+                    await asyncio.wait_for(
+                        c.authenticate(settings.hermes_acp_auth_method), timeout=POOL_INIT_TIMEOUT,
+                    )
+            except (asyncio.TimeoutError, Exception) as exc:
+                logger.error("Failed to spawn+init for %s (ns=%s): %s", conversation_id, session_namespace, exc)
+                await c.stop()
+                raise
+
+        # ── Session creation / resume (shared by warm + cold paths) ──
         try:
-            await asyncio.wait_for(c.start(), timeout=POOL_START_TIMEOUT)
-            init_result = await asyncio.wait_for(c.initialize(), timeout=POOL_INIT_TIMEOUT)
-            if settings.hermes_acp_auth_method:
-                await asyncio.wait_for(
-                    c.authenticate(settings.hermes_acp_auth_method), timeout=POOL_INIT_TIMEOUT,
-                )
-
-            # Try to resume existing session first
             session_id = None
-            if acp_session_id:
-                # v0.16.0+: capabilities nested under agentCapabilities.sessionCapabilities
-                # Legacy: loadSession at top level
-                # NOTE: capability values are empty dicts {} (truthy=False), check key presence
+            if acp_session_id and init_result:
                 agent_caps = init_result.get("agentCapabilities") or init_result.get("agent_capabilities") or {}
                 session_caps = agent_caps.get("sessionCapabilities") or agent_caps.get("session_capabilities") or {}
                 supports_resume = (
@@ -127,7 +256,7 @@ class SessionPool:
                             c.resume_session(acp_session_id, cwd, mcp_servers=mcp_servers),
                             timeout=POOL_SESSION_TIMEOUT,
                         )
-                        session_id = None  # resumed, no new session
+                        session_id = None
                         logger.info("Resumed ACP session %s for conv %s (ns=%s)", acp_session_id[:8], conversation_id[:8], session_namespace)
                     except Exception as exc:
                         logger.warning("Resume failed for %s: %s, falling back to new", acp_session_id[:8], exc)
@@ -135,8 +264,6 @@ class SessionPool:
                             c.new_session(cwd, mcp_servers=mcp_servers), timeout=POOL_SESSION_TIMEOUT,
                         )
                 else:
-                    # No resume support — create new session (don't use load,
-                    # as it replays history and conflicts with our on_update callback)
                     session_id = await asyncio.wait_for(
                         c.new_session(cwd, mcp_servers=mcp_servers), timeout=POOL_SESSION_TIMEOUT,
                     )
@@ -177,3 +304,12 @@ class SessionPool:
         self._last_used.clear()
         self._profile_dirs.clear()
         self._mcp_servers.clear()
+        # Clean up warm pool
+        for dq in self._warm_pool.values():
+            while dq:
+                c = dq.popleft()
+                try:
+                    await c.stop()
+                except Exception:
+                    pass
+        self._warm_pool.clear()

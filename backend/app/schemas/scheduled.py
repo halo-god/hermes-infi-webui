@@ -36,5 +36,7 @@ class ScheduledTaskOut(BaseModel):
     last_run_at: datetime | None = None
     next_run_at: datetime | None = None
     last_status: str | None = None
+    success_count: int = 0
+    fail_count: int = 0
     created_at: datetime
     updated_at: datetime

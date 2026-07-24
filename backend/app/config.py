@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     acp_protocol_version: int = 1
     # Fall back to the bundled mock ACP agent when the real CLI isn't on PATH.
     acp_allow_mock_fallback: bool = True
+    # Warm pool: pre-spawn N idle ACP subprocesses at Runner startup so the
+    # first message of a new conversation skips the spawn+initialize cold start
+    # (which can take several seconds for Python CLI + heavy imports). Only
+    # benefits default-config sessions (no profile_dir, no MCP servers).
+    session_pool_warm_size: int = 2
     # Per-conversation working dir where agents drop produced files.
     workspace_root: str = Field(default="~/hermes-data/workspaces")
     # Redis Stream (prompt queue) + consumer group.

@@ -440,6 +440,7 @@ async function loadSettings() {
   settings.value = {
     branding: { tenant_name: "", display: "", short_name: "", login_tagline: "", login_subtitle: "", accent: "#b8852a", ...((raw.branding as Record<string, unknown>) || {}) },
     model_gateway: { default_model: "claude-sonnet-4-6", monthly_token_quota: 1000000, rate_limit_per_min: 20, overage: "soft", ...((raw.model_gateway as Record<string, unknown>) || {}) },
+    runner: { warm_pool_size: 2, ...((raw.runner as Record<string, unknown>) || {}) },
   };
 }
 async function loadRoles() {
@@ -1958,11 +1959,25 @@ async function confirmImport() {
               </div>
             </div></div>
           </div>
+
+          <!-- Runner 预热池配置 -->
+          <div class="section-card" style="margin-top: 14px">
+            <div class="section-head"><div class="section-title">Runner 性能</div></div>
+            <div style="padding: 14px 18px">
+              <div style="display: grid; grid-template-columns: 160px 1fr; gap: 10px 16px; align-items: center; font-size: 13px">
+                <div class="lbl">预热池大小（每助手）</div>
+                <div class="val" style="display:flex;align-items:center;gap:8px">
+                  <input class="cfg-input short" type="number" min="0" max="10" v-model.number="settings.runner!.warm_pool_size" />
+                  <span style="font-size: 11px; color: var(--ink-mute)">个预加载的空闲子进程。0=禁用。改动后重启 Runner 生效。</span>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div style="margin-top: 16px; display: flex; align-items: center; gap: 12px">
           <button class="btn primary" :disabled="savingSettings" @click="saveSettings">{{ savingSettings ? "保存中…" : "保存设置" }}</button>
-          <span style="font-size: 12px; color: var(--ink-mute); font-style: italic">速率限制改动即时生效。</span>
+          <span style="font-size: 12px; color: var(--ink-mute); font-style: italic">速率限制改动即时生效。预热池大小需重启 Runner 生效。</span>
         </div>
 
         <div class="section-card" style="margin-top: 18px; border-color: color-mix(in srgb, var(--danger) 30%, var(--rule))">

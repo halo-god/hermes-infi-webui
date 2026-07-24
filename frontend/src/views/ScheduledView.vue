@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /* 定时任务页 — 真实 CRUD，后端 cron 调度循环自动触发 ACP agent 执行。 */
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import Icon from "@/components/Icon.vue";
 import { useChatStore } from "@/stores/chat";
 import { useBrandingStore } from "@/stores/branding";
@@ -21,15 +21,50 @@ const editingId = ref<string | null>(null);
 const form = ref({ name: "", agent_id: "", prompt: "", cron: "0 0 9 * * *", enabled: true });
 const saving = ref(false);
 
-// Cron presets
-const CRON_PRESETS = [
-  { label: "每天 09:00", cron: "0 0 9 * * *" },
-  { label: "每天 18:00", cron: "0 0 18 * * *" },
-  { label: "每周一 09:00", cron: "0 0 9 * * 1" },
-  { label: "每周五 17:00", cron: "0 0 17 * * 5" },
-  { label: "每月 1 号 10:00", cron: "0 0 10 1 * *" },
-  { label: "每小时", cron: "0 0 * * * *" },
-];
+// ── 可视化调度配置 ──
+type ScheduleType = "daily" | "weekly" | "monthly" | "hourly" | "custom";
+const scheduleType = ref<ScheduleType>("daily");
+const scheduleTime = ref("09:00");
+const scheduleWeekdays = ref<number[]>([1]);
+const scheduleDayOfMonth = ref(1);
+const scheduleEveryNHours = ref(1);
+const WEEKDAY_LABELS = ["日", "一", "二", "三", "四", "五", "六"];
+
+function buildCron(): string {
+  const [h, m] = scheduleTime.value.split(":").map(Number);
+  switch (scheduleType.value) {
+    case "daily": return `0 ${m || 0} ${h || 0} * * *`;
+    case "weekly": return `0 ${m || 0} ${h || 0} ? * ${scheduleWeekdays.value.join(",") || "*"}`;
+    case "monthly": return `0 ${m || 0} ${h || 0} ${scheduleDayOfMonth.value} * *`;
+    case "hourly": return `0 0 */${Math.max(1, scheduleEveryNHours.value)} * * *`;
+    default: return form.value.cron;
+  }
+}
+function parseCron(cron: string) {
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length < 6) { scheduleType.value = "custom"; return; }
+  const [, m, h, dom, , dow] = parts;
+  if (m === "0" && h.startsWith("*/")) { scheduleType.value = "hourly"; scheduleEveryNHours.value = parseInt(h.slice(2)) || 1; return; }
+  if (dom === "?" && dow !== "*" && !dow.includes("/")) { scheduleType.value = "weekly"; scheduleTime.value = `${String(parseInt(h)).padStart(2,"0")}:${String(parseInt(m)).padStart(2,"0")}`; scheduleWeekdays.value = dow.split(",").map(Number).filter((n) => !isNaN(n)); return; }
+  if (dom !== "*" && dow === "*") { scheduleType.value = "monthly"; scheduleTime.value = `${String(parseInt(h)).padStart(2,"0")}:${String(parseInt(m)).padStart(2,"0")}`; scheduleDayOfMonth.value = parseInt(dom) || 1; return; }
+  if (dom === "*" && dow === "*") { scheduleType.value = "daily"; scheduleTime.value = `${String(parseInt(h)).padStart(2,"0")}:${String(parseInt(m)).padStart(2,"0")}`; return; }
+  scheduleType.value = "custom";
+}
+function toggleWeekday(d: number) {
+  const i = scheduleWeekdays.value.indexOf(d);
+  if (i >= 0) scheduleWeekdays.value.splice(i, 1); else scheduleWeekdays.value.push(d);
+  scheduleWeekdays.value.sort();
+}
+const cronPreview = computed(() => scheduleType.value === "custom" ? form.value.cron : buildCron());
+const cronHuman = computed(() => {
+  switch (scheduleType.value) {
+    case "daily": return `每天 ${scheduleTime.value}`;
+    case "weekly": return `每周${scheduleWeekdays.value.map((d) => WEEKDAY_LABELS[d]).join("、")} ${scheduleTime.value}`;
+    case "monthly": return `每月${scheduleDayOfMonth.value}号 ${scheduleTime.value}`;
+    case "hourly": return `每 ${scheduleEveryNHours.value} 小时`;
+    default: return "自定义 Cron";
+  }
+});
 
 function agentById(id: string) {
   const p = chat.profiles.find((pp) => pp.default_agent_id === id);
@@ -69,12 +104,14 @@ async function loadTasks() {
 function openCreate() {
   editingId.value = null;
   form.value = { name: "", agent_id: chat.profiles[0]?.default_agent_id || "hermes", prompt: "", cron: "0 0 9 * * *", enabled: true };
+  scheduleType.value = "daily"; scheduleTime.value = "09:00"; scheduleWeekdays.value = [1]; scheduleDayOfMonth.value = 1; scheduleEveryNHours.value = 1;
   showForm.value = true;
 }
 
 function openEdit(t: ScheduledTask) {
   editingId.value = t.id;
   form.value = { name: t.name, agent_id: t.agent_id, prompt: t.prompt, cron: t.cron, enabled: t.enabled };
+  parseCron(t.cron);
   showForm.value = true;
 }
 
@@ -85,6 +122,8 @@ async function save() {
   }
   saving.value = true;
   try {
+    // 从可视化配置生成 cron
+    form.value.cron = buildCron();
     if (editingId.value) {
       await scheduledApi.update(editingId.value, form.value);
       ns.toast("已更新");
@@ -184,6 +223,10 @@ onMounted(() => {
                 <span v-if="t.enabled">下次：{{ fmtDate(t.next_run_at) }}</span>
                 <span v-else>已暂停</span>
                 <span :style="{ color: statusColor(t.last_status) }">{{ statusLabel(t.last_status) }}</span>
+                <span v-if="t.success_count || t.fail_count" style="font-size: 11px">
+                  <span style="color: var(--ok)">✓ {{ t.success_count }}</span>
+                  <span v-if="t.fail_count" style="color: var(--danger)"> ✗ {{ t.fail_count }}</span>
+                </span>
               </div>
             </div>
             <div class="sched-actions" style="display: flex; gap: 6px" @click.stop>
@@ -218,15 +261,52 @@ onMounted(() => {
             <span style="font-size: 12px; font-weight: 500; color: var(--ink-mute)">指令内容</span>
             <textarea v-model="form.prompt" class="cfg-input" rows="4" placeholder="发给 Agent 的 prompt，如：请生成本周的工作周报草稿…" style="resize: vertical; font-family: inherit" />
           </label>
-          <label style="display: flex; flex-direction: column; gap: 4px">
-            <span style="font-size: 12px; font-weight: 500; color: var(--ink-mute)">Cron 表达式</span>
-            <input v-model="form.cron" class="cfg-input" placeholder="如：0 0 9 * * *（每天 09:00）" />
-            <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px">
-              <button v-for="p in CRON_PRESETS" :key="p.cron" style="font-size: 11px; padding: 3px 8px; border-radius: 5px; border: 1px solid var(--rule); background: var(--bg-canvas); color: var(--ink-mute); cursor: pointer" @click="form.cron = p.cron">
-                {{ p.label }}
+          <!-- 可视化调度配置 -->
+          <div style="display: flex; flex-direction: column; gap: 8px">
+            <span style="font-size: 12px; font-weight: 500; color: var(--ink-mute)">执行频率</span>
+            <!-- 频率类型选择 -->
+            <div style="display: flex; gap: 6px; flex-wrap: wrap">
+              <button v-for="t in (['daily','weekly','monthly','hourly','custom'] as const)" :key="t"
+                style="font-size: 12px; padding: 5px 12px; border-radius: 6px; cursor: pointer; border: 1px solid var(--rule)"
+                :style="{ background: scheduleType === t ? 'var(--accent)' : 'var(--bg-canvas)', color: scheduleType === t ? '#fff' : 'var(--ink-mute)', borderColor: scheduleType === t ? 'var(--accent)' : 'var(--rule)' }"
+                @click="scheduleType = t">
+                {{ ({ daily: '每天', weekly: '每周', monthly: '每月', hourly: '每隔N小时', custom: '自定义' })[t] }}
               </button>
             </div>
-          </label>
+            <!-- 每天/每周/每月: 时间选择 -->
+            <div v-if="scheduleType === 'daily' || scheduleType === 'weekly' || scheduleType === 'monthly'" style="display: flex; align-items: center; gap: 8px">
+              <span style="font-size: 12px; color: var(--ink-mute)">时间</span>
+              <input type="time" v-model="scheduleTime" class="cfg-input" style="width: auto" />
+            </div>
+            <!-- 每周: 星期选择 -->
+            <div v-if="scheduleType === 'weekly'" style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap">
+              <span style="font-size: 12px; color: var(--ink-mute)">星期</span>
+              <button v-for="(lbl, d) in WEEKDAY_LABELS" :key="d"
+                style="font-size: 11px; width: 26px; height: 26px; border-radius: 50%; cursor: pointer; border: 1px solid var(--rule)"
+                :style="{ background: scheduleWeekdays.includes(d) ? 'var(--accent)' : 'var(--bg-canvas)', color: scheduleWeekdays.includes(d) ? '#fff' : 'var(--ink-mute)' }"
+                @click="toggleWeekday(d)">{{ lbl }}</button>
+            </div>
+            <!-- 每月: 日期选择 -->
+            <div v-if="scheduleType === 'monthly'" style="display: flex; align-items: center; gap: 8px">
+              <span style="font-size: 12px; color: var(--ink-mute)">每月</span>
+              <input type="number" min="1" max="28" v-model="scheduleDayOfMonth" class="cfg-input" style="width: 60px" />
+              <span style="font-size: 12px; color: var(--ink-mute)">号</span>
+            </div>
+            <!-- 每隔N小时 -->
+            <div v-if="scheduleType === 'hourly'" style="display: flex; align-items: center; gap: 8px">
+              <span style="font-size: 12px; color: var(--ink-mute)">每</span>
+              <input type="number" min="1" max="24" v-model="scheduleEveryNHours" class="cfg-input" style="width: 60px" />
+              <span style="font-size: 12px; color: var(--ink-mute)">小时执行一次</span>
+            </div>
+            <!-- 自定义 cron -->
+            <div v-if="scheduleType === 'custom'">
+              <input v-model="form.cron" class="cfg-input" placeholder="如：0 0 9 * * *（每天 09:00）" />
+            </div>
+            <!-- 预览 -->
+            <div style="font-size: 11.5px; color: var(--accent); padding: 4px 8px; background: rgba(184,133,42,0.08); border-radius: 5px">
+              📅 {{ cronHuman }} <span style="color: var(--ink-faint); font-family: var(--font-mono)">{{ cronPreview }}</span>
+            </div>
+          </div>
           <label style="display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink)">
             <input type="checkbox" v-model="form.enabled" /> 启用
           </label>

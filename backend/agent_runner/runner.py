@@ -170,6 +170,9 @@ class Runner:
                 row.last_seen_at = datetime.now(tz=timezone.utc)
             await db.commit()
         logger.info("Registered %d agent(s): %s", len(found), ", ".join(self.agents))
+        # Pre-spawn warm clients for fast cold-start on new conversations.
+        self.pool.set_agents(self.agents)
+        asyncio.create_task(self.pool.warmup())
 
     async def ensure_group(self) -> None:
         try:

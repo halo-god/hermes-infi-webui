@@ -100,6 +100,10 @@ export interface SystemSettings {
       rate_limit_per_min: number;
       overage: string;
     };
+    runner?: {
+      warm_pool_size?: number;
+      [key: string]: unknown;
+    };
   };
   updated_at: string;
 }
@@ -551,6 +555,8 @@ export interface ScheduledTask {
   last_run_at: string | null;
   next_run_at: string | null;
   last_status: string | null;
+  success_count: number;
+  fail_count: number;
   created_at: string;
   updated_at: string;
 }

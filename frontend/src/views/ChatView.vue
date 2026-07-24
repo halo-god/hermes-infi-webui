@@ -377,10 +377,22 @@ function getUserDisplay(msg: Message): { name: string; initials: string; color: 
 const replyTarget = ref<{ id: string; label: string; snippet: string } | null>(null);
 const REACTION_EMOJIS = ["👍", "👎", "❤️", "😄", "🎉", "👀", "🙏"];
 const openEmojiFor = ref<string | null>(null);
+let _emojiCloseTimer: ReturnType<typeof setTimeout> | null = null;
 function toggleEmojiPicker(msgId: string) {
+  if (_emojiCloseTimer) { clearTimeout(_emojiCloseTimer); _emojiCloseTimer = null; }
   openEmojiFor.value = openEmojiFor.value === msgId ? null : msgId;
 }
-function closeEmojiPicker() { openEmojiFor.value = null; }
+function closeEmojiPicker() {
+  if (_emojiCloseTimer) clearTimeout(_emojiCloseTimer);
+  _emojiCloseTimer = setTimeout(() => { openEmojiFor.value = null; _emojiCloseTimer = null; }, 300);
+}
+function cancelCloseEmoji() {
+  if (_emojiCloseTimer) { clearTimeout(_emojiCloseTimer); _emojiCloseTimer = null; }
+}
+function closeEmojiNow() {
+  if (_emojiCloseTimer) { clearTimeout(_emojiCloseTimer); _emojiCloseTimer = null; }
+  openEmojiFor.value = null;
+}
 
 function setReply(msg: Message) {
   const label = msg.role === "user"
@@ -392,6 +404,7 @@ function clearReply() { replyTarget.value = null; }
 
 async function toggleReaction(msg: Message, emoji: string) {
   if (!chat.activeId || msg.id.startsWith("tmp-")) return;
+  closeEmojiNow();
   try {
     const updated = await conversationsApi.toggleReaction(chat.activeId, msg.id, emoji);
     msg.reactions = updated.reactions;
@@ -1222,9 +1235,9 @@ onUnmounted(() => {
                     <!-- Group-only: reply / edit / recall -->
                     <button v-if="isGroup" title="回复" @click="setReply(chat.messages[row.index])"><Icon name="quote" :size="12" /></button>
                     <!-- Emoji picker (all chats) -->
-                    <div class="react-wrap" @mouseleave="closeEmojiPicker()">
+                    <div class="react-wrap" @mouseenter="cancelCloseEmoji()" @mouseleave="closeEmojiPicker()">
                       <button title="表情" @click.stop="toggleEmojiPicker(chat.messages[row.index].id)"><Icon name="thumbs_up" :size="12" /></button>
-                      <div v-if="openEmojiFor === chat.messages[row.index].id" class="react-pop">
+                      <div v-if="openEmojiFor === chat.messages[row.index].id" class="react-pop" @mouseenter="cancelCloseEmoji()" @mouseleave="closeEmojiPicker()">
                         <button v-for="e in REACTION_EMOJIS" :key="e" @click="toggleReaction(chat.messages[row.index], e)">{{ e }}</button>
                       </div>
                     </div>

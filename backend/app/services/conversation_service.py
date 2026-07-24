@@ -46,9 +46,10 @@ async def list_conversations(
         ((Conversation.owner_id == owner_id)
         | ((Conversation.type == "group") & Conversation.id.in_(group_subq)))
         & (Conversation.title != "__file_storage__")
-        # Background subagent conversations are headless — surfaced only via
-        # the parent conversation's subagent panel, never the sidebar.
+        # Background subagent + scheduled conversations are headless — surfaced
+        # only via their panels / notifications, never the sidebar.
         & (Conversation.type != "subagent")
+        & (Conversation.type != "scheduled")
     )
     if pinned_only:
         stmt = stmt.where(Conversation.pinned.is_(True))
@@ -1552,10 +1553,15 @@ async def dispatch(
                     f"{system_prompt}\n\n{knowledge_prompt}" if system_prompt else knowledge_prompt
                 )
 
-    # P1-2: inject a cached summary of the conversation's early history at the
-    # very front of the prompt (it's the oldest context layer). Produced
-    # asynchronously by the conversation_summary worker; absent until the
-    # conversation crosses summary_trigger_msg_count. Never blocks a turn.
+    # Inject the user's long-term agent memory (semi-stable: changes only on
+    # consolidation). Placed after profile+knowledge for prefix-cache stability.
+    memory_prompt = await _build_memory_prompt(db, owner_id)
+    if memory_prompt:
+        system_prompt = f"{system_prompt}\n\n{memory_prompt}" if system_prompt else memory_prompt
+
+    # P1-2: inject a cached summary. Appended AFTER the stable layers
+    # (profile+knowledge+memory) so the provider's prefix cache can hit on
+    # the stable prefix — summary content changes per summarisation run.
     if settings.summary_enabled:
         summary_row = (await db.execute(
             select(ConversationSummary).where(ConversationSummary.conversation_id == convo.id)
@@ -1563,10 +1569,10 @@ async def dispatch(
         if summary_row and summary_row.summary:
             summary_block = f"【早期对话摘要】\n{summary_row.summary}"
             system_prompt = (
-                f"{summary_block}\n\n{system_prompt}" if system_prompt else summary_block
+                f"{system_prompt}\n\n{summary_block}" if system_prompt else summary_block
             )
 
-    # Inject request-level knowledge references (user-selected knowledge items).
+    # Inject request-level knowledge references (dynamic per turn).
     if knowledge_ids:
         request_knowledge_prompt = await _build_request_knowledge_prompt(db, knowledge_ids)
         if request_knowledge_prompt:
@@ -1574,14 +1580,8 @@ async def dispatch(
                 f"{system_prompt}\n\n{request_knowledge_prompt}" if system_prompt else request_knowledge_prompt
             )
 
-    # Inject the user's long-term agent memory into system_prompt
-    memory_prompt = await _build_memory_prompt(db, owner_id)
-    if memory_prompt:
-        system_prompt = f"{system_prompt}\n\n{memory_prompt}" if system_prompt else memory_prompt
-
     # Layered memory: pg_trgm-retrieved episodic summaries + trigger-matched
-    # skills, both injected only when relevant (unlike the always-on blocks
-    # above). Gated by a kill switch in case retrieval quality misbehaves.
+    # skills (dynamic per turn). Gated by a kill switch.
     matched_skill_ids: list[uuid.UUID] = []
     if settings.memory_episodic_injection_enabled:
         episodic_prompt = await _build_episodic_memory_prompt(db, owner_id, text)
