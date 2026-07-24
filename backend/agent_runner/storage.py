@@ -132,10 +132,36 @@ async def save_file(
             )
             db.add(f)
         else:
-            # Save old version before overwriting — only if old content is non-empty
-            # For MinIO storage, f.content is None — read from object storage
+            # Agent writing its own file — check if content actually changed.
+            # Agents sometimes re-read and re-write a file without real changes
+            # (e.g. echoing a note back after "不错"). Don't create a version
+            # for identical/trivially-different content.
             old_content = f.content
             if old_content is None and f.storage_key:
+                try:
+                    old_content = await asyncio.to_thread(object_storage.get, f.storage_key)
+                    if isinstance(old_content, bytes):
+                        old_content = old_content.decode("utf-8", "ignore")
+                except Exception:
+                    old_content = None
+            # Compare: if new content is empty, or identical to old (ignoring
+            # trailing whitespace), skip the version bump entirely.
+            new_content = inline or ""
+            if not new_content.strip():
+                # Empty write — guard at line 48-61 already returns early, but
+                # double-check here.
+                await db.commit()
+                await db.refresh(f)
+                return f
+            if old_content and old_content.strip() == new_content.strip():
+                logger.info(
+                    "save_file: %s content unchanged — skipping version bump (v%d)",
+                    name, f.current_version,
+                )
+                await db.commit()
+                await db.refresh(f)
+                return f
+            if old_content:
                 try:
                     old_content = await asyncio.to_thread(object_storage.get, f.storage_key)
                     if isinstance(old_content, bytes):
