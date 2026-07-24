@@ -888,6 +888,9 @@ async def upload_file(
 
     processed = await process_upload(
         raw, ext, f"conversations/{convo.id}", name, content_type=file.content_type,
+        fast_mode=True,  # chat attachments: use fast extractors (pymupdf/python-docx),
+                         # skip Docling (30-60s cold start) to avoid upload timeout.
+                         # Knowledge-base uploads still use Docling (high quality).
     )
 
     wf = WorkspaceFile(

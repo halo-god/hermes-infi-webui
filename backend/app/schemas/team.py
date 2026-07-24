@@ -74,6 +74,7 @@ class KnowledgeOut(BaseModel):
     is_folder: bool = False
     sort_order: int = 0
     current_version: int = 1
+    processing_status: str = "ready"  # ready | processing | error
     created_at: datetime
 
 

@@ -176,7 +176,7 @@ export interface MessageContent {
 export interface PlanEntry {
   content: string;
   status: "pending" | "in_progress" | "completed";
-  priority: number;
+  priority: "high" | "medium" | "low" | string;
 }
 
 export interface RoundtableReply {
@@ -221,7 +221,7 @@ export interface Message {
   status: "streaming" | "complete" | "cancelled" | "error";
   mentions?: string[] | null;
   created_at: string;
-  steps?: { title: string; status: string }[];
+  steps?: { title: string; status: string; raw_input?: unknown; tool_kind?: string }[];
   thinking?: string;
   plan?: PlanEntry[];
   usage?: { input_tokens: number; output_tokens: number; context_size?: number; context_used?: number };
@@ -369,7 +369,7 @@ export interface RtAgentMeta {
 export type StreamEvent = (
   | { type: "start"; message_id: string; agent_id?: string; profile_id?: string }
   | { type: "token"; message_id: string; delta: string }
-  | { type: "tool_call"; message_id: string; title?: string; status?: string }
+  | { type: "tool_call"; message_id: string; title?: string; status?: string; raw_input?: unknown; tool_kind?: string }
   | { type: "file"; message_id: string; file_id: string; name: string; kind: string; version: number; diff?: string | null }
   | { type: "done"; message_id: string; status: string; stop_reason?: string; text?: string }
   | { type: "error"; message_id: string; detail: string }
@@ -393,6 +393,8 @@ export type StreamEvent = (
   | { type: "subagent_nudge"; subagent_id: string; status: string }
   | { type: "iteration_warning"; message_id: string; tool_calls: number; limit: number }
   | { type: "tool_blocked"; message_id: string; tool: string; title: string }
+  | { type: "commands_update"; message_id: string; commands: unknown[] }
+  | { type: "user_token"; message_id: string; delta: string }
   | { type: "chain_start"; message_id: string; agents: { agent_id: string; profile_id: string | null; slot: number; label: string; color: string }[] }
   | { type: "chain_step_token"; message_id: string; slot: number; delta: string }
   | { type: "chain_step_done"; message_id: string; slot: number; status: string }
@@ -430,6 +432,7 @@ export interface Knowledge {
   folder_id: string | null;
   is_folder: boolean;
   sort_order: number;
+  processing_status?: string;  // ready | processing | error
   created_at?: string;
 }
 export interface ActivityItem {

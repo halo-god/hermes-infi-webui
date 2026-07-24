@@ -156,6 +156,41 @@ async function authoriseTool(tool: string) {
     console.error("authorise tool failed", e);
   }
 }
+
+// F1: tool-specific icon + color for enhanced step rendering.
+function stepIcon(s: { tool_kind?: string; title?: string }): { icon: string; color: string } {
+  const kind = (s.tool_kind || "").toLowerCase();
+  const title = (s.title || "").toLowerCase();
+  if (kind.includes("browser") || title.includes("browser")) return { icon: "globe", color: "#3b82f6" };
+  if (kind.includes("execute") || kind.includes("terminal") || title.includes("terminal")) return { icon: "code", color: "#22c55e" };
+  if (kind.includes("write") || kind.includes("edit") || kind.includes("patch")) return { icon: "edit", color: "#f59e0b" };
+  if (kind.includes("read") || kind.includes("search")) return { icon: "search", color: "#6b7280" };
+  if (kind.includes("web") || title.includes("search")) return { icon: "globe", color: "#3b82f6" };
+  return { icon: "", color: "" };
+}
+
+// F1: format raw_input for display based on tool kind.
+function formatRawInput(raw: unknown, toolKind?: string): string {
+  if (!raw || typeof raw !== "object") return String(raw || "");
+  const r = raw as Record<string, unknown>;
+  const kind = (toolKind || "").toLowerCase();
+  // For code tools, show the code/command prominently.
+  if (kind.includes("execute") || kind.includes("terminal")) {
+    const code = r.command || r.code || r.script;
+    if (code) return String(code);
+  }
+  // For write/patch, show the content.
+  if (kind.includes("write") || kind.includes("patch")) {
+    const content = r.content || r.diff || r.patch;
+    if (content) return String(content).slice(0, 500);
+  }
+  // Default: pretty-print the raw input.
+  try {
+    return JSON.stringify(r, null, 2).slice(0, 500);
+  } catch {
+    return String(raw).slice(0, 500);
+  }
+}
 const primaryProfile = computed(() => {
   // Priority: conversation's profile_id > conversation's agent > landing
   const pid = activeConvo.value?.profile_id;
@@ -1122,8 +1157,14 @@ onUnmounted(() => {
                   <summary style="font-size:11.5px;color:var(--ink-mute);cursor:pointer;list-style:none">
                     <Icon name="bolt" :size="11" /> 执行了 {{ chat.messages[row.index].steps!.length }} 步
                   </summary>
-                  <div v-for="(s, i) in chat.messages[row.index].steps" :key="i" class="step-item">
-                    <span class="step-dot" :class="s.status"></span>{{ s.title }}
+                  <div v-for="(s, i) in chat.messages[row.index].steps" :key="i" class="step-item step-item-enhanced">
+                    <span class="step-dot" :class="s.status"></span>
+                    <Icon v-if="stepIcon(s).icon" :name="stepIcon(s).icon" :size="10" :style="{ color: stepIcon(s).color }" />
+                    <span>{{ s.title }}</span>
+                    <details v-if="s.raw_input" class="step-raw-preview">
+                      <summary style="font-size:10px;color:var(--ink-faint);cursor:pointer">详情</summary>
+                      <pre class="step-raw-code">{{ formatRawInput(s.raw_input, s.tool_kind) }}</pre>
+                    </details>
                   </div>
                 </details>
                 <div class="msg-bubble">
@@ -1516,5 +1557,30 @@ onUnmounted(() => {
   background: var(--accent, #b8852a);
   color: #fff;
   font-weight: 500;
+}
+
+/* F1: enhanced tool step rendering */
+.step-item-enhanced {
+  display: flex;
+  align-items: flex-start;
+  gap: 3px;
+  flex-wrap: wrap;
+}
+.step-raw-preview {
+  flex-basis: 100%;
+  margin-left: 16px;
+}
+.step-raw-code {
+  margin-top: 2px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--rule, rgba(0,0,0,0.05));
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  font-family: var(--font-mono, monospace);
+  max-height: 120px;
+  overflow-y: auto;
+  color: var(--ink-mute, #666);
 }
 </style>

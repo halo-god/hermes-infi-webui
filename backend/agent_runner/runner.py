@@ -524,6 +524,14 @@ class Runner:
             self._bg_tasks.add(t)
             t.add_done_callback(self._bg_tasks.discard)
             return
+        if task.get("type") == "knowledge_docling_upgrade":
+            # Async Docling upgrade: re-extract knowledge content with Docling
+            # (high-quality Markdown) in the background, then update status.
+            from agent_runner.runner_docling_upgrade import handle_docling_upgrade
+            t = asyncio.create_task(handle_docling_upgrade(task))
+            self._bg_tasks.add(t)
+            t.add_done_callback(self._bg_tasks.discard)
+            return
         if task.get("type") in ("subagent_spawn", "subagent_send"):
             # Fire-and-forget: a persistent subagent can run far longer than a
             # normal chat turn, so it must not hold a MAX_CONCURRENT semaphore
@@ -627,7 +635,18 @@ class Runner:
             elif kind == "tool_call":
                 acc["tool_since_split"] = True
                 acc["tool_calls"] = int(acc.get("tool_calls", 0)) + 1
-                step = {"title": update.get("title"), "status": update.get("status")}
+                # F1: capture the full tool_call payload so the frontend can
+                # render tool-specific UIs (code blocks for execute_code, image
+                # previews for browser_*, diffs for write_file, etc.). Keep it
+                # compact — only the fields the UI cares about.
+                raw_input = update.get("rawInput") or update.get("raw_input")
+                tool_kind = update.get("toolKind") or update.get("tool_kind")
+                step = {
+                    "title": update.get("title"),
+                    "status": update.get("status"),
+                    "raw_input": raw_input,
+                    "tool_kind": tool_kind,
+                }
                 steps.append(step)
                 await R.publish_event(
                     conversation_id,
@@ -636,6 +655,8 @@ class Runner:
                         "message_id": acc["current_msg_id"],
                         "title": step["title"],
                         "status": step["status"],
+                        "raw_input": raw_input,
+                        "tool_kind": tool_kind,
                     },
                 )
                 # Circuit breaker: once a turn crosses the per-profile cap, mark
@@ -698,7 +719,9 @@ class Runner:
                                     "title": title,
                                 },
                             )
-            elif kind == "agent_thought":
+            elif kind in ("agent_thought_chunk", "agent_thought"):
+                # ACP v1 spec uses "agent_thought_chunk"; keep "agent_thought" as
+                # a fallback for older hermes-agent versions that may emit it.
                 delta = (update.get("content") or {}).get("text", "") or update.get("delta", "")
                 if delta:
                     acc["thinking"] += delta
@@ -710,7 +733,7 @@ class Runner:
             elif kind == "plan":
                 raw = update.get("entries") or update.get("plan") or []
                 if isinstance(raw, list) and raw:
-                    acc["plan"] = [{"content": e.get("content", ""), "status": e.get("status", "pending"), "priority": e.get("priority", 0)} for e in raw if isinstance(e, dict)]
+                    acc["plan"] = [{"content": e.get("content", ""), "status": e.get("status", "pending"), "priority": e.get("priority", "medium")} for e in raw if isinstance(e, dict)]
                     await R.publish_event(conversation_id, {
                         "type": "plan",
                         "message_id": acc["current_msg_id"],
@@ -718,7 +741,7 @@ class Runner:
                             {
                                 "content": e.get("content", ""),
                                 "status": e.get("status", "pending"),
-                                "priority": e.get("priority", 0),
+                                "priority": e.get("priority", "medium"),
                             }
                             for e in raw if isinstance(e, dict)
                         ],
@@ -769,6 +792,35 @@ class Runner:
                     self._bg_tasks.add(t)
                     t.add_done_callback(self._bg_tasks.discard)
                     await R.publish_event(conversation_id, {"type": "session_info", "title": new_title})
+            elif kind == "available_commands_update":
+                # F2: agent advertises its slash commands. Cache per-conversation
+                # in Redis (7d) and forward to the frontend for the command palette.
+                commands = update.get("commands") or []
+                if commands:
+                    try:
+                        redis = R.get_redis()
+                        await redis.set(
+                            f"acp_commands:{conversation_id}",
+                            __import__("json").dumps(commands, ensure_ascii=False),
+                            ex=3600 * 24 * 7,
+                        )
+                    except Exception:
+                        pass
+                    await R.publish_event(conversation_id, {
+                        "type": "commands_update",
+                        "message_id": acc["current_msg_id"],
+                        "commands": commands,
+                    })
+            elif kind == "user_message_chunk":
+                # F2: agent echoes the user's input (chunked). Forward so the
+                # frontend can display what the agent received.
+                delta = (update.get("content") or {}).get("text", "")
+                if delta:
+                    await R.publish_event(conversation_id, {
+                        "type": "user_token",
+                        "message_id": acc["current_msg_id"],
+                        "delta": delta,
+                    })
             elif kind == "usage_update":
                 size = update.get("size", 0)
                 used = update.get("used", 0)

@@ -133,6 +133,9 @@ class TeamKnowledge(UUIDPrimaryKey, Timestamps, Base):
     is_folder: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     current_version: Mapped[int] = mapped_column(Integer, default=1)
+    # Async Docling processing: "processing" while background task extracts
+    # high-quality Markdown, "ready" when content is usable, "error" on failure.
+    processing_status: Mapped[str] = mapped_column(String(16), default="ready", nullable=False)
 
 
 class TeamKnowledgeVersion(UUIDPrimaryKey, Base):

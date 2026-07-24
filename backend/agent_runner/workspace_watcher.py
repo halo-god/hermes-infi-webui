@@ -27,6 +27,10 @@ _DEBOUNCE_SECONDS = 0.5
 _GRACE_SECONDS = 0.3
 # Ignore files written by on_fs_write itself (to avoid double-syncing ACP writes).
 _IGNORE_EXTENSIONS = {".tmp", ".swp", ".swx", ".part", ".bak", ".crdownload"}
+# System-managed directories: dispatch writes user-uploaded attachments here so
+# the agent can read_file them. These are NOT agent-authored files, so syncing
+# them back to workspace_files would create duplicate records.
+_IGNORE_DIRS = ("attachments",)
 
 
 def _should_ignore(path: str) -> bool:
@@ -34,6 +38,13 @@ def _should_ignore(path: str) -> bool:
     if p.name.startswith(".") or p.name.startswith("~"):
         return True
     if p.suffix.lower() in _IGNORE_EXTENSIONS:
+        return True
+    # Ignore system-managed directories (e.g. attachments/ is written by
+    # dispatch, not by the agent — syncing it creates duplicate records).
+    # Path may be absolute (watchdog gives absolute paths); check both the
+    # raw parts and any "attachments" segment anywhere in the path.
+    parts = p.parts
+    if "attachments" in parts:
         return True
     return False
 

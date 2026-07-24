@@ -580,9 +580,17 @@ async def upload_knowledge(
     import re as _re
     name = _re.sub(r"[^\w.\-\u4e00-\u9fff]", "_", file.filename or "upload").strip("_. ") or "upload"
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"
+
+    # Fast path: quick extract (pymupdf/python-docx, seconds) so content is
+    # immediately usable. Docling runs in background for high-quality Markdown.
     processed = await process_upload(
         raw, ext, f"team-knowledge/{team_id}", name, content_type=file.content_type,
+        fast_mode=True,
     )
+
+    # Determine if this file type benefits from background Docling upgrade.
+    from app.core.docling_converter import is_supported as docling_supported
+    needs_bg = docling_supported(ext) and settings.docling_enabled if hasattr(settings, 'docling_enabled') else docling_supported(ext)
 
     k = TeamKnowledge(
         team_id=team_id,
@@ -594,10 +602,24 @@ async def upload_knowledge(
         folder_id=uuid.UUID(folder_id) if folder_id else None,
         uploaded_by=user.id,
         uploaded_by_name=user.name,
+        processing_status="processing" if needs_bg else "ready",
     )
     db.add(k)
     await db.commit()
     await db.refresh(k)
+
+    # Background Docling upgrade: enqueue a task that re-extracts with Docling
+    # and updates content + status. Non-blocking — the record is already usable
+    # with the fast-extracted content.
+    if needs_bg and processed.storage_key:
+        from app.core import redis as redis_core
+        await redis_core.enqueue_prompt({
+            "type": "knowledge_docling_upgrade",
+            "knowledge_id": str(k.id),
+            "ext": ext,
+            "name": name,
+        })
+
     return KnowledgeOut.model_validate(k)
 
 

@@ -9,6 +9,7 @@ Either way the API serves content via read_content().
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import uuid
 
@@ -19,6 +20,8 @@ from app.core import object_storage
 from app.core.files import safe_relative_path
 from app.db.base import async_session_maker
 from app.db.models.workspace import WorkspaceFile, WorkspaceFileVersion
+
+logger = logging.getLogger(__name__)
 
 _KIND_BY_EXT = {
     ".md": "md", ".markdown": "md", ".docx": "docx", ".doc": "docx",
@@ -86,6 +89,35 @@ async def save_file(
             ).with_for_update().execution_options(populate_existing=True)
         )
         f = res.scalar_one_or_none()
+        # P2-file: protect user-uploaded files from silent agent overwrites.
+        # If the existing file was uploaded by the user (created_by_agent=None)
+        # and the current writer is an agent, don't overwrite — create an
+        # "_edited" copy instead so the user can review/diff/adopt it.
+        # Agent-authored files and user-driven edits are unaffected.
+        if f is not None and f.created_by_agent is None and agent_id is not None:
+            logger.info(
+                "Agent %s writing user-uploaded file %s — creating _edited copy "
+                "instead of overwriting (version %d preserved)",
+                agent_id, name, f.current_version,
+            )
+            stem, dot, suffix = name.rpartition(".")
+            edited_name = f"{stem}_edited{dot}{suffix}" if dot else f"{name}_edited"
+            edited = WorkspaceFile(
+                conversation_id=conversation_id,
+                message_id=message_id,
+                name=edited_name,
+                kind=_kind_of(edited_name),
+                content=inline,
+                storage_key=storage_key,
+                size_bytes=size,
+                created_by_agent=agent_id,
+                current_version=1,
+            )
+            db.add(edited)
+            await db.commit()
+            await db.refresh(edited)
+            return edited
+
         if f is None:
             f = WorkspaceFile(
                 conversation_id=conversation_id,

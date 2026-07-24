@@ -133,6 +133,22 @@ async function loadKnowledge() {
   // P1-1 RAG: fetch chunk counts in the background (non-blocking) so the list
   // renders immediately. Only file items (not folders) have chunks.
   loadKnowledgeChunks();
+  // Auto-refresh while any item is processing (Docling background upgrade).
+  scheduleProcessingRefresh();
+}
+
+let processingTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleProcessingRefresh() {
+  if (processingTimer) { clearTimeout(processingTimer); processingTimer = null; }
+  const hasProcessing = knowledgeItems.value.some((f) => f.processing_status === "processing");
+  if (hasProcessing && tab.value === "knowledge") {
+    processingTimer = setTimeout(async () => {
+      if (tab.value === "knowledge") {
+        knowledgeItems.value = await teamsApi.listKnowledge(teamId.value, currentFolderId.value || undefined);
+        scheduleProcessingRefresh();
+      }
+    }, 5000);
+  }
 }
 
 async function loadKnowledgeChunks() {
@@ -670,6 +686,11 @@ async function deleteTeam() {
                 <template v-else>
                   {{ fmtSize(f.size_bytes) }} · 由 {{ f.uploaded_by_name || "成员" }} 上传
                   <span v-if="knowledgeChunks[f.id]" style="color:var(--accent);font-weight:500" title="已建立向量索引">· 已索引 {{ knowledgeChunks[f.id] }} 块</span>
+                  <span v-if="f.processing_status === 'processing'" style="color:var(--ink-mute)" class="kb-processing-tag">
+                    <span class="typing" style="transform:scale(0.5);display:inline-block;vertical-align:middle"><span></span><span></span><span></span></span>
+                    文档解析中
+                  </span>
+                  <span v-else-if="f.processing_status === 'error'" style="color:#c0392b">· 解析失败</span>
                 </template>
               </div>
             </div>

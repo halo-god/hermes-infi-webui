@@ -443,6 +443,15 @@ export const useChatStore = defineStore("chat", () => {
         files.value = [...files.value, ...uploaded];
       } catch (e) {
         console.error("[chat] file upload failed:", e);
+        // Notify the user instead of silently sending without the attachment —
+        // that's how "I attached a file but the AI didn't see it" happens.
+        const ns = useNotificationStore();
+        ns.push({
+          title: "文件上传失败",
+          body: opts.stagedFiles.map((f) => f.name).join(", ") + " 未成功上传，请重试",
+          kind: "warn",
+        });
+        return; // abort the send — don't send a message referencing a file the AI can't see
       }
     }
     // attachedFileIds: previously-uploaded files referenced in this turn

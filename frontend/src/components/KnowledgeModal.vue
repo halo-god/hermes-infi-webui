@@ -17,6 +17,7 @@ const saving = ref(false);
 const selectedFile = ref<File | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
 const uploadProgress = ref(0);
+const processingDoc = ref(false);  // Docling parsing phase (after upload completes)
 
 const KIND_MAP: Record<string, string> = {
   pdf: "pdf", doc: "doc", docx: "doc", txt: "txt", csv: "csv",
@@ -56,8 +57,10 @@ async function save() {
       });
     } else if (selectedFile.value) {
       uploadProgress.value = 0;
+      processingDoc.value = false;
       await teamsApi.uploadKnowledge(props.teamId, selectedFile.value, props.folderId, (pct) => {
         uploadProgress.value = pct;
+        if (pct >= 100) processingDoc.value = true;  // upload done, server is now parsing
       });
     } else {
       await teamsApi.addKnowledge(props.teamId, {
@@ -98,6 +101,10 @@ async function save() {
             <div :style="{ width: uploadProgress + '%', height: '100%', background: 'var(--accent)', transition: 'width 0.2s' }"></div>
           </div>
           <div style="font-size:11px;color:var(--ink-mute);text-align:center;margin-top:2px">上传中 {{ uploadProgress }}%</div>
+        </div>
+        <div v-if="saving && processingDoc" style="margin-top:8px;display:flex;align-items:center;gap:6px;justify-content:center">
+          <span class="typing" style="transform:scale(0.6)"><span></span><span></span><span></span></span>
+          <span style="font-size:11px;color:var(--ink-mute)">文档解析中（大文件可能需要几分钟）…</span>
         </div>
       </div>
 

@@ -519,6 +519,7 @@ async def process_upload(
     storage_key_prefix: str,
     name: str,
     content_type: str | None = None,
+    fast_mode: bool = False,
 ) -> ProcessedUpload:
     """Decide how to store + extract an uploaded file's bytes.
 
@@ -577,19 +578,19 @@ async def process_upload(
         # P2-file: prefer Docling (Markdown, tables, OCR) over the legacy
         # per-format HTML extractors. Falls back transparently if Docling is
         # unavailable or the conversion fails.
-        content = await _extract_doc_content(raw, ext, prefer_docling=True)
+        content = await _extract_doc_content(raw, ext, prefer_docling=not fast_mode)
     elif len(raw) > threshold_bytes or settings.storage_backend == "minio":
         storage_key = f"{storage_key_prefix}/{uuid.uuid4().hex}/{name}"
         await asyncio.to_thread(object_storage.put, storage_key, raw, ctype)
         if ext == "pdf":
-            content = await _extract_doc_content(raw, ext, prefer_docling=True)
+            content = await _extract_doc_content(raw, ext, prefer_docling=not fast_mode)
         elif ext in PLAIN_TEXT_EXTS:
             content = _decode_text(raw)
     else:
         if ext in PLAIN_TEXT_EXTS:
             content = _decode_text(raw)
         elif ext == "pdf":
-            content = await _extract_doc_content(raw, ext, prefer_docling=True)
+            content = await _extract_doc_content(raw, ext, prefer_docling=not fast_mode)
         else:
             content = base64.b64encode(raw).decode("ascii")
 

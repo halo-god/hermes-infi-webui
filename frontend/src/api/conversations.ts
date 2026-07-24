@@ -96,6 +96,11 @@ export const conversationsApi = {
     form.append("file", file);
     return (await http.post(`/conversations/${id}/upload`, form, {
       headers: { "Content-Type": "multipart/form-data" },
+      // Upload + document extraction (Docling/PDF parse) can take 60s+ on a
+      // cold start. The default 20s timeout aborts the request, leaving the
+      // file in the DB but the frontend without its ID — so the next message
+      // is sent without the attachment reference. Use a generous timeout.
+      timeout: 300000,
     })).data;
   },
   async extractItems(id: string): Promise<{ project_name: string; tasks: string[]; conversation_id: string; team_id: string | null }> {

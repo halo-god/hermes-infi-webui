@@ -91,6 +91,7 @@ export const teamsApi = {
     if (folderId) fd.append("folder_id", folderId);
     await http.post(`/teams/${id}/knowledge/upload`, fd, {
       headers: { "Content-Type": "multipart/form-data" },
+      timeout: 600000,  // 10 min — Docling processing large PDFs/PPTXs can take minutes
       onUploadProgress: onProgress ? (ev: { loaded?: number; total?: number }) => {
         if (ev.total) onProgress(Math.round((ev.loaded || 0) / ev.total * 100));
       } : undefined,

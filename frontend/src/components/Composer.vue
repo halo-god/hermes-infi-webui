@@ -7,6 +7,7 @@ import ProfileListItem from "@/components/ProfileListItem.vue";
 import { profilesApi, type Profile } from "@/api/agents";
 import { filesApi, type FileItem } from "@/api/files";
 import { useNotificationStore } from "@/stores/notifications";
+import { availableCommands } from "@/stores/chatStream";
 import { useBrandingStore } from "@/stores/branding";
 
 const ns = useNotificationStore();
@@ -107,7 +108,12 @@ const slashIdx = ref(0);
 const slashFiltered = computed(() => {
   if (!props.modelValue.startsWith("/")) return [];
   const q = props.modelValue.slice(1).toLowerCase();
-  return q === "" ? SLASH_CMDS : SLASH_CMDS.filter(c => c.cmd.includes(q) || c.label.includes(q));
+  // Merge local built-in commands with agent-advertised slash commands (F2).
+  const agentCmds = availableCommands.value.map((c) => ({
+    cmd: c.name.replace(/^\//, ""), label: c.name, desc: c.description || "Agent 命令", isAgent: true,
+  }));
+  const all = [...SLASH_CMDS, ...agentCmds];
+  return q === "" ? all : all.filter(c => c.cmd.includes(q) || c.label.toLowerCase().includes(q));
 });
 
 // ── Draggable resize ──

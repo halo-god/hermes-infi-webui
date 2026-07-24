@@ -6,6 +6,11 @@
 import { conversationsApi } from "@/api/conversations";
 import { useNotificationStore } from "@/stores/notifications";
 import { useBrandingStore } from "@/stores/branding";
+import { ref } from "vue";
+
+// F2: module-level reactive holding the agent's advertised slash commands,
+// so Composer can read it directly without threading it through the deps bag.
+export const availableCommands = ref<{ name: string; description?: string }[]>([]);
 import { getActivePinia } from "pinia";
 import i18n from "@/i18n";
 import type { ChainStep, ConfirmationRequest, Message, StreamEvent } from "@/types";
@@ -247,8 +252,13 @@ export function registerStreamHandlers(
     if (m) {
       if (!m.steps) m.steps = [];
       const existing = m.steps.find((s) => s.title === ev.title);
-      if (existing) existing.status = ev.status || existing.status;
-      else m.steps.push({ title: ev.title || t("stream.toolCall"), status: ev.status || "running" });
+      if (existing) {
+        existing.status = ev.status || existing.status;
+        if (ev.raw_input) existing.raw_input = ev.raw_input;
+        if (ev.tool_kind) existing.tool_kind = ev.tool_kind;
+      } else {
+        m.steps.push({ title: ev.title || t("stream.toolCall"), status: ev.status || "running", raw_input: ev.raw_input, tool_kind: ev.tool_kind });
+      }
       triggerMessages();
     }
   }, activeId));
@@ -341,6 +351,11 @@ export function registerStreamHandlers(
       m.risk_blocked = { tool: ev.tool, title: ev.title };
       triggerMessages();
     }
+  }, activeId));
+
+  // F2: agent slash commands for the command palette.
+  stream.on("commands_update", scoped((ev) => {
+    availableCommands.value = ev.commands as { name: string; description?: string }[];
   }, activeId));
 
   stream.on("done", scoped((ev) => {
