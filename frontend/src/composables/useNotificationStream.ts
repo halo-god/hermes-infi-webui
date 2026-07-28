@@ -32,14 +32,14 @@ export function useNotificationStream() {
         c.unread = (c.unread || 0) + 1;
         if (ev.mention) c.has_mention = true;
       }
-      if (ev.mention) {
-        ns.push({
-          title: ev.title || "新的提及",
-          body: ev.snippet || "有人在群聊中@了你",
-          kind: "info",
-          link: `/?c=${cid}`,
-        });
-      }
+      // Always push a toast (not just for @mentions) - scheduled task results
+      // and other notifications need to surface even without mention=true.
+      ns.push({
+        title: ev.title || "新消息",
+        body: ev.snippet || "",
+        kind: ev.mention ? "info" : "success",
+        link: `/?c=${cid}`,
+      });
     });
 
     // Background subagent finished/failed while the user is elsewhere —

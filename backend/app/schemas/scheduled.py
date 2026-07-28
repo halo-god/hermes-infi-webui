@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class ScheduledTaskCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     agent_id: str = Field(min_length=1, max_length=64)
+    profile_id: uuid.UUID | None = None
     prompt: str = Field(min_length=1)
     cron: str = Field(min_length=1, max_length=100)
     enabled: bool = True
@@ -18,6 +19,7 @@ class ScheduledTaskCreate(BaseModel):
 class ScheduledTaskUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     agent_id: str | None = Field(default=None, min_length=1, max_length=64)
+    profile_id: uuid.UUID | None = None
     prompt: str | None = Field(default=None, min_length=1)
     cron: str | None = Field(default=None, min_length=1, max_length=100)
     enabled: bool | None = None
@@ -30,6 +32,7 @@ class ScheduledTaskOut(BaseModel):
     owner_id: uuid.UUID
     name: str
     agent_id: str
+    profile_id: uuid.UUID | None = None
     prompt: str
     cron: str
     enabled: bool

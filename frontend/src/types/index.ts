@@ -549,6 +549,7 @@ export interface ScheduledTask {
   owner_id: string;
   name: string;
   agent_id: string;
+  profile_id: string | null;
   prompt: string;
   cron: string;
   enabled: boolean;

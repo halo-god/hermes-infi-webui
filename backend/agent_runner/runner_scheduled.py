@@ -33,7 +33,7 @@ async def _update_status(task_id: str, status: str) -> None:
             await db.commit()
 
 
-async def _get_or_create_conversation(task: ScheduledTask, user_id: str) -> uuid.UUID:
+async def _get_or_create_conversation(db, task: ScheduledTask, user_id: str) -> uuid.UUID:
     """Get the task's dedicated conversation, creating one on first run."""
     if task.conversation_id is not None:
         return task.conversation_id
@@ -45,6 +45,7 @@ async def _get_or_create_conversation(task: ScheduledTask, user_id: str) -> uuid
         active_agent_ids=[task.agent_id],
         type="scheduled",
     )
+    db.add(conv)
     task.conversation_id = conv.id
     return conv.id
 
@@ -89,19 +90,32 @@ async def handle_scheduled(task: dict, agents: dict) -> None:
     the result into a dedicated conversation, and notify the user."""
     task_id = task["scheduled_task_id"]
     agent_id = task.get("agent_id", "hermes")
+    profile_id = task.get("profile_id")
     prompt_text = task["prompt"]
     user_id = task.get("user_id", "")
 
     await _update_status(task_id, "running")
 
-    # Resolve or create the task's dedicated conversation.
+    # Resolve or create the task's dedicated conversation + load profile.
     async with async_session_maker() as db:
         t = await db.get(ScheduledTask, uuid.UUID(task_id))
         if t is None:
             logger.error("scheduled task %s not found", task_id[:8])
             return
-        conv_id = await _get_or_create_conversation(t, user_id)
+        conv_id = await _get_or_create_conversation(db, t, user_id)
         task_name = t.name
+        # Load the selected profile for persona + HERMES_HOME.
+        profile_dir = None
+        system_prompt = None
+        if profile_id:
+            from app.db.models.agent import Profile
+            profile = await db.get(Profile, uuid.UUID(profile_id))
+            if profile:
+                from app.services.conversation_service import _profile_dir
+                profile_dir = _profile_dir(profile)
+                system_prompt = profile.system_prompt or None
+                agent_id = profile.default_agent_id or agent_id
+                logger.info("scheduled task %s: using profile %s (dir=%s)", task_id[:8], profile.name, profile_dir)
         await db.commit()
 
     agent = agents.get(agent_id) or agents.get("hermes")
@@ -127,16 +141,22 @@ async def handle_scheduled(task: dict, agents: dict) -> None:
         return None
 
     try:
+        from agent_runner.acp_client import profile_env
         client = ACPClient(
             agent.command, cwd,
             protocol_version=settings.acp_protocol_version,
             on_update=on_update, on_fs_write=_noop_fs,
+            env=profile_env(profile_dir),
         )
         try:
             await client.start()
             await client.initialize()
             await client.new_session(cwd)
-            await client.prompt(prompt_text)
+            # Inject system_prompt as persona prefix (same pattern as handle_single).
+            effective_prompt = prompt_text
+            if system_prompt:
+                effective_prompt = f"【角色设定】\n{system_prompt}\n【角色设定结束】\n\n{prompt_text}"
+            await client.prompt(effective_prompt)
         finally:
             await client.stop()
 

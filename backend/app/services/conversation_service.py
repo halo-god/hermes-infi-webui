@@ -46,10 +46,11 @@ async def list_conversations(
         ((Conversation.owner_id == owner_id)
         | ((Conversation.type == "group") & Conversation.id.in_(group_subq)))
         & (Conversation.title != "__file_storage__")
-        # Background subagent + scheduled conversations are headless — surfaced
-        # only via their panels / notifications, never the sidebar.
+        # Background subagent conversations are headless — surfaced only via
+        # the parent conversation's subagent panel, never the sidebar.
+        # Scheduled conversations ARE shown — they have real content users
+        # need to access (timeresult + history).
         & (Conversation.type != "subagent")
-        & (Conversation.type != "scheduled")
     )
     if pinned_only:
         stmt = stmt.where(Conversation.pinned.is_(True))

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /* 定时任务页 — 真实 CRUD，后端 cron 调度循环自动触发 ACP agent 执行。 */
 import { computed, onMounted, ref } from "vue";
+import { useRouter } from "vue-router";
 import Icon from "@/components/Icon.vue";
 import { useChatStore } from "@/stores/chat";
 import { useBrandingStore } from "@/stores/branding";
@@ -11,6 +12,11 @@ import type { ScheduledTask } from "@/types";
 const chat = useChatStore();
 const branding = useBrandingStore();
 const ns = useNotificationStore();
+const router = useRouter();
+
+function viewResults(conversationId: string) {
+  router.push(`/?c=${conversationId}`);
+}
 
 const tasks = ref<ScheduledTask[]>([]);
 const loading = ref(true);
@@ -18,7 +24,7 @@ const showForm = ref(false);
 const editingId = ref<string | null>(null);
 
 // Form state
-const form = ref({ name: "", agent_id: "", prompt: "", cron: "0 0 9 * * *", enabled: true });
+const form = ref({ name: "", agent_id: "", profile_id: "" as string, prompt: "", cron: "0 9 * * *", enabled: true });
 const saving = ref(false);
 
 // ── 可视化调度配置 ──
@@ -32,22 +38,31 @@ const WEEKDAY_LABELS = ["日", "一", "二", "三", "四", "五", "六"];
 
 function buildCron(): string {
   const [h, m] = scheduleTime.value.split(":").map(Number);
+  // 5-field cron: min hour day-of-month month day-of-week
   switch (scheduleType.value) {
-    case "daily": return `0 ${m || 0} ${h || 0} * * *`;
-    case "weekly": return `0 ${m || 0} ${h || 0} ? * ${scheduleWeekdays.value.join(",") || "*"}`;
-    case "monthly": return `0 ${m || 0} ${h || 0} ${scheduleDayOfMonth.value} * *`;
-    case "hourly": return `0 0 */${Math.max(1, scheduleEveryNHours.value)} * * *`;
+    case "daily": return `${m || 0} ${h || 0} * * *`;
+    case "weekly": return `${m || 0} ${h || 0} * * ${scheduleWeekdays.value.join(",") || "*"}`;
+    case "monthly": return `${m || 0} ${h || 0} ${scheduleDayOfMonth.value} * *`;
+    case "hourly": return `0 */${Math.max(1, scheduleEveryNHours.value)} * * *`;
     default: return form.value.cron;
   }
 }
 function parseCron(cron: string) {
   const parts = cron.trim().split(/\s+/);
-  if (parts.length < 6) { scheduleType.value = "custom"; return; }
-  const [, m, h, dom, , dow] = parts;
+  if (parts.length < 5) { scheduleType.value = "custom"; return; }
+  // 5-field: min hour dom month dow
+  const [m, h, dom, , dow] = parts;
   if (m === "0" && h.startsWith("*/")) { scheduleType.value = "hourly"; scheduleEveryNHours.value = parseInt(h.slice(2)) || 1; return; }
-  if (dom === "?" && dow !== "*" && !dow.includes("/")) { scheduleType.value = "weekly"; scheduleTime.value = `${String(parseInt(h)).padStart(2,"0")}:${String(parseInt(m)).padStart(2,"0")}`; scheduleWeekdays.value = dow.split(",").map(Number).filter((n) => !isNaN(n)); return; }
+  if (dom === "*" && dow !== "*" && !dow.includes("/")) { scheduleType.value = "weekly"; scheduleTime.value = `${String(parseInt(h)).padStart(2,"0")}:${String(parseInt(m)).padStart(2,"0")}`; scheduleWeekdays.value = dow.split(",").map(Number).filter((n) => !isNaN(n)); return; }
   if (dom !== "*" && dow === "*") { scheduleType.value = "monthly"; scheduleTime.value = `${String(parseInt(h)).padStart(2,"0")}:${String(parseInt(m)).padStart(2,"0")}`; scheduleDayOfMonth.value = parseInt(dom) || 1; return; }
   if (dom === "*" && dow === "*") { scheduleType.value = "daily"; scheduleTime.value = `${String(parseInt(h)).padStart(2,"0")}:${String(parseInt(m)).padStart(2,"0")}`; return; }
+  // Also handle 6-field (legacy) by skipping first field
+  if (parts.length >= 6) {
+    const [, m6, h6, dom6, , dow6] = parts;
+    if (dom6 === "*" && dow6 !== "*" && !dow6.includes("/")) { scheduleType.value = "weekly"; scheduleTime.value = `${String(parseInt(h6)).padStart(2,"0")}:${String(parseInt(m6)).padStart(2,"0")}`; scheduleWeekdays.value = dow6.split(",").map(Number).filter((n) => !isNaN(n)); return; }
+    if (dom6 !== "*" && dow6 === "*") { scheduleType.value = "monthly"; scheduleTime.value = `${String(parseInt(h6)).padStart(2,"0")}:${String(parseInt(m6)).padStart(2,"0")}`; scheduleDayOfMonth.value = parseInt(dom6) || 1; return; }
+    if (dom6 === "*" && dow6 === "*") { scheduleType.value = "daily"; scheduleTime.value = `${String(parseInt(h6)).padStart(2,"0")}:${String(parseInt(m6)).padStart(2,"0")}`; return; }
+  }
   scheduleType.value = "custom";
 }
 function toggleWeekday(d: number) {
@@ -66,9 +81,10 @@ const cronHuman = computed(() => {
   }
 });
 
-function agentById(id: string) {
-  const p = chat.profiles.find((pp) => pp.default_agent_id === id);
-  return { label: p?.name || id, color: p?.color || branding.accent, icon: p?.icon || "sparkle" };
+function profileById(id: string | null) {
+  if (!id) return { label: "默认", color: branding.accent, icon: "sparkle" };
+  const p = chat.profiles.find((pp) => pp.id === id);
+  return { label: p?.name || "未知助手", color: p?.color || branding.accent, icon: p?.icon || "sparkle" };
 }
 
 function statusLabel(s: string | null) {
@@ -103,14 +119,14 @@ async function loadTasks() {
 
 function openCreate() {
   editingId.value = null;
-  form.value = { name: "", agent_id: chat.profiles[0]?.default_agent_id || "hermes", prompt: "", cron: "0 0 9 * * *", enabled: true };
+  form.value = { name: "", agent_id: chat.profiles[0]?.default_agent_id || "hermes", profile_id: chat.profiles[0]?.id || "", prompt: "", cron: "0 9 * * *", enabled: true };
   scheduleType.value = "daily"; scheduleTime.value = "09:00"; scheduleWeekdays.value = [1]; scheduleDayOfMonth.value = 1; scheduleEveryNHours.value = 1;
   showForm.value = true;
 }
 
 function openEdit(t: ScheduledTask) {
   editingId.value = t.id;
-  form.value = { name: t.name, agent_id: t.agent_id, prompt: t.prompt, cron: t.cron, enabled: t.enabled };
+  form.value = { name: t.name, agent_id: t.agent_id, profile_id: t.profile_id || "", prompt: t.prompt, cron: t.cron, enabled: t.enabled };
   parseCron(t.cron);
   showForm.value = true;
 }
@@ -122,8 +138,10 @@ async function save() {
   }
   saving.value = true;
   try {
-    // 从可视化配置生成 cron
+    // 从可视化配置生成 cron + 同步 agent_id
     form.value.cron = buildCron();
+    const sel = chat.profiles.find((p) => p.id === form.value.profile_id);
+    if (sel) form.value.agent_id = sel.default_agent_id;
     if (editingId.value) {
       await scheduledApi.update(editingId.value, form.value);
       ns.toast("已更新");
@@ -212,14 +230,14 @@ onMounted(() => {
           @click="openEdit(t)"
         >
           <div style="padding: 14px 18px; display: flex; align-items: center; gap: 12px">
-            <div class="sched-icon" :style="{ background: agentById(t.agent_id).color }">
-              <Icon :name="agentById(t.agent_id).icon || 'sparkle'" :size="14" />
+            <div class="sched-icon" :style="{ background: profileById(t.profile_id).color }">
+              <Icon :name="profileById(t.profile_id).icon || 'sparkle'" :size="14" />
             </div>
             <div class="sched-body" style="flex: 1; min-width: 0">
               <div class="sched-name" style="font-size: 13.5px; font-weight: 600; color: var(--ink)">{{ t.name }}</div>
               <div class="sched-meta" style="font-size: 11.5px; color: var(--ink-mute); margin-top: 3px; display: flex; gap: 12px; flex-wrap: wrap">
-                <span>🕐 {{ t.cron }}</span>
-                <span>由 {{ agentById(t.agent_id).label }} 执行</span>
+                <span>🕐 {{ cronHuman }}</span>
+                <span>由 {{ profileById(t.profile_id).label }} 执行</span>
                 <span v-if="t.enabled">下次：{{ fmtDate(t.next_run_at) }}</span>
                 <span v-else>已暂停</span>
                 <span :style="{ color: statusColor(t.last_status) }">{{ statusLabel(t.last_status) }}</span>
@@ -230,6 +248,9 @@ onMounted(() => {
               </div>
             </div>
             <div class="sched-actions" style="display: flex; gap: 6px" @click.stop>
+              <button v-if="(t as any).conversation_id" class="icon-btn" title="查看执行结果" @click="viewResults((t as any).conversation_id)">
+                <Icon name="chat" :size="14" />
+              </button>
               <button class="icon-btn" :title="t.enabled ? '暂停' : '启用'" @click="toggle(t)">
                 <Icon :name="t.enabled ? 'moon' : 'sun'" :size="14" />
               </button>
@@ -251,9 +272,9 @@ onMounted(() => {
           </label>
           <label style="display: flex; flex-direction: column; gap: 4px">
             <span style="font-size: 12px; font-weight: 500; color: var(--ink-mute)">执行 Agent</span>
-            <select v-model="form.agent_id" class="cfg-input">
-              <option v-for="p in chat.profiles" :key="p.default_agent_id" :value="p.default_agent_id">
-                {{ p.name }} ({{ p.default_agent_id }})
+            <select v-model="form.profile_id" class="cfg-input">
+              <option v-for="p in chat.profiles" :key="p.id" :value="p.id">
+                {{ p.name }}
               </option>
             </select>
           </label>

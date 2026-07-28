@@ -28,6 +28,7 @@ class ScheduledTask(UUIDPrimaryKey, Timestamps, Base):
     )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     agent_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    profile_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
     cron: Mapped[str] = mapped_column(String(100), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

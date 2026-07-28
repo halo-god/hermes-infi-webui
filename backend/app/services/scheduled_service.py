@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from croniter import croniter
 from sqlalchemy import func, select
@@ -17,6 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import redis as redis_core
 from app.db.models.scheduled import ScheduledTask
 from app.schemas.scheduled import ScheduledTaskCreate, ScheduledTaskUpdate
+
+# Users configure times in CST (China Standard Time, UTC+8). croniter computes
+# in the base time's timezone, so we must use CST as base to get correct triggers.
+_CST = timezone(timedelta(hours=8))
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +33,16 @@ def compute_next_run(cron_expr: str, from_time: datetime | None = None) -> datet
 
     Raises ValueError if the expression is invalid.
     """
-    base = from_time or datetime.now(timezone.utc)
+    # Use CST as base so the cron expression's hour/minute match the user's
+    # local time selection (e.g. "16:08" = 16:08 CST, not 16:08 UTC).
+    base = from_time or datetime.now(_CST)
     cron = croniter(cron_expr, base)
     nxt = cron.get_next(datetime)
-    # croniter may strip tzinfo depending on input; ensure tz-aware UTC.
+    # Ensure tz-aware (croniter may strip tzinfo).
     if nxt.tzinfo is None:
-        nxt = nxt.replace(tzinfo=timezone.utc)
-    return nxt
+        nxt = nxt.replace(tzinfo=_CST)
+    # Store as UTC for consistent DB comparison (tick checks now-UTC).
+    return nxt.astimezone(timezone.utc)
 
 
 async def list_tasks(db: AsyncSession, owner_id) -> list[ScheduledTask]:
@@ -84,6 +91,7 @@ async def create_task(db: AsyncSession, owner_id, payload: ScheduledTaskCreate) 
         owner_id=owner_id,
         name=payload.name,
         agent_id=payload.agent_id,
+        profile_id=payload.profile_id,
         prompt=payload.prompt,
         cron=payload.cron,
         enabled=payload.enabled,
@@ -160,6 +168,7 @@ async def tick(db: AsyncSession) -> int:
                 "type": "scheduled",
                 "user_id": str(task.owner_id),
                 "agent_id": task.agent_id,
+                "profile_id": str(task.profile_id) if task.profile_id else None,
                 "prompt": task.prompt,
                 "scheduled_task_id": str(task.id),
             })
