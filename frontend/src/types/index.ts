@@ -104,6 +104,17 @@ export interface SystemSettings {
       warm_pool_size?: number;
       [key: string]: unknown;
     };
+    hermes?: {
+      prompt_cache_ttl?: string;
+      terminal_backend?: string;
+      persistent_shell?: boolean;
+      reasoning_effort?: string;
+      compression_enabled?: boolean;
+      tool_output_max_bytes?: number;
+      redact_pii?: boolean;
+      skills_sync_enabled?: boolean;
+      [key: string]: unknown;
+    };
   };
   updated_at: string;
 }

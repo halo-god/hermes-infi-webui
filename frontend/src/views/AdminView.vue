@@ -455,6 +455,17 @@ async function loadSettings() {
     branding: { tenant_name: "", display: "", short_name: "", login_tagline: "", login_subtitle: "", accent: "#b8852a", ...((raw.branding as Record<string, unknown>) || {}) },
     model_gateway: { default_model: "claude-sonnet-4-6", monthly_token_quota: 1000000, rate_limit_per_min: 20, overage: "soft", ...((raw.model_gateway as Record<string, unknown>) || {}) },
     runner: { warm_pool_size: 2, ...((raw.runner as Record<string, unknown>) || {}) },
+    hermes: {
+      prompt_cache_ttl: "5m",
+      terminal_backend: "local",
+      persistent_shell: true,
+      reasoning_effort: "medium",
+      compression_enabled: false,
+      tool_output_max_bytes: 100000,
+      redact_pii: false,
+      skills_sync_enabled: true,
+      ...((raw.hermes as Record<string, unknown>) || {}),
+    },
   };
 }
 async function loadRoles() {
@@ -1987,11 +1998,81 @@ async function confirmImport() {
               </div>
             </div>
           </div>
+
+          <!-- Hermes Agent 高级配置 -->
+          <div class="section-card" style="margin-top: 14px">
+            <div class="section-head"><div class="section-title">Hermes Agent 高级配置</div></div>
+            <div style="padding: 14px 18px">
+              <div style="display: grid; grid-template-columns: 180px 1fr; gap: 10px 16px; align-items: center; font-size: 13px">
+                <div class="lbl">Prompt 缓存 TTL</div>
+                <div class="val" style="display:flex;align-items:center;gap:8px">
+                  <select class="cfg-input" style="width:auto;height:32px" v-model="settings.hermes!.prompt_cache_ttl">
+                    <option value="5m">5 分钟</option>
+                    <option value="1h">1 小时</option>
+                    <option value="">禁用</option>
+                  </select>
+                  <span style="font-size: 11px; color: var(--ink-mute)">Anthropic 模型可降低长会话 ~90% 成本</span>
+                </div>
+
+                <div class="lbl">终端后端</div>
+                <div class="val" style="display:flex;align-items:center;gap:8px">
+                  <select class="cfg-input" style="width:auto;height:32px" v-model="settings.hermes!.terminal_backend">
+                    <option value="local">本地 (local)</option>
+                    <option value="docker">Docker 容器</option>
+                    <option value="ssh">SSH 远程</option>
+                  </select>
+                </div>
+
+                <div class="lbl">持久化 Shell</div>
+                <div class="val">
+                  <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-mute);cursor:pointer">
+                    <input type="checkbox" v-model="settings.hermes!.persistent_shell" /> 保持 shell 状态（cd / 环境变量 / venv）跨命令存活
+                  </label>
+                </div>
+
+                <div class="lbl">推理深度</div>
+                <div class="val" style="display:flex;align-items:center;gap:8px">
+                  <select class="cfg-input" style="width:auto;height:32px" v-model="settings.hermes!.reasoning_effort">
+                    <option value="low">低 (快速)</option>
+                    <option value="medium">中 (平衡)</option>
+                    <option value="high">高 (深度)</option>
+                  </select>
+                </div>
+
+                <div class="lbl">上下文压缩</div>
+                <div class="val">
+                  <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-mute);cursor:pointer">
+                    <input type="checkbox" v-model="settings.hermes!.compression_enabled" /> 启用 hermes 原生上下文压缩（与摘要管线二选一）
+                  </label>
+                </div>
+
+                <div class="lbl">工具输出限制</div>
+                <div class="val" style="display:flex;align-items:center;gap:8px">
+                  <input class="cfg-input short" type="number" min="10000" max="1000000" v-model.number="settings.hermes!.tool_output_max_bytes" />
+                  <span style="font-size: 11px; color: var(--ink-mute)">字节。防止单次工具输出撑爆上下文。</span>
+                </div>
+
+                <div class="lbl">PII 脱敏</div>
+                <div class="val">
+                  <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-mute);cursor:pointer">
+                    <input type="checkbox" v-model="settings.hermes!.redact_pii" /> 哈希手机号 / 身份证等 PII 后再发送给模型
+                  </label>
+                </div>
+
+                <div class="lbl">技能双向同步</div>
+                <div class="val">
+                  <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-mute);cursor:pointer">
+                    <input type="checkbox" v-model="settings.hermes!.skills_sync_enabled" /> DB 技能 ↔ hermes 文件系统自动同步
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div style="margin-top: 16px; display: flex; align-items: center; gap: 12px">
           <button class="btn primary" :disabled="savingSettings" @click="saveSettings">{{ savingSettings ? "保存中…" : "保存设置" }}</button>
-          <span style="font-size: 12px; color: var(--ink-mute); font-style: italic">速率限制改动即时生效。预热池大小需重启 Runner 生效。</span>
+          <span style="font-size: 12px; color: var(--ink-mute); font-style: italic">速率限制即时生效。预热池 / Hermes 配置需重启 Runner 生效。</span>
         </div>
 
         <div class="section-card" style="margin-top: 18px; border-color: color-mix(in srgb, var(--danger) 30%, var(--rule))">

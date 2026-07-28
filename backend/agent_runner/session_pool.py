@@ -77,17 +77,38 @@ class SessionPool:
         (None) plus any active profiles found in the DB so most conversations
         hit a warm client. Non-blocking on failure."""
         n = settings.session_pool_warm_size
-        # Allow runtime override via SystemSettings.data.runner.warm_pool_size
+        # Allow runtime override via SystemSettings.data.runner / hermes config.
         try:
             from app.services import settings_service
             from app.db.base import async_session_maker
             async with async_session_maker() as db:
                 s = await settings_service.get(db)
-                runner_cfg = (s.data or {}).get("runner", {})
+                data = s.data or {}
+                runner_cfg = data.get("runner", {})
                 if "warm_pool_size" in runner_cfg:
                     n = int(runner_cfg["warm_pool_size"])
+                # Apply hermes advanced config overrides from DB → settings.
+                hermes_cfg = data.get("hermes", {})
+                if hermes_cfg:
+                    if "prompt_cache_ttl" in hermes_cfg:
+                        settings.hermes_prompt_cache_ttl = hermes_cfg["prompt_cache_ttl"]
+                    if "terminal_backend" in hermes_cfg:
+                        settings.hermes_terminal_backend = hermes_cfg["terminal_backend"]
+                    if "persistent_shell" in hermes_cfg:
+                        settings.hermes_persistent_shell = hermes_cfg["persistent_shell"]
+                    if "reasoning_effort" in hermes_cfg:
+                        settings.hermes_reasoning_effort = hermes_cfg["reasoning_effort"]
+                    if "compression_enabled" in hermes_cfg:
+                        settings.hermes_compression_enabled = hermes_cfg["compression_enabled"]
+                    if "tool_output_max_bytes" in hermes_cfg:
+                        settings.hermes_tool_output_max_bytes = int(hermes_cfg["tool_output_max_bytes"])
+                    if "redact_pii" in hermes_cfg:
+                        settings.hermes_redact_pii = hermes_cfg["redact_pii"]
+                    if "skills_sync_enabled" in hermes_cfg:
+                        settings.hermes_skills_sync_enabled = hermes_cfg["skills_sync_enabled"]
+                    logger.info("Applied hermes config overrides from DB: %s", list(hermes_cfg.keys()))
         except Exception:
-            logger.debug("Warm pool: could not read runner config from DB", exc_info=True)
+            logger.debug("Warm pool: could not read config from DB", exc_info=True)
 
         if n <= 0 or not self._agents:
             return
