@@ -15,6 +15,6 @@ export const scheduledApi = {
     await http.delete(`/scheduled/${id}`);
   },
   async toggle(id: string, enabled: boolean): Promise<ScheduledTask> {
-    return (await http.post<ScheduledTask>(`/scheduled/${id}/toggle`, null, { params: { enabled } }).catch((e) => e)) as Promise<ScheduledTask>;
+    return (await http.post<ScheduledTask>(`/scheduled/${id}/toggle`, null, { params: { enabled } })).data;
   },
 };

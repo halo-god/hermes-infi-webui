@@ -116,6 +116,12 @@ async def create_skill(
     db.add(skill)
     await db.commit()
     await db.refresh(skill)
+    # Sync to hermes filesystem (Direction A).
+    from app.services.skill_sync_service import sync_skill_to_hermes
+    await sync_skill_to_hermes(
+        skill.id, skill.name, skill.description, skill.content,
+        skill.enabled, skill.trigger_conditions,
+    )
     return skill
 
 
@@ -158,11 +164,22 @@ async def update_skill(db: AsyncSession, skill: AgentSkill, **fields: object) ->
         setattr(skill, key, value)
     await db.commit()
     await db.refresh(skill)
+    # Sync to hermes filesystem (Direction A).
+    from app.services.skill_sync_service import sync_skill_to_hermes
+    await sync_skill_to_hermes(
+        skill.id, skill.name, skill.description, skill.content,
+        skill.enabled, skill.trigger_conditions,
+    )
     return skill
 
 
 async def delete_skill(db: AsyncSession, skill: AgentSkill) -> None:
+    skill_name = skill.name
     await db.delete(skill)
+    await db.commit()
+    # Remove from hermes filesystem (Direction A).
+    from app.services.skill_sync_service import remove_skill_from_hermes
+    await remove_skill_from_hermes(skill_name)
     await db.commit()
 
 

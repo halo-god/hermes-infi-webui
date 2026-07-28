@@ -55,4 +55,11 @@ async def review_proposal(
             skill.content = proposal.proposed_content
     await db.commit()
     await db.refresh(proposal)
+    # Sync optimized content back to hermes filesystem (Direction A, closes loop).
+    if status == "approved" and skill is not None:
+        from app.services.skill_sync_service import sync_skill_to_hermes
+        await sync_skill_to_hermes(
+            skill.id, skill.name, skill.description, skill.content,
+            skill.enabled, skill.trigger_conditions,
+        )
     return proposal

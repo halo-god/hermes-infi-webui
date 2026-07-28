@@ -56,16 +56,28 @@ def profile_env(profile_dir: str | None) -> dict[str, str] | None:
     at HERMES_HOME. Returns None — i.e. default ~/.hermes behavior — when no
     profile dir is given or it doesn't exist on this host (e.g. unmounted in
     Docker), so a misconfigured profile degrades gracefully instead of failing.
+
+    Also injects hermes-agent advanced config via HERMES_* env vars so the
+    subprocess picks up prompt caching, terminal backend, etc.
     """
-    if not profile_dir:
-        return None
-    if not os.path.isdir(profile_dir):
-        logger.warning(
-            "Profile dir %s not found on this host — falling back to default HERMES_HOME",
-            profile_dir,
-        )
-        return None
-    return {"HERMES_HOME": profile_dir}
+    env: dict[str, str] = {}
+    if profile_dir:
+        if os.path.isdir(profile_dir):
+            env["HERMES_HOME"] = profile_dir
+        else:
+            logger.warning(
+                "Profile dir %s not found on this host — falling back to default HERMES_HOME",
+                profile_dir,
+            )
+    # Inject hermes-agent advanced configuration (3d).
+    env["HERMES_PROMPT_CACHING__CACHE_TTL"] = settings.hermes_prompt_cache_ttl
+    env["HERMES_TERMINAL__BACKEND"] = settings.hermes_terminal_backend
+    env["HERMES_TERMINAL__PERSISTENT_SHELL"] = str(settings.hermes_persistent_shell).lower()
+    env["HERMES_REASONING_EFFORT"] = settings.hermes_reasoning_effort
+    env["HERMES_COMPRESSION__ENABLED"] = str(settings.hermes_compression_enabled).lower()
+    env["HERMES_TOOL_OUTPUT__MAX_BYTES"] = str(settings.hermes_tool_output_max_bytes)
+    env["HERMES_PRIVACY__REDACT_PII"] = str(settings.hermes_redact_pii).lower()
+    return env if env else None
 
 
 class ACPClient:
@@ -420,6 +432,25 @@ class ACPClient:
                         "optionId": "allow_once" if approved else "deny",
                     },
                 })
+            elif method == "fs/read_text_file":
+                # Agent requests to read a file from the workspace. Read it and
+                # return the content; return null if the file doesn't exist.
+                path = params.get("path", "")
+                content = None
+                if path:
+                    import os
+                    from app.core.files import confine_to_dir, safe_relative_path
+                    rel = safe_relative_path(path)
+                    full_path = confine_to_dir(self.cwd, rel)
+                    try:
+                        with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                            content = f.read()
+                    except (FileNotFoundError, IsADirectoryError):
+                        content = None
+                    except Exception:
+                        logger.debug("fs/read_text_file failed for %s", path, exc_info=True)
+                        content = None
+                await self._respond(msg["id"], {"content": content} if content is not None else None)
             else:
                 # Unknown agent→client request: acknowledge with null.
                 await self._respond(msg["id"], None)

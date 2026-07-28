@@ -69,7 +69,10 @@ async def toggle_task(
     user: User = Depends(require_permission("scheduled.manage")),
     db: AsyncSession = Depends(get_db),
 ):
-    task = await svc.toggle_task(db, task_id, user.id, enabled)
+    try:
+        task = await svc.toggle_task(db, task_id, user.id, enabled)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"无效的 cron 表达式: {e}")
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     return task

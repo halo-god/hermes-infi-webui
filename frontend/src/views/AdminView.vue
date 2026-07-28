@@ -223,6 +223,20 @@ async function loadEvoProposals() {
     );
   } catch { evoProposals.value = []; } finally { evoProposalsLoading.value = false; }
 }
+const scanningSkills = ref(false);
+async function scanHermesSkills() {
+  scanningSkills.value = true;
+  try {
+    const r = await http.post("/memory/skills/scan");
+    const msg = `发现 ${r.data.new} 个新技能，更新 ${r.data.updated} 个`;
+    ns.toast(r.data.new || r.data.updated ? msg : "没有新技能");
+    await loadEvoSkills();
+  } catch (e: unknown) {
+    ns.toast("同步失败：" + ((e as Error)?.message || "未知错误"), "error");
+  } finally {
+    scanningSkills.value = false;
+  }
+}
 function evoSkillName(skillId: string): string {
   return evoSkills.value.find((s) => s.id === skillId)?.name || skillId.slice(0, 8);
 }
@@ -2144,9 +2158,14 @@ async function confirmImport() {
         <div class="section-card" style="margin-bottom: 16px">
           <div class="section-head">
             <div class="section-title">全部技能</div>
-            <button class="btn" style="font-size: 12px" @click="loadEvoSkills" :disabled="evoSkillsLoading">
-              <Icon name="refresh" :size="13" /> {{ evoSkillsLoading ? "加载中…" : "刷新" }}
-            </button>
+            <div style="display: flex; gap: 6px">
+              <button class="btn" style="font-size: 12px" @click="scanHermesSkills" :disabled="scanningSkills">
+                <Icon name="download" :size="13" /> {{ scanningSkills ? "同步中…" : "同步 hermes 技能" }}
+              </button>
+              <button class="btn" style="font-size: 12px" @click="loadEvoSkills" :disabled="evoSkillsLoading">
+                <Icon name="refresh" :size="13" /> {{ evoSkillsLoading ? "加载中…" : "刷新" }}
+              </button>
+            </div>
           </div>
           <div v-if="!evoSkillsLoading && !evoSkills.length" style="padding: 24px; text-align: center; color: var(--ink-mute); font-size: 13px">
             暂无技能。

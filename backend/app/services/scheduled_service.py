@@ -8,21 +8,24 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from croniter import croniter
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core import redis as redis_core
 from app.db.models.scheduled import ScheduledTask
 from app.schemas.scheduled import ScheduledTaskCreate, ScheduledTaskUpdate
 
-# Users configure times in CST (China Standard Time, UTC+8). croniter computes
-# in the base time's timezone, so we must use CST as base to get correct triggers.
-_CST = timezone(timedelta(hours=8))
-
 logger = logging.getLogger(__name__)
+
+
+def _get_tz():
+    """Get the configured scheduler timezone (cached)."""
+    return ZoneInfo(settings.scheduler_timezone)
 
 #: Seconds between scheduler ticks.
 TICK_INTERVAL = 60
@@ -33,15 +36,14 @@ def compute_next_run(cron_expr: str, from_time: datetime | None = None) -> datet
 
     Raises ValueError if the expression is invalid.
     """
-    # Use CST as base so the cron expression's hour/minute match the user's
-    # local time selection (e.g. "16:08" = 16:08 CST, not 16:08 UTC).
-    base = from_time or datetime.now(_CST)
+    # Use the configured timezone as base so the cron expression's hour/minute
+    # match the user's local time selection (e.g. "16:08" = 16:08 local).
+    tz = _get_tz()
+    base = from_time or datetime.now(tz)
     cron = croniter(cron_expr, base)
     nxt = cron.get_next(datetime)
-    # Ensure tz-aware (croniter may strip tzinfo).
     if nxt.tzinfo is None:
-        nxt = nxt.replace(tzinfo=_CST)
-    # Store as UTC for consistent DB comparison (tick checks now-UTC).
+        nxt = nxt.replace(tzinfo=tz)
     return nxt.astimezone(timezone.utc)
 
 

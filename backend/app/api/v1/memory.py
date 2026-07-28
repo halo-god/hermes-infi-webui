@@ -267,3 +267,15 @@ async def delete_skill(
 ) -> None:
     skill = await _get_own_skill(db, user, skill_id)
     await memory_service.delete_skill(db, skill)
+
+
+@router.post("/skills/scan")
+async def scan_hermes_skills(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Direction B: scan hermes ~/.hermes/skills/ for agent-created skills and
+    ingest them into the DB. Returns counts of new/updated/skipped."""
+    from app.services.skill_sync_service import ingest_hermes_skills
+    result = await ingest_hermes_skills(db, user.id)
+    return result

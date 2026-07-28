@@ -88,6 +88,31 @@ class Settings(BaseSettings):
     # (which can take several seconds for Python CLI + heavy imports). Only
     # benefits default-config sessions (no profile_dir, no MCP servers).
     session_pool_warm_size: int = 2
+    # IANA timezone for cron scheduler + local time display. Override per
+    # deployment (e.g. "America/New_York", "Europe/London").
+    scheduler_timezone: str = "Asia/Shanghai"
+    # ── hermes-agent advanced configuration ──
+    # These are passed to the hermes CLI subprocess via env vars (HERMES_*).
+    # Prompt cache TTL for Anthropic models: "5m" or "1h". Reduces cost ~90%
+    # on long conversations by caching the stable prompt prefix.
+    hermes_prompt_cache_ttl: str = "5m"
+    # Terminal backend for hermes: local | docker | ssh
+    hermes_terminal_backend: str = "local"
+    # Keep shell state alive across terminal commands (env vars, cd, venv).
+    hermes_persistent_shell: bool = True
+    # Thinking depth for reasoning models: low | medium | high
+    hermes_reasoning_effort: str = "medium"
+    # Hermes-native context compression (alternative to our summary pipeline).
+    hermes_compression_enabled: bool = False
+    # Max bytes returned from a single tool call (prevents context overflow).
+    hermes_tool_output_max_bytes: int = 100_000
+    # Hash PII (phone/ID) before sending to the LLM provider.
+    hermes_redact_pii: bool = False
+    # ── Skill system sync ──
+    # Sync DB AgentSkill ↔ hermes ~/.hermes/skills/ filesystem.
+    # Direction A: DB changes → write SKILL.md (hermes uses it at runtime).
+    # Direction B: scan hermes skills → ingest into DB (agent-created skills).
+    hermes_skills_sync_enabled: bool = True
     # Per-conversation working dir where agents drop produced files.
     workspace_root: str = Field(default="~/hermes-data/workspaces")
     # Redis Stream (prompt queue) + consumer group.

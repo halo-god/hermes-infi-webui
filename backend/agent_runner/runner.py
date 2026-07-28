@@ -870,6 +870,78 @@ class Runner:
                     await client.cancel()
                 except Exception:  # noqa: BLE001
                     pass
+            elif kind in ("tool_call_begin", "tool_call_end"):
+                # ACP lifecycle: finer-grained tool_call start/end than the
+                # single "tool_call" event. Update existing step or create new.
+                title = update.get("title", "")
+                status = "running" if kind == "tool_call_begin" else (update.get("status") or "completed")
+                sub_kind = update.get("toolKind") or update.get("tool_kind") or ""
+                raw_input = update.get("rawInput") or update.get("raw_input")
+                existing = next((s for s in steps if s.get("title") == title and s.get("status") == "running"), None)
+                if existing:
+                    existing["status"] = status
+                    if raw_input:
+                        existing["raw_input"] = raw_input
+                    if sub_kind:
+                        existing["tool_kind"] = sub_kind
+                else:
+                    steps.append({"title": title, "status": status, "raw_input": raw_input, "tool_kind": sub_kind})
+                if kind == "tool_call_begin":
+                    acc["tool_calls"] = int(acc.get("tool_calls", 0)) + 1
+                await R.publish_event(conversation_id, {
+                    "type": "tool_call",
+                    "message_id": acc["current_msg_id"],
+                    "title": title,
+                    "status": status,
+                    "raw_input": raw_input,
+                    "tool_kind": sub_kind,
+                })
+            elif kind == "artifact":
+                # ACP artifact: structured output (file/image/table). Save to
+                # workspace + send SSE so the frontend can render it inline.
+                artifact = update.get("artifact") or update
+                a_type = artifact.get("type", "file")
+                a_name = artifact.get("name") or artifact.get("title") or f"artifact_{len(acc['files'])}"
+                a_content = artifact.get("content") or artifact.get("text") or ""
+                if a_content and a_type in ("file", "text", "code"):
+                    try:
+                        f = await storage.save_file(
+                            uuid.UUID(conversation_id), a_name, a_content, agent_id,
+                            uuid.UUID(acc["current_msg_id"]),
+                        )
+                        acc["files"].append({"id": str(f.id), "name": f.name, "kind": f.kind})
+                        await R.publish_event(conversation_id, {
+                            "type": "file",
+                            "message_id": acc["current_msg_id"],
+                            "file_id": str(f.id),
+                            "name": f.name,
+                            "kind": f.kind,
+                            "version": f.current_version,
+                        })
+                    except Exception:
+                        logger.debug("artifact save failed", exc_info=True)
+            elif kind == "elicitation" or kind == "elicitation/create":
+                # Structured form input (richer than clarify's simple confirm).
+                # Forward as SSE; frontend renders a modal form from the schema.
+                req_id = update.get("request_id") or update.get("id") or str(uuid.uuid4())
+                schema = update.get("schema") or update.get("form_schema") or {}
+                el_question = update.get("question") or update.get("title") or "请填写以下信息"
+                await R.publish_event(conversation_id, {
+                    "type": "elicitation_request",
+                    "message_id": acc["current_msg_id"],
+                    "request_id": req_id,
+                    "question": el_question,
+                    "schema": schema,
+                })
+                # Wait for user response (reuse clarify's Redis mechanism as transport).
+                t = asyncio.create_task(
+                    self._wait_and_unblock_clarify_native(
+                        conversation_id, req_id, sid=conversation_id,
+                        message_id=acc["current_msg_id"], acc=acc,
+                    )
+                )
+                self._bg_tasks.add(t)
+                t.add_done_callback(self._bg_tasks.discard)
 
         async def on_fs_write(path: str, content: str) -> None:
             import difflib
@@ -1206,8 +1278,21 @@ class Runner:
                     content["clarifies"] = clarifies
                 if usage:
                     content["usage"] = usage
-                    msg.tokens_in = usage.get("input_tokens", 0)
-                    msg.tokens_out = usage.get("output_tokens", 0)
+                    tin = usage.get("input_tokens", 0)
+                    tout = usage.get("output_tokens", 0)
+                    # hermes agent sends usage_update (context_size/context_used)
+                    # but often not usage (input/output tokens). When both are 0
+                    # but context_used is available, use it as the total token
+                    # consumption estimate (split roughly 80/20 input/output).
+                    if tin == 0 and tout == 0:
+                        ctx_used = usage.get("context_used", 0)
+                        if ctx_used and ctx_used > 0:
+                            tin = int(ctx_used * 0.8)
+                            tout = ctx_used - tin
+                            content["usage"]["input_tokens"] = tin
+                            content["usage"]["output_tokens"] = tout
+                    msg.tokens_in = tin
+                    msg.tokens_out = tout
                 msg.content = content
                 msg.status = status
                 convo = await db.get(Conversation, msg.conversation_id)

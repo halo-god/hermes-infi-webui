@@ -173,8 +173,9 @@ async function toggle(t: ScheduledTask) {
   try {
     await scheduledApi.toggle(t.id, !t.enabled);
     await loadTasks();
-  } catch {
-    ns.toast("操作失败", "error");
+  } catch (e: unknown) {
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+    ns.toast(detail || "操作失败", "error");
   }
 }
 
