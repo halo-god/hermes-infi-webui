@@ -24,8 +24,15 @@ logger = logging.getLogger(__name__)
 
 
 def _get_tz():
-    """Get the configured scheduler timezone (cached)."""
-    return ZoneInfo(settings.scheduler_timezone)
+    """Get the configured scheduler timezone. Falls back to UTC if tzdata
+    is missing or the configured name is invalid."""
+    try:
+        return ZoneInfo(settings.scheduler_timezone)
+    except Exception:
+        logger.warning(
+            "ZoneInfo('%s') failed, falling back to UTC", settings.scheduler_timezone,
+        )
+        return timezone.utc
 
 #: Seconds between scheduler ticks.
 TICK_INTERVAL = 60
@@ -154,6 +161,10 @@ async def tick(db: AsyncSession) -> int:
     overwhelming the runner when many tasks are due simultaneously.
     """
     now = datetime.now(timezone.utc)
+    # Bug 2 fix: compute_next_run uses local-tz base for cron matching, but
+    # tick passes UTC. Convert to local-tz-aware before computing next_run
+    # so croniter matches the same hour/minute the user configured.
+    tz_base = now.astimezone(_get_tz())
     due = (
         await db.execute(
             select(ScheduledTask).where(
@@ -176,12 +187,12 @@ async def tick(db: AsyncSession) -> int:
             })
             task.last_run_at = now
             task.last_status = "running"
-            task.next_run_at = compute_next_run(task.cron, now)
+            task.next_run_at = compute_next_run(task.cron, tz_base)
             count += 1
         except Exception:
             logger.exception("Failed to enqueue scheduled task %s", task.id)
             task.last_status = "failed"
-            task.next_run_at = compute_next_run(task.cron, now)
+            task.next_run_at = compute_next_run(task.cron, tz_base)
 
     if due:
         await db.commit()

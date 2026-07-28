@@ -864,6 +864,7 @@ class Runner:
                 )
                 self._bg_tasks.add(t)
                 t.add_done_callback(self._bg_tasks.discard)
+            # Cancel check: standalone, runs for ALL event types.
             if not acc["cancelled"] and await R.is_cancelled(conversation_id):
                 acc["cancelled"] = True
                 try:
@@ -871,8 +872,6 @@ class Runner:
                 except Exception:  # noqa: BLE001
                     pass
             elif kind in ("tool_call_begin", "tool_call_end"):
-                # ACP lifecycle: finer-grained tool_call start/end than the
-                # single "tool_call" event. Update existing step or create new.
                 title = update.get("title", "")
                 status = "running" if kind == "tool_call_begin" else (update.get("status") or "completed")
                 sub_kind = update.get("toolKind") or update.get("tool_kind") or ""
@@ -897,8 +896,6 @@ class Runner:
                     "tool_kind": sub_kind,
                 })
             elif kind == "artifact":
-                # ACP artifact: structured output (file/image/table). Save to
-                # workspace + send SSE so the frontend can render it inline.
                 artifact = update.get("artifact") or update
                 a_type = artifact.get("type", "file")
                 a_name = artifact.get("name") or artifact.get("title") or f"artifact_{len(acc['files'])}"
@@ -920,9 +917,7 @@ class Runner:
                         })
                     except Exception:
                         logger.debug("artifact save failed", exc_info=True)
-            elif kind == "elicitation" or kind == "elicitation/create":
-                # Structured form input (richer than clarify's simple confirm).
-                # Forward as SSE; frontend renders a modal form from the schema.
+            elif kind in ("elicitation", "elicitation/create"):
                 req_id = update.get("request_id") or update.get("id") or str(uuid.uuid4())
                 schema = update.get("schema") or update.get("form_schema") or {}
                 el_question = update.get("question") or update.get("title") or "请填写以下信息"
@@ -933,7 +928,6 @@ class Runner:
                     "question": el_question,
                     "schema": schema,
                 })
-                # Wait for user response (reuse clarify's Redis mechanism as transport).
                 t = asyncio.create_task(
                     self._wait_and_unblock_clarify_native(
                         conversation_id, req_id, sid=conversation_id,

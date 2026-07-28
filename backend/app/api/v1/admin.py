@@ -4,6 +4,7 @@ All routes require an admin (super_admin/admin) platform role.
 """
 from __future__ import annotations
 
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -42,6 +43,8 @@ from app.services import (
 )
 
 router = APIRouter(dependencies=[Depends(require_admin())])
+
+logger = logging.getLogger(__name__)
 
 
 def _ip(request: Request) -> str | None:
@@ -311,6 +314,17 @@ async def put_settings(
         action="admin.settings.update", actor_id=admin.id, actor_name=admin.name,
         target="system", ip=_ip(request),
     )
+    # Bug 5 fix: sync hermes config to config.yaml files on save (not just
+    # on runner startup) so changes take effect without a runner restart.
+    hermes_cfg = payload.data.get("hermes", {})
+    if hermes_cfg:
+        try:
+            from app.services.hermes_config_sync import sync_hermes_configs
+            result = sync_hermes_configs()
+            if result.get("synced"):
+                logger.info("Hermes config.yaml re-synced after settings update: %s", result["synced"])
+        except Exception:
+            logger.debug("Hermes config re-sync failed after settings update", exc_info=True)
     return s
 
 

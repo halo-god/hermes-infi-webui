@@ -2001,20 +2001,23 @@ async function confirmImport() {
 
           <!-- Hermes Agent 高级配置 -->
           <div class="section-card" style="margin-top: 14px">
-            <div class="section-head"><div class="section-title">Hermes Agent 高级配置</div></div>
+            <div class="section-head">
+              <div class="section-title">Hermes Agent 高级配置</div>
+              <span style="font-size: 11px; color: var(--ink-faint)">全局默认值，写入所有助手的环境变量。各助手可在 ~/.hermes/profiles/&lt;name&gt;/config.yaml 中按需覆盖。</span>
+            </div>
             <div style="padding: 14px 18px">
               <div style="display: grid; grid-template-columns: 180px 1fr; gap: 10px 16px; align-items: center; font-size: 13px">
-                <div class="lbl">Prompt 缓存 TTL</div>
+                <div class="lbl">Prompt 缓存 TTL <span style="font-size:10px;color:var(--ink-faint)">[全局]</span></div>
                 <div class="val" style="display:flex;align-items:center;gap:8px">
                   <select class="cfg-input" style="width:auto;height:32px" v-model="settings.hermes!.prompt_cache_ttl">
                     <option value="5m">5 分钟</option>
                     <option value="1h">1 小时</option>
                     <option value="">禁用</option>
                   </select>
-                  <span style="font-size: 11px; color: var(--ink-mute)">Anthropic 模型可降低长会话 ~90% 成本</span>
+                  <span style="font-size: 11px; color: var(--ink-mute)">Anthropic 模型降低长会话 ~90% 成本；其他模型自动忽略</span>
                 </div>
 
-                <div class="lbl">终端后端</div>
+                <div class="lbl">终端后端 <span style="font-size:10px;color:var(--ink-faint)">[全局]</span></div>
                 <div class="val" style="display:flex;align-items:center;gap:8px">
                   <select class="cfg-input" style="width:auto;height:32px" v-model="settings.hermes!.terminal_backend">
                     <option value="local">本地 (local)</option>
@@ -2023,43 +2026,45 @@ async function confirmImport() {
                   </select>
                 </div>
 
-                <div class="lbl">持久化 Shell</div>
+                <div class="lbl">持久化 Shell <span style="font-size:10px;color:var(--ink-faint)">[全局]</span></div>
                 <div class="val">
                   <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-mute);cursor:pointer">
-                    <input type="checkbox" v-model="settings.hermes!.persistent_shell" /> 保持 shell 状态（cd / 环境变量 / venv）跨命令存活
+                    <input type="checkbox" v-model="settings.hermes!.persistent_shell" /> shell 状态（cd / 环境变量 / venv）跨命令存活
                   </label>
                 </div>
 
-                <div class="lbl">推理深度</div>
+                <div class="lbl">推理深度 <span style="font-size:10px;color:var(--accent)">[可按助手覆盖]</span></div>
                 <div class="val" style="display:flex;align-items:center;gap:8px">
                   <select class="cfg-input" style="width:auto;height:32px" v-model="settings.hermes!.reasoning_effort">
                     <option value="low">低 (快速)</option>
                     <option value="medium">中 (平衡)</option>
                     <option value="high">高 (深度)</option>
                   </select>
+                  <span style="font-size: 11px; color: var(--ink-mute)">控制推理模型的思考深度。各助手可在自己的 config.yaml 覆盖</span>
                 </div>
 
-                <div class="lbl">上下文压缩</div>
+                <div class="lbl">上下文压缩 <span style="font-size:10px;color:var(--accent)">[可按助手覆盖]</span></div>
                 <div class="val">
                   <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-mute);cursor:pointer">
-                    <input type="checkbox" v-model="settings.hermes!.compression_enabled" /> 启用 hermes 原生上下文压缩（与摘要管线二选一）
+                    <input type="checkbox" v-model="settings.hermes!.compression_enabled" /> hermes 原生上下文压缩
                   </label>
+                  <span style="font-size: 11px; color: var(--ink-faint); margin-top: 2px; display: block">与你的摘要管线功能重叠。建议二选一：摘要管线（DB 可审计，推荐）或 hermes 压缩（黑盒但更轻量）。</span>
                 </div>
 
-                <div class="lbl">工具输出限制</div>
+                <div class="lbl">工具输出限制 <span style="font-size:10px;color:var(--ink-faint)">[全局]</span></div>
                 <div class="val" style="display:flex;align-items:center;gap:8px">
                   <input class="cfg-input short" type="number" min="10000" max="1000000" v-model.number="settings.hermes!.tool_output_max_bytes" />
                   <span style="font-size: 11px; color: var(--ink-mute)">字节。防止单次工具输出撑爆上下文。</span>
                 </div>
 
-                <div class="lbl">PII 脱敏</div>
+                <div class="lbl">PII 脱敏 <span style="font-size:10px;color:var(--ink-faint)">[全局]</span></div>
                 <div class="val">
                   <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-mute);cursor:pointer">
                     <input type="checkbox" v-model="settings.hermes!.redact_pii" /> 哈希手机号 / 身份证等 PII 后再发送给模型
                   </label>
                 </div>
 
-                <div class="lbl">技能双向同步</div>
+                <div class="lbl">技能双向同步 <span style="font-size:10px;color:var(--ink-faint)">[全局]</span></div>
                 <div class="val">
                   <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-mute);cursor:pointer">
                     <input type="checkbox" v-model="settings.hermes!.skills_sync_enabled" /> DB 技能 ↔ hermes 文件系统自动同步

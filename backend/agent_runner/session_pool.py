@@ -62,6 +62,11 @@ class SessionPool:
         try:
             await asyncio.wait_for(c.start(), timeout=POOL_START_TIMEOUT)
             init_result = await asyncio.wait_for(c.initialize(), timeout=POOL_INIT_TIMEOUT)
+            # Bug 9: apply auth if configured (same as cold path in get()).
+            if settings.hermes_acp_auth_method:
+                await asyncio.wait_for(
+                    c.authenticate(settings.hermes_acp_auth_method), timeout=POOL_INIT_TIMEOUT,
+                )
             c._init_result = init_result  # cached for resume capability check
             return c
         except Exception:  # noqa: BLE001
@@ -109,6 +114,16 @@ class SessionPool:
                     logger.info("Applied hermes config overrides from DB: %s", list(hermes_cfg.keys()))
         except Exception:
             logger.debug("Warm pool: could not read config from DB", exc_info=True)
+
+        # Write the final config values to hermes config.yaml files so they
+        # persist across restarts and survive agent self-edits.
+        try:
+            from app.services.hermes_config_sync import sync_hermes_configs
+            result = sync_hermes_configs()
+            if result.get("synced"):
+                logger.info("Hermes config.yaml synced: %s", ", ".join(result["synced"]))
+        except Exception:
+            logger.debug("Hermes config.yaml sync failed", exc_info=True)
 
         if n <= 0 or not self._agents:
             return

@@ -151,7 +151,16 @@ async def handle_scheduled(task: dict, agents: dict) -> None:
         try:
             await client.start()
             await client.initialize()
-            await client.new_session(cwd)
+            # Bug 9: apply auth if configured (same as handle_single cold path).
+            if settings.hermes_acp_auth_method:
+                await client.authenticate(settings.hermes_acp_auth_method)
+            session_id = await client.new_session(cwd)
+            # Bug 8: set dont_ask mode so unattended cron tasks don't hang.
+            if session_id:
+                try:
+                    await client.set_session_mode(session_id, "dont_ask")
+                except Exception:
+                    logger.debug("set_session_mode failed for scheduled task", exc_info=True)
             # Inject system_prompt as persona prefix (same pattern as handle_single).
             effective_prompt = prompt_text
             if system_prompt:

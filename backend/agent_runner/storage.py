@@ -133,9 +133,6 @@ async def save_file(
             db.add(f)
         else:
             # Agent writing its own file — check if content actually changed.
-            # Agents sometimes re-read and re-write a file without real changes
-            # (e.g. echoing a note back after "不错"). Don't create a version
-            # for identical/trivially-different content.
             old_content = f.content
             if old_content is None and f.storage_key:
                 try:
@@ -144,12 +141,10 @@ async def save_file(
                         old_content = old_content.decode("utf-8", "ignore")
                 except Exception:
                     old_content = None
-            # Compare: if new content is empty, or identical to old (ignoring
-            # trailing whitespace), skip the version bump entirely.
-            new_content = inline or ""
+            # Bug 1 fix: use the `content` parameter (the actual new text),
+            # NOT `inline` (which is None on minio backend).
+            new_content = content or ""
             if not new_content.strip():
-                # Empty write — guard at line 48-61 already returns early, but
-                # double-check here.
                 await db.commit()
                 await db.refresh(f)
                 return f
@@ -161,13 +156,8 @@ async def save_file(
                 await db.commit()
                 await db.refresh(f)
                 return f
-            if old_content:
-                try:
-                    old_content = await asyncio.to_thread(object_storage.get, f.storage_key)
-                    if isinstance(old_content, bytes):
-                        old_content = old_content.decode("utf-8", "ignore")
-                except Exception:
-                    old_content = None
+            # Bug 4 fix: old_content is already correctly fetched above;
+            # the duplicate read below was losing data on db backend.
             if old_content:
                 ver = WorkspaceFileVersion(
                     file_id=f.id,

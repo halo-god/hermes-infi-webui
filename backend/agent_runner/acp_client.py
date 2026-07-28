@@ -49,16 +49,14 @@ class ACPTimeout(ACPError):
     pass
 
 
-def profile_env(profile_dir: str | None) -> dict[str, str] | None:
+def profile_env(profile_dir: str | None) -> dict[str, str]:
     """Env overrides scoping the hermes CLI to a profile directory.
 
-    The hermes agent roots all state (config.yaml, memory, sessions, skills)
-    at HERMES_HOME. Returns None — i.e. default ~/.hermes behavior — when no
-    profile dir is given or it doesn't exist on this host (e.g. unmounted in
-    Docker), so a misconfigured profile degrades gracefully instead of failing.
-
-    Also injects hermes-agent advanced config via HERMES_* env vars so the
-    subprocess picks up prompt caching, terminal backend, etc.
+    Always returns a dict (never None) because hermes-agent advanced config
+    (prompt_caching, terminal_backend, etc.) is injected unconditionally
+    via HERMES_* env vars. When profile_dir is missing/invalid, only the
+    HERMES_* config vars are returned (no HERMES_HOME override), so the
+    subprocess uses the default ~/.hermes home.
     """
     env: dict[str, str] = {}
     if profile_dir:
@@ -77,7 +75,7 @@ def profile_env(profile_dir: str | None) -> dict[str, str] | None:
     env["HERMES_COMPRESSION__ENABLED"] = str(settings.hermes_compression_enabled).lower()
     env["HERMES_TOOL_OUTPUT__MAX_BYTES"] = str(settings.hermes_tool_output_max_bytes)
     env["HERMES_PRIVACY__REDACT_PII"] = str(settings.hermes_redact_pii).lower()
-    return env if env else None
+    return env
 
 
 class ACPClient:
