@@ -1256,6 +1256,14 @@ class Runner:
         files: list[dict] | None = None, clarifies: list[dict] | None = None,
         usage: dict | None = None,
     ) -> None:
+        # Strip ANSI escape codes (terminal color codes) that the hermes agent
+        # or its tools sometimes emit. Without this they render as invisible or
+        # garbled characters in the web UI.
+        _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+        text = _ANSI_RE.sub("", text)
+        if thinking:
+            thinking = _ANSI_RE.sub("", thinking)
+
         async with async_session_maker() as db:
             msg = await db.get(Message, uuid.UUID(message_id))
             if msg:
