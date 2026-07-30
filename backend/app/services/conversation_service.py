@@ -359,13 +359,16 @@ async def _resolve_attached_files(
         # Write file content to workspace so agent can read it.
         # For office HTML: write the HTML AND a .txt plain-text version
         # so read_file gets clean text, not raw HTML tags.
-        if ws_dir and file_content and not is_image:
+        if ws_dir and (raw_bytes or file_content) and not is_image:
             fpath = confine_to_dir(ws_dir, rel_path)
-            is_office_html = ext in OFFICE_EXTRACTORS and "<" in file_content
+            is_office_html = ext in OFFICE_EXTRACTORS and file_content and "<" in file_content
 
             def _write_attachment():
                 os.makedirs(os.path.dirname(fpath), exist_ok=True)
                 if raw_bytes and ext == "pdf":
+                    with open(fpath, "wb") as fh:
+                        fh.write(raw_bytes)
+                elif raw_bytes:
                     with open(fpath, "wb") as fh:
                         fh.write(raw_bytes)
                 else:
@@ -378,7 +381,7 @@ async def _resolve_attached_files(
                         fh.write(plain)
 
             await asyncio.to_thread(_write_attachment)
-        elif ws_dir and file_content and is_image:
+        elif ws_dir and (raw_bytes or file_content) and is_image:
             # Images previously only reached the model as an inline base64
             # ImageContentBlock (single-agent chat only) — group/roundtable
             # chat never builds those blocks, so an attached image there was
@@ -401,7 +404,7 @@ async def _resolve_attached_files(
         result.append({
             "id": str(f.id), "name": f.name, "kind": f.kind,
             "folder_path": folder,
-            "workspace_path": f"attachments/{rel_path}" if ws_dir and file_content else None,
+            "workspace_path": f"attachments/{rel_path}" if ws_dir and (raw_bytes or file_content) else None,
             "content": file_content,
             "size_bytes": f.size_bytes or len(file_content),
             "mime_type": mime,
