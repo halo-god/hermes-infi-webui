@@ -39,15 +39,22 @@ export const useAuthStore = defineStore("auth", () => {
     // Access token is in memory only — after page reload it's null.
     // Try to restore from refresh token first.
     if (!tokenStore.access) {
-      if (!tokenStore.refresh) {
-        ready.value = true;
-        return;
-      }
-      const restored = await tokenStore.restore();
-      if (!restored) {
-        // Refresh token failed - user needs to login again
-        ready.value = true;
-        return;
+      // E2E storageState injects the access token under ACCESS_KEY (the normal
+      // product flow never writes it to localStorage — memory only).
+      const injectedAccess = localStorage.getItem("hermes.access");
+      if (!injectedAccess) {
+        if (!tokenStore.refresh) {
+          ready.value = true;
+          return;
+        }
+        const restored = await tokenStore.restore();
+        if (!restored) {
+          // Refresh token failed - user needs to login again
+          ready.value = true;
+          return;
+        }
+      } else {
+        tokenStore._access = injectedAccess;
       }
     }
     try {
