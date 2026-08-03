@@ -5,6 +5,8 @@ import type {
   DeptMapping,
   IdentityProvider,
   RolesMatrix,
+  SessionLogDetail,
+  SessionLogListResponse,
   SystemSettings,
   User,
 } from "@/types";
@@ -61,6 +63,25 @@ export const adminApi = {
   },
   async audit(params?: { action?: string; result?: string; limit?: number; date_from?: string; date_to?: string }): Promise<AuditEntry[]> {
     return (await http.get<AuditEntry[]>("/admin/audit", { params: params || {} })).data;
+  },
+  // 会话日志 (session logs)
+  async sessionLogs(params?: {
+    date_from?: string; date_to?: string; source?: string; status?: string;
+    q?: string; page?: number; page_size?: number;
+  }): Promise<SessionLogListResponse> {
+    return (await http.get<SessionLogListResponse>("/admin/session-logs", { params: params || {} })).data;
+  },
+  async sessionLogDetail(id: string): Promise<SessionLogDetail> {
+    return (await http.get<SessionLogDetail>(`/admin/session-logs/${id}`)).data;
+  },
+  async exportSessionLogs(params?: {
+    date_from?: string; date_to?: string; source?: string; status?: string; q?: string;
+  }): Promise<Blob> {
+    const resp = await http.get<Blob>("/admin/session-logs/export", {
+      params: params || {},
+      responseType: "blob",
+    });
+    return resp.data;
   },
   async getUsage(params?: { period?: string; breakdown?: string }): Promise<UsageData> {
     return (await http.get<UsageData>("/admin/usage", { params: params || {} })).data;

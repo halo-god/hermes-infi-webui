@@ -17,7 +17,12 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 from app.core.files import safe_relative_path
+from app.config import settings
+from app.core import object_storage
+from app.db.base import async_session_maker
+from app.db.models.workspace import WorkspaceFile
 from agent_runner import storage
+from sqlalchemy import select
 
 logger = logging.getLogger("hermes.watcher")
 
@@ -151,38 +156,33 @@ class WorkspaceWatcher:
             self._pending.pop(path, None)
             if path in self._synced:
                 return
-            self._synced.add(path)
             if len(self._synced) > 200:
                 self._synced = set(list(self._synced)[-100:])
 
         try:
             content = await asyncio.to_thread(Path(path).read_text, encoding="utf-8")
         except UnicodeDecodeError:
-            # P2-file: binary files (images, PDFs, compiled output) can't be
-            # synced as text. Notify the frontend that the file exists (so the
-            # UI can show it / offer download) without storing binary content
-            # in the DB — the agent reads it from disk via read_file.
-            rel = os.path.relpath(path, self.cwd)
-            rel = safe_relative_path(rel)
-            msg_id = self.get_current_msg_id() or self.message_id
-            try:
-                await self.publish_event({
-                    "type": "file",
-                    "message_id": msg_id,
-                    "file_id": None,
-                    "name": os.path.basename(path),
-                    "kind": rel.rsplit(".", 1)[-1].lower() if "." in rel else "bin",
-                    "version": 1,
-                    "diff": None,
-                    "binary": True,
-                    "workspace_path": rel,
-                })
-            except Exception:
-                logger.debug("Failed to publish binary file event for %s", path, exc_info=True)
+            # Binary files (images, PDFs, compiled output) can't be synced as
+            # text — offload them to object storage so the workspace UI can
+            # preview/download them, with the real kind/size recorded.
+            await self._sync_binary(path)
             return
         except Exception as exc:
             logger.warning("Failed to read watched file %s: %s", path, exc)
             return
+
+        # A freshly created file may still be being written (agent `cp` /
+        # download): empty reads are retried once, and never create an empty
+        # workspace row (which would render as a blank image in the UI).
+        if not content or not content.strip():
+            await asyncio.sleep(0.8)
+            try:
+                content = await asyncio.to_thread(Path(path).read_text, encoding="utf-8")
+            except Exception:
+                return
+            if not content or not content.strip():
+                logger.info("Watched file %s still empty after retry — skipping sync", path)
+                return
 
         rel = os.path.relpath(path, self.cwd)
         rel = safe_relative_path(rel)
@@ -200,6 +200,9 @@ class WorkspaceWatcher:
             logger.exception("workspace_watcher failed to save file: %s", path)
             return
 
+        async with self._lock:
+            self._synced.add(path)
+
         logger.info("Watched file synced to workspace: %s (%d chars)", rel, len(content))
 
         try:
@@ -216,6 +219,100 @@ class WorkspaceWatcher:
             )
         except Exception:
             logger.exception("Failed to publish file event for watched file")
+
+    async def _sync_binary(self, path: str) -> None:
+        """Offload a binary file (image/PDF/...) to object storage so the
+        workspace UI can preview it. Requires the minio backend — the inline
+        text column can't hold bytes — otherwise just notify existence."""
+        rel = os.path.relpath(path, self.cwd)
+        rel = safe_relative_path(rel)
+        kind = rel.rsplit(".", 1)[-1].lower() if "." in rel else "bin"
+        msg_id = self.get_current_msg_id() or self.message_id
+
+        if settings.storage_backend != "minio":
+            try:
+                await self.publish_event({
+                    "type": "file",
+                    "message_id": msg_id,
+                    "file_id": None,
+                    "name": os.path.basename(path),
+                    "kind": kind,
+                    "version": 1,
+                    "diff": None,
+                    "binary": True,
+                    "workspace_path": rel,
+                })
+            except Exception:
+                logger.debug("Failed to publish binary file event for %s", path, exc_info=True)
+            return
+
+        data = await asyncio.to_thread(Path(path).read_bytes)
+        if not data:
+            # still being written — retry once, then give up
+            await asyncio.sleep(0.8)
+            try:
+                data = await asyncio.to_thread(Path(path).read_bytes)
+            except Exception:
+                return
+            if not data:
+                logger.info("Binary file %s still empty — skipping sync", path)
+                return
+
+        storage_key = f"{self.conversation_id}/{rel}"
+        try:
+            await asyncio.to_thread(
+                object_storage.put, storage_key, data, storage.content_type_for(kind)
+            )
+        except Exception:
+            logger.exception("Failed to store binary file %s to object storage", path)
+            return
+
+        async with async_session_maker() as db:
+            res = await db.execute(
+                select(WorkspaceFile).where(
+                    WorkspaceFile.conversation_id == uuid.UUID(self.conversation_id),
+                    WorkspaceFile.name == rel,
+                )
+            )
+            f = res.scalar_one_or_none()
+            if f is None:
+                f = WorkspaceFile(
+                    conversation_id=uuid.UUID(self.conversation_id),
+                    message_id=uuid.UUID(msg_id),
+                    name=rel,
+                    kind=kind,
+                    content=None,
+                    storage_key=storage_key,
+                    size_bytes=len(data),
+                    created_by_agent=self.agent_id,
+                    current_version=1,
+                )
+                db.add(f)
+            else:
+                # repair rows created from an empty read (blank image bug)
+                f.storage_key = storage_key
+                f.size_bytes = len(data)
+                f.kind = kind
+                f.content = None
+            await db.commit()
+            await db.refresh(f)
+
+        async with self._lock:
+            self._synced.add(path)
+
+        logger.info("Binary file synced to workspace: %s (%d bytes)", rel, len(data))
+        try:
+            await self.publish_event({
+                "type": "file",
+                "message_id": msg_id,
+                "file_id": str(f.id),
+                "name": f.name,
+                "kind": f.kind,
+                "version": f.current_version,
+                "diff": None,
+            })
+        except Exception:
+            logger.debug("Failed to publish binary file event", exc_info=True)
 
     async def scan_existing(self) -> None:
         """Scan the workspace directory for existing files and sync them to DB."""

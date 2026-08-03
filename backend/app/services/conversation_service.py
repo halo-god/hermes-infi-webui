@@ -527,11 +527,9 @@ def _mcp_server_entry(server: dict) -> dict | None:
     """Convert one admin-registered MCP server record into the ACP `mcpServers`
     session-param shape.
 
-    NOTE: the exact field names a real `hermes` ACP agent expects for an
-    `mcpServers` entry aren't observable anywhere in this repo (the param has
-    never been populated until now) — this mapping follows the conventional
-    stdio/SSE MCP client-config shape and may need adjustment once verified
-    against the real agent binary. Isolated here so that's a one-place fix.
+    Verified against the real `hermes` ACP agent's schema (acp/schema.py):
+      McpServerStdio = {name, command, args: list[str], env: list[{name, value}]}
+      McpServerHttp/Sse = {name, url, headers: list[{name, value}]}
     """
     name = server.get("name")
     if not name:
@@ -542,11 +540,23 @@ def _mcp_server_entry(server: dict) -> dict | None:
         if not command:
             return None
         parts = command.split()
-        return {"name": name, "command": parts[0], "args": parts[1:], "env": server.get("env") or {}}
+        env = server.get("env") or {}
+        env_list = (
+            [{"name": str(k), "value": str(v)} for k, v in env.items()]
+            if isinstance(env, dict)
+            else []
+        )
+        return {"name": name, "command": parts[0], "args": parts[1:], "env": env_list}
     url = server.get("url")
     if not url:
         return None
-    return {"name": name, "type": "sse", "url": url, "headers": server.get("env") or {}}
+    env = server.get("env") or {}
+    headers = (
+        [{"name": str(k), "value": str(v)} for k, v in env.items()]
+        if isinstance(env, dict)
+        else []
+    )
+    return {"name": name, "url": url, "headers": headers}
 
 
 # P1-3: ordered stage keys. A staged conversation flows clarify → implement →
@@ -607,7 +617,13 @@ async def _resolve_mcp_servers(
 
     settings_row = await settings_service.get(db)
     catalog: list[dict] = (settings_row.data or {}).get("mcp_servers", [])
-    entries = [_mcp_server_entry(s) for s in catalog if s.get("name") in names]
+    # Only inject servers the admin has actually enabled — a disabled server
+    # would otherwise be handed to the agent and fail to connect, stalling the
+    # turn (the image-gen stdio server is a common case: registered but off).
+    entries = [
+        _mcp_server_entry(s) for s in catalog
+        if s.get("name") in names and s.get("enabled", True)
+    ]
     return [e for e in entries if e]
 
 

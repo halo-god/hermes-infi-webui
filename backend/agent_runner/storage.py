@@ -26,11 +26,21 @@ logger = logging.getLogger(__name__)
 _KIND_BY_EXT = {
     ".md": "md", ".markdown": "md", ".docx": "docx", ".doc": "docx",
     ".csv": "csv", ".tsv": "csv", ".json": "json", ".txt": "txt",
+    ".png": "png", ".jpg": "jpg", ".jpeg": "jpeg", ".gif": "gif",
+    ".webp": "webp", ".svg": "svg", ".pdf": "pdf", ".bin": "bin",
 }
 _CONTENT_TYPE = {
     "md": "text/markdown", "csv": "text/csv", "json": "application/json",
     "txt": "text/plain", "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+    "gif": "image/gif", "webp": "image/webp", "svg": "image/svg+xml",
+    "pdf": "application/pdf", "bin": "application/octet-stream",
 }
+
+
+def content_type_for(kind: str) -> str:
+    """MIME type for a workspace file kind (binary kinds included)."""
+    return _CONTENT_TYPE.get(kind, "application/octet-stream")
 
 
 def _kind_of(name: str) -> str:

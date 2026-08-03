@@ -18,6 +18,7 @@ from app.db.models.user import User
 from app.db.models.workspace import WorkspaceFile
 from app.deps import get_current_user, get_db, user_from_ticket_or_header
 from app.core import object_storage
+from agent_runner import storage as runner_storage
 from app.core.files import (
     read_upload_capped,
     process_upload,
@@ -430,7 +431,11 @@ async def get_file_raw(
     ticket: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Download a standalone file by ID. Auth via media ticket (URL) or Bearer."""
+    """Download a standalone file by ID. Auth via media ticket (URL) or Bearer.
+
+    Images/PDFs are served inline with their real MIME type so the workspace
+    UI's <img>/<iframe> previews render; everything else downloads.
+    """
     user = await user_from_ticket_or_header(ticket, request, db)
     wf = await _require_file_owner(db, file_id, user)
 
@@ -441,6 +446,8 @@ async def get_file_raw(
             content = await asyncio.to_thread(object_storage.get, wf.storage_key)
         except Exception:
             raise HTTPException(404, "File not found in storage")
+        if content:
+            content_type = runner_storage.content_type_for(wf.kind or "")
     elif wf.content:
         content = wf.content.encode("utf-8") if isinstance(wf.content, str) else wf.content
         if wf.kind in _TEXT_EXTS:
@@ -448,8 +455,16 @@ async def get_file_raw(
     else:
         raise HTTPException(404, "File has no content")
 
+    if not content:
+        raise HTTPException(404, "File is empty")
+
     filename = wf.name or "download"
-    disposition = f"attachment; filename*=UTF-8''{urllib.parse.quote(filename)}"
+    inline = wf.kind in ("png", "jpg", "jpeg", "gif", "webp", "svg", "pdf")
+    disposition = (
+        f"inline; filename*=UTF-8''{urllib.parse.quote(filename)}"
+        if inline
+        else f"attachment; filename*=UTF-8''{urllib.parse.quote(filename)}"
+    )
     return Response(
         content=content,
         media_type=content_type,

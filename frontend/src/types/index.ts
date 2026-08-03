@@ -84,6 +84,82 @@ export interface AuditEntry {
   meta: Record<string, unknown>;
 }
 
+// ── 会话日志 (session logs) ──
+export interface SessionLogItem {
+  id: string;
+  title: string | null;
+  source: "personal" | "group"; // personal=对话 | group=工作
+  user_name: string | null;
+  user_email: string | null;
+  first_input: string | null;
+  last_output: string | null;
+  status: "success" | "fail" | "running" | "cancelled";
+  turn_count: number;
+  model_calls: number;
+  tool_calls: number;
+  duration_ms: number | null;
+  session_id: string;
+  acp_session_id: string | null;
+  last_activity: string | null;
+  created_at: string | null;
+}
+
+export interface SessionLogListResponse {
+  total: number;
+  page: number;
+  page_size: number;
+  items: SessionLogItem[];
+}
+
+export interface SessionCallEntry {
+  id: number;
+  kind: "model" | "tool";
+  name: string | null;
+  tool_kind: string | null;
+  status: string;
+  duration_ms: number | null;
+  tokens_in: number | null;
+  tokens_out: number | null;
+  started_at: string | null;
+  ended_at: string | null;
+}
+
+export interface SessionExecution {
+  /** One turn: user input + assistant reply (incl. thinking) + calls. */
+  index: number;
+  user_text: string | null;
+  agent_text: string | null;
+  thinking: string | null;
+  status: string;
+  duration_ms: number | null;
+  message_id: string | null;
+  calls: SessionCallEntry[];
+}
+
+export interface SessionLogDetail {
+  id: string;
+  title: string | null;
+  source: "personal" | "group";
+  user_name: string | null;
+  user_email: string | null;
+  first_input: string | null;
+  last_output: string | null;
+  status: "success" | "fail" | "running" | "cancelled";
+  turn_count: number;
+  model_calls: number;
+  tool_calls: number;
+  duration_ms: number | null;
+  session_id: string;
+  acp_session_id: string | null;
+  agent: string | null;
+  profile_name: string | null;
+  profile_id: string | null;
+  team_id: string | null;
+  created_at: string | null;
+  last_activity: string | null;
+  turns: SessionExecution[];
+}
+
 export interface SystemSettings {
   data: {
     branding: {

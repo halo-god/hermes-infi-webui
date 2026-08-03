@@ -31,3 +31,4 @@ from app.db.models.scheduled import ScheduledTask  # noqa: F401
 from app.db.models.subagent import BackgroundSubagent  # noqa: F401
 from app.db.models.skill_evolution import SkillFiring, SkillProposal  # noqa: F401
 from app.db.models.profile_evolution import ProfileFiring, ProfilePromptProposal  # noqa: F401
+from app.db.models.session_log import SessionCallLog  # noqa: F401

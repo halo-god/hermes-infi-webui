@@ -141,3 +141,79 @@ class MappingCreate(BaseModel):
         if not v or not v.strip():
             raise ValueError("source_value 不能为空")
         return v
+
+
+# ── session logs (会话日志) ──
+class SessionLogItem(BaseModel):
+    id: str
+    title: str | None = None
+    source: str  # personal=对话 | group=工作
+    user_name: str | None = None
+    user_email: str | None = None
+    first_input: str | None = None
+    last_output: str | None = None
+    status: str  # success | fail | running | cancelled
+    turn_count: int = 0
+    model_calls: int = 0
+    tool_calls: int = 0
+    duration_ms: int | None = None
+    session_id: str
+    acp_session_id: str | None = None
+    last_activity: datetime | None = None
+    created_at: datetime | None = None
+
+
+class SessionLogListOut(BaseModel):
+    total: int
+    page: int
+    page_size: int
+    items: list[SessionLogItem]
+
+
+class SessionCallOut(BaseModel):
+    id: int
+    kind: str  # model | tool
+    name: str | None = None
+    tool_kind: str | None = None
+    status: str
+    duration_ms: int | None = None
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+
+
+class SessionExecutionOut(BaseModel):
+    """One turn in the conversation: user input + assistant reply + calls."""
+    index: int
+    user_text: str | None = None
+    agent_text: str | None = None
+    thinking: str | None = None
+    status: str
+    duration_ms: int | None = None
+    message_id: str | None = None
+    calls: list[SessionCallOut] = []
+
+
+class SessionLogDetail(BaseModel):
+    id: str
+    title: str | None = None
+    source: str
+    user_name: str | None = None
+    user_email: str | None = None
+    first_input: str | None = None
+    last_output: str | None = None
+    status: str
+    turn_count: int = 0
+    model_calls: int = 0
+    tool_calls: int = 0
+    duration_ms: int | None = None
+    session_id: str
+    acp_session_id: str | None = None
+    agent: str | None = None
+    profile_name: str | None = None
+    profile_id: str | None = None
+    team_id: str | None = None
+    created_at: datetime | None = None
+    last_activity: datetime | None = None
+    turns: list[SessionExecutionOut] = []
