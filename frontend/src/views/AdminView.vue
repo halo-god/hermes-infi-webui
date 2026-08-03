@@ -10,6 +10,7 @@ import { adminApi, type UsageData } from "@/api/admin";
 import { brandingApi } from "@/api/branding";
 import { http } from "@/api/client";
 import { fmtDate } from "@/utils/format";
+import { renderMarkdown } from "@/utils/markdown";
 import { agentsApi, profilesApi, type Profile, type ProfileCreate } from "@/api/agents";
 import { teamsApi } from "@/api/teams";
 import { logsApi, type LogEntry } from "@/api/logs";
@@ -27,6 +28,10 @@ import type {
   DeptMapping,
   IdentityProvider,
   PermissionGroup,
+  SessionCallEntry,
+  SessionExecution,
+  SessionLogDetail,
+  SessionLogItem,
   SystemSettings,
   User,
   WecomOrg,
@@ -38,7 +43,7 @@ const ns = useNotificationStore();
 const isSuperAdmin = computed(() => authStore.user?.role === "super_admin");
 const { queryPresence, getStatus } = usePresence();
 
-type AdminTab = "overview" | "users" | "roles" | "identity" | "audit" | "assistants" | "system" | "mcp" | "performance" | "usage" | "skill-evolution" | "profile-evolution";
+type AdminTab = "overview" | "users" | "roles" | "identity" | "audit" | "sessions" | "assistants" | "system" | "mcp" | "performance" | "usage" | "skill-evolution" | "profile-evolution";
 const tab = ref<AdminTab>("overview");
 const stats = ref<AdminStats | null>(null);
 const users = ref<User[]>([]);
@@ -53,6 +58,157 @@ const auditAutoRefresh = ref(false);
 const auditDateFrom = ref("");
 const auditDateTo = ref("");
 let _auditTimer: ReturnType<typeof setInterval> | null = null;
+
+// ── Session logs (会话日志) ──
+const sessionItems = ref<SessionLogItem[]>([]);
+const sessionTotal = ref(0);
+const sessionPage = ref(1);
+const sessionPageSize = 20;
+const sessionQ = ref("");
+const sessionSource = ref<"all" | "personal" | "group">("all");
+const sessionStatus = ref<"all" | "success" | "fail" | "running" | "cancelled">("all");
+const sessionDateFrom = ref("");
+const sessionDateTo = ref("");
+const sessionLoading = ref(false);
+const sessionDetail = ref<SessionLogDetail | null>(null);
+const sessionDetailLoading = ref(false);
+const sessionDetailError = ref("");
+const sessionDetailAnchor = ref("");
+const SESSION_STATUS_LABEL: Record<string, string> = { success: "成功", fail: "失败", running: "进行中", cancelled: "已取消" };
+const SESSION_SOURCE_LABEL: Record<string, string> = { personal: "对话", group: "工作" };
+
+async function loadSessions() {
+  sessionLoading.value = true;
+  try {
+    const res = await adminApi.sessionLogs({
+      date_from: sessionDateFrom.value || undefined,
+      date_to: sessionDateTo.value || undefined,
+      source: sessionSource.value !== "all" ? sessionSource.value : undefined,
+      status: sessionStatus.value !== "all" ? sessionStatus.value : undefined,
+      q: sessionQ.value || undefined,
+      page: sessionPage.value,
+      page_size: sessionPageSize,
+    });
+    sessionItems.value = res.items;
+    sessionTotal.value = res.total;
+  } catch {
+    sessionItems.value = [];
+    sessionTotal.value = 0;
+  } finally {
+    sessionLoading.value = false;
+  }
+}
+function resetSessionFilters() {
+  sessionQ.value = "";
+  sessionSource.value = "all";
+  sessionStatus.value = "all";
+  sessionDateFrom.value = "";
+  sessionDateTo.value = "";
+  sessionPage.value = 1;
+  loadSessions();
+}
+function sessionPageCount() {
+  return Math.max(1, Math.ceil(sessionTotal.value / sessionPageSize));
+}
+function goSessionPage(p: number) {
+  sessionPage.value = Math.min(Math.max(1, p), sessionPageCount());
+  loadSessions();
+}
+async function openSessionDetail(id: string) {
+  sessionDetailLoading.value = true;
+  sessionDetailError.value = "";
+  sessionDetail.value = null;
+  try {
+    sessionDetail.value = await adminApi.sessionLogDetail(id);
+  } catch {
+    sessionDetailError.value = "加载会话详情失败";
+  } finally {
+    sessionDetailLoading.value = false;
+  }
+}
+function closeSessionDetail() {
+  sessionDetail.value = null;
+  sessionDetailError.value = "";
+  sessionDetailAnchor.value = "";
+}
+function scrollToSessionAnchor(anchor: string) {
+  sessionDetailAnchor.value = anchor;
+  setTimeout(() => {
+    document.getElementById(anchor)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, 30);
+}
+async function exportSessionLogs() {
+  try {
+    const blob = await adminApi.exportSessionLogs({
+      date_from: sessionDateFrom.value || undefined,
+      date_to: sessionDateTo.value || undefined,
+      source: sessionSource.value !== "all" ? sessionSource.value : undefined,
+      status: sessionStatus.value !== "all" ? sessionStatus.value : undefined,
+      q: sessionQ.value || undefined,
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `session_logs_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "")}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch {
+    ns.toast("导出失败，请稍后重试", "error");
+  }
+}
+function sessionExecutions() {
+  return sessionDetail.value?.turns || [];
+}
+// 每轮思考过程折叠状态（key = 轮次 index）
+const thinkingOpen = ref<Record<number, boolean>>({});
+function toggleThinking(i: number) {
+  thinkingOpen.value[i] = !thinkingOpen.value[i];
+}
+function isThinkingOpen(i: number): boolean {
+  return !!thinkingOpen.value[i];
+}
+// Markdown 渲染（带缓存，跟随 ChatView 的做法）
+const _mdCache = new Map<string, string>();
+function md(src: string | null | undefined): string {
+  if (!src) return "";
+  const hit = _mdCache.get(src);
+  if (hit !== undefined) return hit;
+  const html = renderMarkdown(src);
+  _mdCache.set(src, html);
+  if (_mdCache.size > 200) _mdCache.clear();
+  return html;
+}
+function sessionCallDuration(c: SessionCallEntry): string {
+  if (c.duration_ms == null) return "—";
+  if (c.duration_ms < 1000) return `${c.duration_ms}ms`;
+  return `${(c.duration_ms / 1000).toFixed(1)}s`;
+}
+function turnDuration(t: SessionExecution): string {
+  if (t.duration_ms == null) return "—";
+  if (t.duration_ms < 1000) return `${t.duration_ms}ms`;
+  const s = t.duration_ms / 1000;
+  return s >= 60 ? `${Math.floor(s / 60)}m${Math.round(s % 60)}s` : `${s.toFixed(1)}s`;
+}
+function assistantName(d: SessionLogDetail | null): string {
+  return d?.profile_name || d?.agent || "—";
+}
+async function copyText(text: string) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+    ns.toast("已复制");
+  } catch {
+    ns.toast("复制失败", "error");
+  }
+}
 
 // ── Runtime logs (merged into audit tab) ──
 type LogCategory = "audit" | "runtime";
@@ -424,7 +580,7 @@ onUnmounted(() => {
 });
 async function load() {
   try { stats.value = await adminApi.stats(); } catch { /* will show nulls */ }
-  await Promise.allSettled([loadUsers(), loadAudit(), loadSettings(), loadIdentity(), loadRoles(), loadProfiles()]);
+  await Promise.allSettled([loadUsers(), loadAudit(), loadSessions(), loadSettings(), loadIdentity(), loadRoles(), loadProfiles()]);
 }
 async function loadUsers() {
   users.value = await adminApi.listUsers(userQ.value || undefined);
@@ -745,7 +901,7 @@ const providersOn = computed(() => providers.value.filter((p) => p.enabled).leng
 const TABS = computed(() => {
   const base: [AdminTab, string][] = [
     ["overview", "概览"], ["users", "用户管理"], ["roles", "权限管理"],
-    ["identity", "身份与连接"], ["audit", "审计日志"], ["assistants", "助手管理"], ["mcp", "MCP 服务器"], ["system", "系统设置"], ["performance", "性能监控"], ["usage", "用量看板"],
+    ["identity", "身份与连接"], ["audit", "审计日志"], ["sessions", "会话日志"], ["assistants", "助手管理"], ["mcp", "MCP 服务器"], ["system", "系统设置"], ["performance", "性能监控"], ["usage", "用量看板"],
   ];
   // Super-admin only: the sole gate that lets an automated, real-money
   // optimization pipeline's output ever take effect — hidden from plain admins.
@@ -1605,6 +1761,207 @@ async function confirmImport() {
                 <span class="log-msg">{{ entry.message }}</span>
               </div>
             </div>
+          </div>
+        </template>
+      </template>
+
+      <!-- ───────────── SESSION LOGS ───────────── -->
+      <template v-else-if="tab === 'sessions'">
+        <!-- ── Detail view ── -->
+        <template v-if="sessionDetail">
+          <div class="flex-between" style="align-items:center;margin-bottom:14px">
+            <div style="display:flex;align-items:center;gap:8px">
+              <button class="btn" @click="closeSessionDetail"><Icon name="chevron_left" /> 返回列表</button>
+              <span style="color:var(--ink-mute)">会话日志</span>
+              <span style="color:var(--ink-faint)">/</span>
+              <span class="heading-serif" style="font-size:17px">日志详情</span>
+              <span class="au-result" :class="{ ok: sessionDetail.status === 'success', fail: sessionDetail.status === 'fail', partial: sessionDetail.status === 'running', cancelled: sessionDetail.status === 'cancelled' }" style="margin-left:4px">
+                {{ SESSION_STATUS_LABEL[sessionDetail.status] || sessionDetail.status }}
+              </span>
+            </div>
+            <div style="display:flex;gap:10px">
+              <div class="sl-stat-chip"><span class="sl-stat-num">{{ sessionDetail.turn_count }}</span><span class="sl-stat-label">用户输入</span></div>
+              <div class="sl-stat-chip"><span class="sl-stat-num">{{ sessionDetail.model_calls }}</span><span class="sl-stat-label">LLM</span></div>
+              <div class="sl-stat-chip"><span class="sl-stat-num">{{ sessionDetail.tool_calls }}</span><span class="sl-stat-label">工具</span></div>
+            </div>
+          </div>
+
+          <div class="sl-detail-grid">
+            <!-- left tree -->
+            <div class="section-card sl-tree-card">
+              <div class="section-head"><span class="section-title">对话概览</span></div>
+              <div class="sl-tree">
+                <div class="sl-node" :class="{ active: sessionDetailAnchor === 'sl-summary' }" @click="scrollToSessionAnchor('sl-summary')">
+                  <Icon name="sparkle" :size="13" /> 会话总结
+                </div>
+                <div v-for="t in sessionExecutions()" :key="t.index" class="sl-exec-block">
+                  <div class="sl-node sl-exec-head" :class="{ active: sessionDetailAnchor === `sl-turn-${t.index}` }" @click="scrollToSessionAnchor(`sl-turn-${t.index}`)">
+                    <Icon name="bot" :size="13" /> 轮次 {{ t.index }}
+                    <span class="sl-exec-counts">
+                      <span>模型 {{ t.calls.filter((c) => c.kind === "model").length }}</span>
+                      <span>API {{ t.calls.filter((c) => c.kind === "tool").length }}</span>
+                    </span>
+                  </div>
+                  <div class="sl-node sl-node-child" :class="{ active: sessionDetailAnchor === `sl-turn-${t.index}-input` }"
+                    @click="scrollToSessionAnchor(`sl-turn-${t.index}-input`)">
+                    <Icon name="chat" :size="12" /> 用户输入
+                  </div>
+                  <div class="sl-node sl-node-child" :class="{ active: sessionDetailAnchor === `sl-turn-${t.index}-reply` }"
+                    @click="scrollToSessionAnchor(`sl-turn-${t.index}-reply`)">
+                    <Icon name="note" :size="12" /> 助手回复
+                  </div>
+                  <div v-if="t.thinking" class="sl-node sl-node-child" :class="{ active: sessionDetailAnchor === `sl-turn-${t.index}-thinking` }"
+                    @click="scrollToSessionAnchor(`sl-turn-${t.index}-thinking`)">
+                    <Icon name="sparkle" :size="12" /> 思考过程
+                  </div>
+                  <div v-if="t.calls.length" class="sl-node sl-node-child" :class="{ active: sessionDetailAnchor === `sl-turn-${t.index}-calls` }"
+                    @click="scrollToSessionAnchor(`sl-turn-${t.index}-calls`)">
+                    <Icon name="bolt" :size="12" /> 调用概览（{{ t.calls.length }}）
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- right content -->
+            <div class="sl-detail-body">
+              <div v-if="sessionDetailLoading" class="empty-state-lg" style="padding:48px">加载中…</div>
+              <div v-else-if="sessionDetailError" class="empty-state-lg" style="padding:48px">{{ sessionDetailError }}</div>
+              <template v-else>
+                <!-- 会话总结 -->
+                <div id="sl-summary" class="section-card sl-card">
+                  <div class="section-head"><span class="section-title">会话总结</span></div>
+                  <div class="sl-stats-row">
+                    <div class="sl-stat-chip"><span class="sl-stat-num">{{ sessionDetail.turn_count }}</span><span class="sl-stat-label">用户输入</span></div>
+                    <div class="sl-stat-chip"><span class="sl-stat-num">{{ sessionDetail.model_calls }}</span><span class="sl-stat-label">LLM</span></div>
+                    <div class="sl-stat-chip"><span class="sl-stat-num">{{ sessionDetail.tool_calls }}</span><span class="sl-stat-label">工具</span></div>
+                    <div class="sl-stat-chip"><span class="sl-stat-num">{{ sessionDetail.duration_ms != null ? (sessionDetail.duration_ms < 1000 ? sessionDetail.duration_ms + "ms" : (sessionDetail.duration_ms / 1000).toFixed(1) + "s") : "—" }}</span><span class="sl-stat-label">耗时</span></div>
+                    <div class="sl-stat-chip"><span class="sl-stat-num">{{ fmtDate(sessionDetail.last_activity) }}</span><span class="sl-stat-label">时间</span></div>
+                  </div>
+                  <div class="sl-info-grid">
+                    <div class="sl-info-item"><span class="sl-info-key">Session ID</span><span class="sl-info-val sl-mono" @click="copyText(sessionDetail.session_id)" title="点击复制">{{ sessionDetail.session_id }}</span></div>
+                    <div class="sl-info-item"><span class="sl-info-key">助手执行次数</span><span class="sl-info-val">{{ sessionExecutions().length }}</span></div>
+                    <div class="sl-info-item"><span class="sl-info-key">结束时间</span><span class="sl-info-val">{{ fmtDate(sessionDetail.last_activity) }}</span></div>
+                    <div class="sl-info-item"><span class="sl-info-key">用户输入次数</span><span class="sl-info-val">{{ sessionDetail.turn_count }}</span></div>
+                    <div class="sl-info-item"><span class="sl-info-key">用户</span><span class="sl-info-val">{{ sessionDetail.user_name || sessionDetail.user_email || "—" }}</span></div>
+                    <div class="sl-info-item"><span class="sl-info-key">来源</span><span class="sl-info-val">{{ SESSION_SOURCE_LABEL[sessionDetail.source] || sessionDetail.source }}</span></div>
+                    <div class="sl-info-item"><span class="sl-info-key">助手</span><span class="sl-info-val">{{ assistantName(sessionDetail) }}</span></div>
+                    <div class="sl-info-item"><span class="sl-info-key">技能</span><span class="sl-info-val">{{ sessionDetail.profile_id || "—" }}</span></div>
+                    <div class="sl-info-item"><span class="sl-info-key">环境</span><span class="sl-info-val">—</span></div>
+                    <div class="sl-info-item"><span class="sl-info-key">触发</span><span class="sl-info-val">—</span></div>
+                  </div>
+                </div>
+
+                <!-- 每轮日志 -->
+                <div v-for="t in sessionExecutions()" :key="t.index" :id="`sl-turn-${t.index}`" class="section-card sl-card sl-turn-card">
+                  <div class="section-head sl-turn-head">
+                    <span class="section-title">轮次 {{ t.index }}</span>
+                    <span class="sl-turn-dur" :title="`总耗时 ${turnDuration(t)}`"><Icon name="clock" :size="11" /> 耗时 {{ turnDuration(t) }}</span>
+                    <span class="au-result" :class="{ ok: t.status === 'complete', fail: t.status === 'error', partial: t.status === 'streaming', cancelled: t.status === 'cancelled' }">{{ SESSION_STATUS_LABEL[t.status] || t.status }}</span>
+                  </div>
+
+                  <div :id="`sl-turn-${t.index}-input`" class="sl-turn-row">
+                    <div class="sl-turn-label"><Icon name="chat" :size="12" /> 用户输入</div>
+                    <div v-if="t.user_text" class="md-body sl-md" v-html="md(t.user_text)"></div>
+                    <div v-else class="text-mute-sm">—</div>
+                  </div>
+
+                  <div :id="`sl-turn-${t.index}-reply`" class="sl-turn-row">
+                    <div class="sl-turn-label"><Icon name="note" :size="12" /> 助手回复</div>
+                    <div v-if="t.agent_text" class="md-body sl-md" v-html="md(t.agent_text)"></div>
+                    <div v-else class="text-mute-sm">—</div>
+                  </div>
+
+                  <div v-if="t.thinking" :id="`sl-turn-${t.index}-thinking`" class="sl-think">
+                    <button class="sl-think-head" @click="toggleThinking(t.index)">
+                      <Icon name="sparkle" :size="12" /> 思考过程
+                      <Icon :name="isThinkingOpen(t.index) ? 'chevron_up' : 'chevron_down'" :size="12" />
+                      <span class="text-mute-sm">{{ isThinkingOpen(t.index) ? "收起" : "展开" }}</span>
+                    </button>
+                    <div v-show="isThinkingOpen(t.index)" class="md-body sl-md sl-think-body" v-html="md(t.thinking)"></div>
+                  </div>
+
+                  <div :id="`sl-turn-${t.index}-calls`" class="sl-turn-row">
+                    <div class="sl-turn-label"><Icon name="bolt" :size="12" /> 调用概览</div>
+                    <div v-if="!t.calls.length" class="text-mute-sm">该轮暂无调用记录（历史会话只有近似耗时，新会话将有完整记录）。</div>
+                    <div v-else class="sl-call-list" style="flex:1;min-width:0">
+                      <div v-for="(c, j) in t.calls" :key="c.id" :id="`sl-call-${t.index}-${j}`" class="sl-call-row">
+                        <span class="sl-call-dot" :class="c.kind"></span>
+                        <span class="sl-call-name">{{ c.name || (c.kind === "model" ? "模型调用" : "工具调用") }}</span>
+                        <span class="sl-call-kind">{{ c.kind === "model" ? "模型调用" : `API · ${c.tool_kind || "tool"}` }}</span>
+                        <span v-if="c.kind === 'model'" class="sl-call-tokens">{{ c.tokens_in ?? 0 }} in / {{ c.tokens_out ?? 0 }} out</span>
+                        <span class="sl-call-dur">{{ sessionCallDuration(c) }}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
+
+        <!-- ── List view ── -->
+        <template v-else>
+          <div class="flex-between" style="align-items:flex-end;margin-bottom:14px">
+            <div>
+              <div class="heading-serif">会话日志</div>
+              <div class="text-mute-sm" style="margin-top:2px">查看用户一次会话内的完整执行链路，包含多轮输入、模型调用与工具调用，按最新活动时间倒序。</div>
+            </div>
+            <div style="display:flex;gap:8px">
+              <button class="btn" @click="resetSessionFilters"><Icon name="refresh" /> 重置</button>
+              <button class="btn primary" @click="exportSessionLogs"><Icon name="download" /> 导出</button>
+            </div>
+          </div>
+
+          <!-- filters -->
+          <div class="users-toolbar">
+            <div class="filter-input"><Icon name="search" /><input v-model="sessionQ" placeholder="按用户、首轮输入或会话ID搜索" @keydown.enter="sessionPage = 1; loadSessions()" /></div>
+            <button class="filter-select" :class="{ on: sessionSource !== 'all' }"
+              @click="sessionSource = nextOf(['all', 'personal', 'group'], sessionSource); sessionPage = 1; loadSessions()">
+              来源：{{ sessionSource === "all" ? "全部" : SESSION_SOURCE_LABEL[sessionSource] }} <Icon name="chevron_down" />
+            </button>
+            <button class="filter-select" :class="{ on: sessionStatus !== 'all' }"
+              @click="sessionStatus = nextOf(['all', 'success', 'fail', 'cancelled', 'running'], sessionStatus); sessionPage = 1; loadSessions()">
+              状态：{{ sessionStatus === "all" ? "全部" : SESSION_STATUS_LABEL[sessionStatus] }} <Icon name="chevron_down" />
+            </button>
+            <span class="text-mute-sm">从</span>
+            <input type="date" class="filter-select" v-model="sessionDateFrom" style="padding: 0 10px; height: 34px" @change="sessionPage = 1; loadSessions()" />
+            <span class="text-mute-sm">至</span>
+            <input type="date" class="filter-select" v-model="sessionDateTo" style="padding: 0 10px; height: 34px" @change="sessionPage = 1; loadSessions()" />
+            <span class="flex-1"></span>
+            <span class="text-mute-sm">{{ sessionTotal }} 条记录</span>
+          </div>
+
+          <div class="sl-table">
+            <div class="sl-row head">
+              <div>最新时间</div><div>用户</div><div>来源</div><div>首轮输入</div><div>最终输出</div><div>状态</div><div>轮次</div><div>模型/API</div><div>耗时(ms)</div><div>会话</div><div>操作</div>
+            </div>
+            <div v-if="sessionLoading && !sessionItems.length" class="empty-state-lg" style="padding:32px">加载中…</div>
+            <div v-else-if="!sessionItems.length" class="empty-state-lg" style="padding:32px">暂无符合条件的会话记录。</div>
+            <div v-for="s in sessionItems" :key="s.id" class="sl-row">
+              <div class="sl-cell-muted">{{ fmtDate(s.last_activity) }}</div>
+              <div class="sl-user">
+                <div class="sl-user-name">{{ s.user_name || "—" }}</div>
+                <div v-if="s.user_email" class="sl-user-email">{{ s.user_email }}</div>
+              </div>
+              <div><span class="sl-source">{{ SESSION_SOURCE_LABEL[s.source] || s.source }}</span></div>
+              <div class="sl-ellipsis" :title="s.first_input || ''">{{ s.first_input || "—" }}</div>
+              <div class="sl-ellipsis" :title="s.last_output || ''">{{ s.last_output || "—" }}</div>
+              <div><span class="au-result" :class="{ ok: s.status === 'success', fail: s.status === 'fail', partial: s.status === 'running', cancelled: s.status === 'cancelled' }">{{ SESSION_STATUS_LABEL[s.status] || s.status }}</span></div>
+              <div class="sl-center">{{ s.turn_count }}</div>
+              <div class="sl-center">{{ s.model_calls }} / {{ s.tool_calls }}</div>
+              <div class="sl-center">{{ s.duration_ms != null ? s.duration_ms : "—" }}</div>
+              <div class="sl-sid">
+                <span class="sl-mono" style="cursor:pointer" :title="`复制 ${s.session_id}`" @click="copyText(s.session_id)">{{ s.session_id.slice(0, 8) }}…</span>
+              </div>
+              <div><button class="btn" style="padding:3px 12px;font-size:12px" @click="openSessionDetail(s.id)">详情</button></div>
+            </div>
+          </div>
+
+          <!-- pagination -->
+          <div v-if="sessionTotal > sessionPageSize" class="sl-pager">
+            <button class="btn" :disabled="sessionPage <= 1" @click="goSessionPage(sessionPage - 1)"><Icon name="chevron_left" /> 上一页</button>
+            <span class="text-mute-sm">第 {{ sessionPage }} / {{ sessionPageCount() }} 页 · 共 {{ sessionTotal }} 条</span>
+            <button class="btn" :disabled="sessionPage >= sessionPageCount()" @click="goSessionPage(sessionPage + 1)">下一页 <Icon name="chevron_right" /></button>
           </div>
         </template>
       </template>

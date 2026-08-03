@@ -8,6 +8,7 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel as _BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,6 +32,8 @@ from app.schemas.admin import (
     ProviderUpdate,
     RoleOut,
     RolesMatrixOut,
+    SessionLogDetail,
+    SessionLogListOut,
     SystemSettingsOut,
     SystemSettingsUpdate,
 )
@@ -38,6 +41,7 @@ from app.schemas.user import UserCreate, UserOut
 from app.services import (
     audit_service,
     identity_service,
+    session_log_service,
     settings_service,
     user_service,
 )
@@ -290,6 +294,84 @@ async def audit(
     )
 
 
+# ── session logs (会话日志) ──
+@router.get("/session-logs", response_model=SessionLogListOut)
+async def session_logs(
+    date_from: str | None = Query(None, description="起始日期 YYYY-MM-DD"),
+    date_to: str | None = Query(None, description="截止日期 YYYY-MM-DD"),
+    source: str | None = Query(None, description="personal=对话 | group=工作"),
+    status: str | None = Query(None, description="success | fail | running | cancelled"),
+    q: str | None = Query(None, description="按用户 / 首轮输入 / 会话ID 搜索"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    return await session_log_service.list_sessions(
+        db, date_from=date_from, date_to=date_to,
+        source=source, status=status, q=q, page=page, page_size=page_size,
+    )
+
+
+@router.get("/session-logs/export")
+async def session_logs_export(
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    source: str | None = Query(None),
+    status: str | None = Query(None),
+    q: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """CSV export of the filtered session logs (utf-8-sig for Excel)."""
+    import csv
+    import io
+    from datetime import datetime, timezone
+
+    rows = await session_log_service.export_rows(
+        db, date_from=date_from, date_to=date_to,
+        source=source, status=status, q=q,
+    )
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "最新时间", "用户", "来源", "状态", "轮次", "模型调用", "API调用",
+        "耗时(ms)", "首轮输入", "最终输出", "会话ID",
+    ])
+    for r in rows:
+        writer.writerow([
+            r["last_activity"].isoformat() if r["last_activity"] else "",
+            r["user_name"] or r["user_email"] or "",
+            "工作" if r["source"] == "group" else "对话",
+            {"success": "成功", "fail": "失败", "running": "进行中", "cancelled": "已取消"}.get(r["status"], r["status"]),
+            r["turn_count"],
+            r["model_calls"],
+            r["tool_calls"],
+            r["duration_ms"] if r["duration_ms"] is not None else "",
+            (r["first_input"] or "").replace("\n", " "),
+            (r["last_output"] or "").replace("\n", " "),
+            r["session_id"],
+        ])
+    stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+    content = "\ufeff" + buf.getvalue()  # BOM so Excel opens UTF-8 correctly
+    return StreamingResponse(
+        iter([content.encode("utf-8")]),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="session_logs_{stamp}.csv"',
+        },
+    )
+
+
+@router.get("/session-logs/{conversation_id}", response_model=SessionLogDetail)
+async def session_log_detail(
+    conversation_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    detail = await session_log_service.session_detail(db, conversation_id)
+    if detail is None:
+        raise HTTPException(404, "会话不存在")
+    return detail
+
+
 # ── system settings ──
 @router.get("/settings", response_model=SystemSettingsOut)
 async def get_settings(db: AsyncSession = Depends(get_db)):
@@ -397,9 +479,9 @@ class McpServerIn(_BaseModel):
 class McpServerOut(_BaseModel):
     name: str
     transport: str
-    command: str | None
-    url: str | None
-    env: dict | None
+    command: str | None = None
+    url: str | None = None
+    env: dict | None = None
     risk_level: str = "read"
 
 

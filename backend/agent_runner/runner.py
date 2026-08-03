@@ -37,6 +37,7 @@ from app.db.models.conversation import Conversation, Message
 from sqlalchemy import select
 from agent_runner import discovery, storage
 from agent_runner.acp_client import ACPTimeout
+from agent_runner.call_log import CallCollector
 from agent_runner.session_pool import SessionPool
 from agent_runner.subagent_pool import SubagentPool
 from agent_runner.workspace_watcher import WorkspaceWatcher
@@ -628,6 +629,12 @@ class Runner:
 
         acc = {"text": "", "cancelled": False, "current_msg_id": message_id, "tool_since_split": False, "thinking": "", "plan": None, "files": [], "total_tokens": 0, "usage": None, "tool_calls": 0, "iter_capped": False}
         steps: list[dict] = []
+        # Session call log: one row per model/tool call, persisted at finalize
+        # for the admin 会话日志 console (kind/name/duration/tokens).
+        call_collector = CallCollector(
+            model_name=agent_id or "hermes",
+            turn_started_at=datetime.now(tz=timezone.utc),
+        )
         # Circuit breaker: cancel the ACP session once a turn emits this many
         # tool_call events. Guards against runaway ReAct loops. 0 = disabled.
         max_iterations = task.get("max_iterations") or 0
@@ -670,6 +677,10 @@ class Runner:
                     "tool_kind": tool_kind,
                 }
                 steps.append(step)
+                call_collector.on_tool_call(
+                    title=step["title"], status=step["status"], tool_kind=tool_kind,
+                    tool_call_id=update.get("toolCallId") or update.get("tool_call_id"),
+                )
                 await R.publish_event(
                     conversation_id,
                     {
@@ -774,6 +785,8 @@ class Runner:
                 output_tokens = update.get("output_tokens", 0)
                 total = input_tokens + output_tokens
                 acc["total_tokens"] = total
+                if total > 0:
+                    call_collector.on_usage(input_tokens=input_tokens, output_tokens=output_tokens)
                 # Persist usage in acc for _finalize to write to DB.
                 acc["usage"] = {
                     "input_tokens": input_tokens,
@@ -853,6 +866,13 @@ class Runner:
                     acc["usage"]["context_used"] = used
                 else:
                     acc["usage"] = {"input_tokens": 0, "output_tokens": 0, "context_size": size, "context_used": used}
+                # The hermes agent emits usage_update (context pressure) but
+                # not `usage` (token detail) — count each update as one model
+                # call for the session call log, estimating tokens 80/20 from
+                # context_used (same split _finalize uses for tokens_*).
+                if used and used > 0:
+                    est_in = int(used * 0.8)
+                    call_collector.on_usage(input_tokens=est_in, output_tokens=used - est_in)
                 await R.publish_event(conversation_id, {
                     "type": "usage",
                     "message_id": acc["current_msg_id"],
@@ -907,6 +927,10 @@ class Runner:
                     steps.append({"title": title, "status": status, "raw_input": raw_input, "tool_kind": sub_kind})
                 if kind == "tool_call_begin":
                     acc["tool_calls"] = int(acc.get("tool_calls", 0)) + 1
+                call_collector.on_tool_call(
+                    title=title, status=status, tool_kind=sub_kind or None,
+                    tool_call_id=update.get("toolCallId") or update.get("tool_call_id"),
+                )
                 await R.publish_event(conversation_id, {
                     "type": "tool_call",
                     "message_id": acc["current_msg_id"],
@@ -1086,12 +1110,18 @@ class Runner:
         except ACPTimeout as exc:
             logger.error("prompt timed out for %s: %s", conversation_id, exc)
             await self.pool.drop(conversation_id, session_namespace=session_namespace)
-            await self._fail(conversation_id, acc["current_msg_id"], f"响应超时：{exc}")
+            await self._fail(conversation_id, acc["current_msg_id"], f"响应超时：{exc}",
+                             calls=call_collector.records(),
+                             thinking=acc.get("thinking") or "", plan=acc.get("plan"),
+                             files=acc.get("files"), clarifies=acc.get("clarifies"))
             return
         except Exception as exc:  # noqa: BLE001
             logger.exception("prompt failed")
             await self.pool.drop(conversation_id, session_namespace=session_namespace)
-            await self._fail(conversation_id, acc["current_msg_id"], f"{exc.__class__.__name__}")
+            await self._fail(conversation_id, acc["current_msg_id"], f"{exc.__class__.__name__}",
+                             calls=call_collector.records(),
+                             thinking=acc.get("thinking") or "", plan=acc.get("plan"),
+                             files=acc.get("files"), clarifies=acc.get("clarifies"))
             return
 
         if acc["cancelled"]:
@@ -1118,7 +1148,10 @@ class Runner:
                 # Most likely an API-layer problem, not context length.
                 fail_reason = "模型未返回有效内容（可能是服务临时故障，请稍后重试；如持续出现请检查模型配置）"
 
-            await self._fail(conversation_id, acc["current_msg_id"], fail_reason)
+            await self._fail(conversation_id, acc["current_msg_id"], fail_reason,
+                             calls=call_collector.records(),
+                             thinking=acc.get("thinking") or "", plan=acc.get("plan"),
+                             files=acc.get("files"), clarifies=acc.get("clarifies"))
             return
         else:
             status = "complete"
@@ -1131,7 +1164,7 @@ class Runner:
         await self._finalize(
             acc["current_msg_id"], acc["text"], status, steps,
             acc.get("thinking") or "", acc.get("plan"), acc.get("files"),
-            acc.get("clarifies"), acc.get("usage"),
+            acc.get("clarifies"), acc.get("usage"), call_collector.records(),
         )
         if status == "complete" and matched_skill_ids:
             await self._record_skill_firings(
@@ -1275,7 +1308,7 @@ class Runner:
         self, message_id: str, text: str, status: str, steps: list[dict] | None = None,
         thinking: str | None = None, plan: list[dict] | None = None,
         files: list[dict] | None = None, clarifies: list[dict] | None = None,
-        usage: dict | None = None,
+        usage: dict | None = None, calls: list[dict] | None = None,
     ) -> None:
         # Strip ANSI escape codes (terminal color codes) that the hermes agent
         # or its tools sometimes emit. Without this they render as invisible or
@@ -1320,6 +1353,18 @@ class Runner:
                 convo = await db.get(Conversation, msg.conversation_id)
                 if convo:
                     convo.updated_at = datetime.now(tz=timezone.utc)
+                if calls:
+                    # Session call log: one row per model/tool call, so the
+                    # admin 会话日志 console can show a per-call overview.
+                    from app.db.models.session_log import SessionCallLog
+                    db.add_all([
+                        SessionCallLog(
+                            conversation_id=convo.id if convo else msg.conversation_id,
+                            message_id=msg.id,
+                            **c,
+                        )
+                        for c in calls
+                    ])
                 await db.commit()
 
     async def _record_skill_firings(
@@ -1388,7 +1433,9 @@ class Runner:
 
     async def _load_high_risk_server_names(self) -> set[str]:
         """P2-3: names of MCP servers flagged write/destructive in the admin
-        catalog. Read once per turn (cheap single-row system_settings lookup)."""
+        catalog. Read once per turn (cheap single-row system_settings lookup).
+        Disabled servers are excluded — they aren't injected into the session,
+        so their names must not trigger the tool-risk guard either."""
         try:
             async with async_session_maker() as db:
                 from app.services import settings_service
@@ -1396,7 +1443,9 @@ class Runner:
                 servers = (row.data or {}).get("mcp_servers", []) if row else []
                 return {
                     s["name"] for s in servers
-                    if s.get("risk_level") in ("write", "destructive") and s.get("name")
+                    if s.get("risk_level") in ("write", "destructive")
+                    and s.get("name")
+                    and s.get("enabled", True)
                 }
         except Exception:  # noqa: BLE001 — never break a turn over the risk map
             logger.debug("failed to load high-risk server names", exc_info=True)
@@ -1422,8 +1471,19 @@ class Runner:
             )
             await db.commit()
 
-    async def _fail(self, conversation_id: str, message_id: str, detail: str) -> None:
-        await self._finalize(message_id, f"⚠ 生成失败：{detail}", "error")
+    async def _fail(
+        self, conversation_id: str, message_id: str, detail: str,
+        calls: list[dict] | None = None,
+        thinking: str | None = None, plan: list[dict] | None = None,
+        files: list[dict] | None = None, clarifies: list[dict] | None = None,
+    ) -> None:
+        # Keep whatever the agent already streamed (thinking/plan/files) so a
+        # failed turn still shows its reasoning in the session log.
+        await self._finalize(
+            message_id, f"⚠ 生成失败：{detail}", "error",
+            calls=calls, thinking=thinking, plan=plan, files=files,
+            clarifies=clarifies,
+        )
         await R.publish_event(
             conversation_id,
             {"type": "error", "message_id": message_id, "detail": detail},
