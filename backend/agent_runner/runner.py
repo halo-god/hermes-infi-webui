@@ -59,8 +59,24 @@ def _write_text(path: str, content: str) -> None:
 
 def _read_text(path: str) -> str:
     """Synchronous file read for use with asyncio.to_thread."""
-    with open(path, encoding="utf-8") as fh:
+    with open(path, "r", encoding="utf-8") as fh:
         return fh.read()
+
+
+# ANSI escape code remover: colours, cursor, private mode, OSC hyperlinks,
+# charset sequences, and single-char sequences. CLI tools commonly emit these.
+_ANSI_RE = re.compile(
+    r"\x1b\[[0-9;?]*[a-zA-Z]"        # CSI + private mode (e.g. \x1b[?25l)
+    r"|\x1b\][0-9;]*(?:[^\x1b]*\x1b\\|[^\x07]*\x07)"  # OSC (hyperlink, title)
+    r"|\x1b[()][0-9A-Za-z]"          # Charset (e.g. \x1b(B)
+    r"|\x1b[0-9A-Za-z]",             # Single-char (e.g. \x1b7)
+)
+
+
+def _strip_ansi(text: str | None) -> str:
+    if not text:
+        return ""
+    return _ANSI_RE.sub("", text)
 
 
 # ── Stability constants ──
@@ -629,6 +645,7 @@ class Runner:
             if kind == "agent_message_chunk":
                 delta = (update.get("content") or {}).get("text", "")
                 if delta:
+                    delta = _strip_ansi(delta)
                     acc["tool_since_split"] = False
                     acc["text"] += delta
                     await R.publish_event(
@@ -643,6 +660,8 @@ class Runner:
                 # previews for browser_*, diffs for write_file, etc.). Keep it
                 # compact — only the fields the UI cares about.
                 raw_input = update.get("rawInput") or update.get("raw_input")
+                if raw_input:
+                    raw_input = _strip_ansi(raw_input)
                 tool_kind = update.get("toolKind") or update.get("tool_kind")
                 step = {
                     "title": update.get("title"),
@@ -727,6 +746,7 @@ class Runner:
                 # a fallback for older hermes-agent versions that may emit it.
                 delta = (update.get("content") or {}).get("text", "") or update.get("delta", "")
                 if delta:
+                    delta = _strip_ansi(delta)
                     acc["thinking"] += delta
                     await R.publish_event(conversation_id, {
                         "type": "thought",
@@ -736,13 +756,13 @@ class Runner:
             elif kind == "plan":
                 raw = update.get("entries") or update.get("plan") or []
                 if isinstance(raw, list) and raw:
-                    acc["plan"] = [{"content": e.get("content", ""), "status": e.get("status", "pending"), "priority": e.get("priority", "medium")} for e in raw if isinstance(e, dict)]
+                    acc["plan"] = [{"content": _strip_ansi(e.get("content", "")), "status": e.get("status", "pending"), "priority": e.get("priority", "medium")} for e in raw if isinstance(e, dict)]
                     await R.publish_event(conversation_id, {
                         "type": "plan",
                         "message_id": acc["current_msg_id"],
                         "entries": [
                             {
-                                "content": e.get("content", ""),
+                                "content": _strip_ansi(e.get("content", "")),
                                 "status": e.get("status", "pending"),
                                 "priority": e.get("priority", "medium"),
                             }
@@ -901,6 +921,7 @@ class Runner:
                 a_name = artifact.get("name") or artifact.get("title") or f"artifact_{len(acc['files'])}"
                 a_content = artifact.get("content") or artifact.get("text") or ""
                 if a_content and a_type in ("file", "text", "code"):
+                    a_content = _strip_ansi(a_content)
                     try:
                         f = await storage.save_file(
                             uuid.UUID(conversation_id), a_name, a_content, agent_id,
@@ -1259,10 +1280,9 @@ class Runner:
         # Strip ANSI escape codes (terminal color codes) that the hermes agent
         # or its tools sometimes emit. Without this they render as invisible or
         # garbled characters in the web UI.
-        _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
-        text = _ANSI_RE.sub("", text)
+        text = _strip_ansi(text)
         if thinking:
-            thinking = _ANSI_RE.sub("", thinking)
+            thinking = _strip_ansi(thinking)
 
         async with async_session_maker() as db:
             msg = await db.get(Message, uuid.UUID(message_id))
