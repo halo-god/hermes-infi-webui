@@ -41,7 +41,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-hermes}:${POSTGRES_PASSWORD:-hermes}@postgres:5432/${POSTGRES_DB:-hermes}
       REDIS_URL: redis://redis:6379/0
       FIRST_ADMIN_EMAIL: ${FIRST_ADMIN_EMAIL:-admin@hermes.io}
-      FIRST_ADMIN_PASSWORD: ${FIRST_ADMIN_PASSWORD:-Hermes@2026}
+      FIRST_ADMIN_PASSWORD: ${FIRST_ADMIN_PASSWORD:-change-me-in-production}
       FIRST_ADMIN_NAME: ${FIRST_ADMIN_NAME:-林知微}
       STORAGE_BACKEND: ${STORAGE_BACKEND:-db}
     depends_on:

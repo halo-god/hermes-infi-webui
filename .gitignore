@@ -22,3 +22,15 @@ frontend/test-results/
 frontend/playwright-report/
 frontend/e2e/.auth/
 .playwright-mcp/
+
+# ── 本机/工具/缓存/临时（与项目无关）──
+.env
+.DS_Store
+.ruff_cache/
+.zcode/
+chats/
+/e2e/
+test_group_chat.py
+review-fndxnm.md
+*.log
+*.bak
