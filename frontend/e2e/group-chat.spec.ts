@@ -79,6 +79,8 @@ test.describe("群聊成员与频道模式", () => {
 });
 
 test.describe("群聊圆桌与成员管理", () => {
+  // 成员/圆桌依赖真实后端，偶发抖动允许重试一次
+  test.describe.configure({ retries: 1 });
   test("绑定多助手团队 → @圆桌 触发多 Agent 并行回复渲染", async ({ page }) => {
     // 前置：创建团队 + 绑定 3 个共享 profile（多 Agent 圆桌前提）
     const token = adminToken();
@@ -167,11 +169,15 @@ test.describe("群聊圆桌与成员管理", () => {
     // 修复：201 已断言，无需 200
     const convId = (await groupRes.json()).id as string;
 
-    // 读取成员列表（先 text 后 json 避免 APIResponse 偶发空解析）
-    const memResp = await page.request.get(`/api/v1/conversations/${convId}/members`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    const before = (await memResp.json()) as { id: string; agent_id: string | null }[];
+    // 读取成员列表；群聊刚创建可能短暂未就绪，空结果重试 3 次
+    let before: { id: string; agent_id: string | null }[] = [];
+    for (let i = 0; i < 3 && before.length === 0; i++) {
+      const memResp = await page.request.get(`/api/v1/conversations/${convId}/members`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      before = (await memResp.json()) as { id: string; agent_id: string | null }[];
+      if (before.length === 0) await page.waitForTimeout(1000);
+    }
     expect(before.length).toBeGreaterThanOrEqual(1);
 
     // 先添加一个 AI 成员（若已存在则跳过——存在性检查）

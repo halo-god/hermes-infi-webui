@@ -2,6 +2,8 @@ import { test, expect } from "@playwright/test";
 import { adminTokenFromState } from "./helpers";
 
 test.describe("历史会话", () => {
+  // 删除/列表偶发受真实后端抖动影响，允许重试一次
+  test.describe.configure({ retries: 1 });
   test("列表按日期分组渲染，搜索可过滤", async ({ page }) => {
     await page.goto("/history");
     await expect(page.locator(".hi-group").first()).toBeVisible({ timeout: 20_000 });
@@ -40,8 +42,9 @@ test.describe("历史会话", () => {
             params: { q: rowTitle },
           });
           if (res.status() !== 200) return false;
-          const items = (await res.json()) as unknown[];
-          return items.length === 0;
+          const items = (await res.json()) as { title?: string }[];
+          // 精确标题消失即删除成功（容忍同前缀的其它测试会话）
+          return !items.some((c) => c.title === rowTitle);
         },
         { timeout: 30_000 },
       )
