@@ -33,3 +33,4 @@ chats/
 test_group_chat.py
 review-fndxnm.md
 *.log
+*.bak
