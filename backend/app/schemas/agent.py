@@ -139,6 +139,7 @@ class ProfileExport(BaseModel):
 
 class ScanProfilesResponse(BaseModel):
     created: int
+    updated: int = 0
     message: str
     version: str
     profiles_found: int

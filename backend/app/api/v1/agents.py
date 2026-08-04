@@ -340,6 +340,7 @@ async def scan_profiles(
     profiles_res = await db.execute(select(Profile.handle))
     existing_handles = set(profiles_res.scalars().all())
     created = 0
+    updated = 0
 
     # 1. Sync from Hermes filesystem profiles (~/.hermes/ or $HERMES_HOME)
     try:
@@ -357,6 +358,19 @@ async def scan_profiles(
 
     for fsp in fs_profiles:
         if fsp["handle"] in existing_handles:
+            # The user may have switched the model in hermes CLI (config.yaml
+            # is authoritative per profile) — refresh the DB copy so the
+            # admin console reflects the actual model.
+            fs_model = fsp.get("model")
+            if fs_model:
+                existing = (
+                    await db.execute(
+                        select(Profile).where(Profile.handle == fsp["handle"])
+                    )
+                ).scalar_one_or_none()
+                if existing is not None and existing.default_model != fs_model:
+                    existing.default_model = fs_model
+                    updated += 1
             continue
         try:
             p = Profile(
@@ -399,17 +413,20 @@ async def scan_profiles(
     except Exception as exc:  # noqa: BLE001
         errors.append(f"同步 Agent 记录失败: {exc}")
 
-    if created:
+    if created or updated:
         try:
             await db.commit()
         except Exception as exc:  # noqa: BLE001
             await db.rollback()
             errors.append(f"保存到数据库失败: {exc}")
             created = 0
+            updated = 0
 
     parts = []
     if created:
         parts.append(f"新增 {created} 个助手")
+    if updated:
+        parts.append(f"更新 {updated} 个模型")
     if fs_profiles:
         parts.append(f"发现 {len(fs_profiles)} 个 profile")
     if hermes_path:
@@ -418,6 +435,7 @@ async def scan_profiles(
 
     return ScanProfilesResponse(
         created=created,
+        updated=updated,
         message=message,
         version=version,
         profiles_found=len(fs_profiles),
