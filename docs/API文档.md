@@ -179,7 +179,11 @@ SSE 每 ~15s 发 `: keepalive` 心跳；收到 `done` 后服务端关闭该 SSE�
 | POST | `/admin/users` | 建用户：`{email,name,password,role,department?,title?}` |
 | PATCH | `/admin/users/{id}` | 改用户：`{role?,status?,department?,title?,is_active?}` |
 | GET | `/admin/audit?action=&result=&limit=` | 审计日志 |
+| GET | `/admin/session-logs?date_from=&date_to=&source=&status=&q=&page=&page_size=` | 会话日志列表（来源 personal/group，状态 success/fail/running/cancelled，分页返回 `{total,items}`） |
+| GET | `/admin/session-logs/{conversation_id}` | 会话日志详情（按轮 turns：用户输入/助手回复/思考过程/耗时/模型与工具调用概览） |
+| GET | `/admin/session-logs/export` | 会话日志 CSV 导出（utf-8-sig，Excel 可直接打开） |
 | GET/PUT | `/admin/settings` | 系统设置（品牌 / 模型网关 / 配额）；PUT 改限流即时生效 |
+| GET | `/admin/mcp-servers` | MCP 服务器目录（stdio/http，含 risk_level） |
 | GET | `/admin/identity` | 身份提供商列表 |
 | PATCH | `/admin/identity/{pid}` | 启用/配置：`{enabled?,config?}` |
 | GET/POST | `/admin/identity/{pid}/mappings` | 部门→团队映射（增/查） |

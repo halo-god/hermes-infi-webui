@@ -222,6 +222,7 @@ cd frontend
 npm run type-check   # vue-tsc --noEmit
 npm run build        # 类型检查 + vite 构建
 npm run dev          # 开发热重载
+npm run e2e          # Playwright E2E（39 用例，需三服务在跑；详见 docs/测试文档.md）
 ```
 
 TypeScript 构建是严格的（`noUnusedLocals`），构建前清理未使用的导入。
