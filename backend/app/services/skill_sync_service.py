@@ -164,7 +164,13 @@ def _parse_skill_md(raw: str) -> dict | None:
     tags = []
     nested_meta = meta.get("metadata") or {}
     if isinstance(nested_meta, dict):
+        # agentskills.io layout: metadata.tags, or metadata.hermes.tags
+        # (the hermes CLI's own convention, e.g. docker-manager's SKILL.md).
         t = nested_meta.get("tags")
+        if t is None:
+            hermes_meta = nested_meta.get("hermes")
+            if isinstance(hermes_meta, dict):
+                t = hermes_meta.get("tags")
         if isinstance(t, list):
             tags = t
         elif isinstance(t, str):
@@ -215,3 +221,7 @@ async def ingest_hermes_skills(db: AsyncSession, owner_id) -> dict:
         await db.commit()
 
     return {"new": new_count, "updated": updated_count, "skipped": len(fs_skills) - new_count - updated_count}
+
+
+# Public alias for ZIP import / external parsers
+parse_skill_md = _parse_skill_md

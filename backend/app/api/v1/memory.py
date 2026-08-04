@@ -6,7 +6,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -236,6 +236,89 @@ async def create_skill(
         db, name=payload.name, description=payload.description, content=payload.content,
         trigger_conditions=payload.trigger_conditions, owner_id=user.id,
         profile_id=payload.profile_id, enabled=payload.enabled,
+    )
+    return SkillOut.model_validate(skill, from_attributes=True)
+
+
+@router.post("/skills/import", response_model=SkillOut, status_code=201)
+async def import_skill_zip(
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> SkillOut:
+    """Import a standard skills ZIP package (agentskills.io layout).
+
+    The ZIP must contain a ``SKILL.md`` at the root or inside a single
+    subdirectory. The DB row mirrors its frontmatter (name/description/tags)
+    and body; resource files are extracted next to it in
+    ``{HERMES_HOME}/skills/{slug}/`` so the package stays usable by the hermes
+    CLI (``sync_skill_to_hermes`` keeps the SKILL.md in sync afterwards).
+    """
+    raw = await file.read()
+    if len(raw) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="技能包超过 5MB 限制")
+    if not raw:
+        raise HTTPException(status_code=400, detail="空的 ZIP 文件")
+
+    import io
+    import os
+    import zipfile
+    from pathlib import PurePosixPath
+
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(raw))
+    except zipfile.BadZipFile:
+        raise HTTPException(status_code=400, detail="不是有效的 ZIP 文件")
+
+    skill_md: str | None = None
+    resources: list[tuple[str, bytes]] = []
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+        name = info.filename
+        norm = PurePosixPath(name)
+        # zip-slip protection: reject absolute paths and parent traversal.
+        if norm.is_absolute() or ".." in norm.parts:
+            raise HTTPException(status_code=400, detail=f"技能包含非法路径: {name}")
+        data = zf.read(info)
+        if norm.name == "SKILL.md":
+            skill_md = data.decode("utf-8", errors="replace")
+        else:
+            resources.append((str(norm), data))
+
+    if skill_md is None:
+        raise HTTPException(status_code=400, detail="ZIP 中未找到 SKILL.md，不是标准技能包")
+
+    from app.services.skill_sync_service import _get_hermes_home, _slugify, parse_skill_md
+
+    parsed = parse_skill_md(skill_md) or {}
+    name = parsed.get("name") or "unnamed-skill"
+    tags = parsed.get("tags") or []
+    slug = _slugify(name)
+
+    # Extract resource files into the hermes skills dir (before create_skill,
+    # whose Direction-A sync writes the SKILL.md into the same directory).
+    hermes_home = _get_hermes_home()
+    if hermes_home and resources:
+        dest = os.path.join(hermes_home, "skills", slug)
+        try:
+            os.makedirs(dest, exist_ok=True)
+            for rel, data in resources:
+                target = os.path.join(dest, rel)
+                if os.path.exists(target):
+                    continue  # never overwrite existing files on re-import
+                os.makedirs(os.path.dirname(target) or dest, exist_ok=True)
+                with open(target, "wb") as f:
+                    f.write(data)
+        except Exception:  # noqa: BLE001
+            # resource extraction is best-effort; the DB row still imports
+            pass
+
+    skill = await memory_service.create_skill(
+        db, name=name, description=parsed.get("description", ""),
+        content=parsed.get("content", ""),
+        trigger_conditions={"keywords": tags} if tags else {},
+        owner_id=user.id,
     )
     return SkillOut.model_validate(skill, from_attributes=True)
 

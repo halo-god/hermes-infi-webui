@@ -278,6 +278,26 @@ async function toggleSkillEnabled(s: Skill) {
   await memoryApi.updateSkill(s.id, { enabled: !s.enabled });
   await loadSkills();
 }
+const skillZipInput = ref<HTMLInputElement | null>(null);
+const skillImporting = ref(false);
+async function importSkillZip() {
+  const input = skillZipInput.value;
+  if (!input?.files?.length) return;
+  const file = input.files[0];
+  skillImporting.value = true;
+  try {
+    const skill = await memoryApi.importSkillZip(file);
+    ns.toast(`已导入技能「${skill.name}」`);
+    await loadSkills();
+  } catch (e: unknown) {
+    const detail = (e as { response?: { data?: { detail?: string } } }).response?.data?.detail;
+    ns.toast(detail ? `导入失败：${detail}` : "导入失败，请检查文件是否为标准技能包", "error");
+  } finally {
+    skillImporting.value = false;
+    input.value = "";
+  }
+}
+
 async function deleteSkillItem(s: Skill) {
   if (!confirm(`删除技能「${s.name}」？`)) return;
   await memoryApi.deleteSkill(s.id);
@@ -456,7 +476,13 @@ async function saveNotifyPrefs() {
                 <div class="section-title">技能</div>
                 <div class="text-mute-sm" style="margin-top:2px">命中关键词或标记为常驻时，才会注入这条内容</div>
               </div>
-              <button class="btn primary" style="font-size:12px;flex-shrink:0" @click="openCreateSkill">+ 新建技能</button>
+              <div style="display:flex;gap:6px;flex-shrink:0">
+                <input ref="skillZipInput" type="file" accept=".zip,application/zip" style="display:none" @change="importSkillZip" />
+                <button class="btn" style="font-size:12px" :disabled="skillImporting" @click="skillZipInput?.click()">
+                  <Icon name="arrow_up" :size="12" /> {{ skillImporting ? "导入中…" : "导入 ZIP" }}
+                </button>
+                <button class="btn primary" style="font-size:12px" @click="openCreateSkill">+ 新建技能</button>
+              </div>
             </div>
             <div v-if="skillsLoading" style="padding: 18px; font-size: 12.5px; color: var(--ink-mute)">加载中…</div>
             <div v-else-if="!skills.length" style="padding: 18px; font-size: 12.5px; color: var(--ink-mute)">暂无技能</div>
