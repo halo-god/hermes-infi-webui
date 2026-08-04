@@ -64,6 +64,11 @@ export const memoryApi = {
   listSkills: (): Promise<Skill[]> => http.get("/memory/skills").then((r) => r.data),
   createSkill: (payload: SkillCreate): Promise<Skill> =>
     http.post("/memory/skills", payload).then((r) => r.data),
+  importSkillZip: (file: File): Promise<Skill> => {
+    const form = new FormData();
+    form.append("file", file);
+    return http.post("/memory/skills/import", form).then((r) => r.data);
+  },
   updateSkill: (id: string, payload: SkillUpdate): Promise<Skill> =>
     http.patch(`/memory/skills/${id}`, payload).then((r) => r.data),
   deleteSkill: (id: string): Promise<void> => http.delete(`/memory/skills/${id}`).then(() => undefined),

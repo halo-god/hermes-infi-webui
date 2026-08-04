@@ -35,18 +35,30 @@ export const useAuthStore = defineStore("auth", () => {
   }
 
   /** Restore session on app boot (page refresh). */
+  let _bootstrapPromise: Promise<void> | null = null;
   async function bootstrap() {
+    // Single-flight: the router guard and App onMounted can both call this
+    // during first paint; concurrent runs would race on me()/restore() and
+    // could end up clearing the session one just restored.
+    if (_bootstrapPromise) return _bootstrapPromise;
+    _bootstrapPromise = _doBootstrap();
+    return _bootstrapPromise;
+  }
+
+  async function _doBootstrap() {
     // Access token is in memory only — after page reload it's null.
     // Try to restore from refresh token first.
+    let usedInjected = false;
     if (!tokenStore.access) {
       // E2E storageState injects the access token under ACCESS_KEY (the normal
-      // product flow never writes it to localStorage — memory only).
+      // product flow never writes it to localStorage — memory only). Older
+      // builds DID persist it, so a stale value may linger here; treat it as
+      // a hint and fall back to the refresh token if it fails validation.
       const injectedAccess = localStorage.getItem("hermes.access");
-      if (!injectedAccess) {
-        if (!tokenStore.refresh) {
-          ready.value = true;
-          return;
-        }
+      if (injectedAccess) {
+        tokenStore._access = injectedAccess;
+        usedInjected = true;
+      } else if (tokenStore.refresh) {
         const restored = await tokenStore.restore();
         if (!restored) {
           // Refresh token failed - user needs to login again
@@ -54,7 +66,8 @@ export const useAuthStore = defineStore("auth", () => {
           return;
         }
       } else {
-        tokenStore._access = injectedAccess;
+        ready.value = true;
+        return;
       }
     }
     try {
@@ -62,6 +75,21 @@ export const useAuthStore = defineStore("auth", () => {
       // Start media ticket AFTER successful auth - it needs valid access token
       startMediaTicket();
     } catch (e) {
+      // Stale injected access (from an older build) failed — retry via the
+      // refresh token before giving up; a valid refresh keeps the session.
+      if (usedInjected && tokenStore.refresh) {
+        const restored = await tokenStore.restore();
+        if (restored) {
+          try {
+            user.value = await authApi.me();
+            startMediaTicket();
+            ready.value = true;
+            return;
+          } catch {
+            /* fall through to clear */
+          }
+        }
+      }
       console.error("[auth] bootstrap failed:", e);
       tokenStore.clear();
       user.value = null;

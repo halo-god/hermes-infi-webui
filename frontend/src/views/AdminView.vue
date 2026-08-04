@@ -1052,7 +1052,8 @@ async function scanProfilesFn() {
   scanProfilesErrors.value = [];
   try {
     const result = await profilesApi.scan();
-    scanProfilesMsg.value = result.message || `新增 ${result.created} 个助手，发现 ${result.profiles_found} 个 Profile`;
+    const updatedPart = result.updated ? `，更新 ${result.updated} 个模型` : "";
+    scanProfilesMsg.value = result.message || `新增 ${result.created} 个助手${updatedPart}，发现 ${result.profiles_found} 个 Profile`;
     scanProfilesErrors.value = result.errors || [];
     await loadProfiles();
   } catch (e: unknown) {

@@ -43,6 +43,7 @@ export interface ScanResult {
 
 export interface ScanProfilesResult {
   created: number;
+  updated: number;
   message: string;
   version: string | null;
   profiles_found: number;
