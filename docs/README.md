@@ -19,6 +19,7 @@
 | [企业微信SSO集成.md](企业微信SSO集成.md) | 企微扫码登录与组织映射 | 开发 / 运维 |
 | [Hermes助手变更记录.md](Hermes助手变更记录.md) | hermes CLI 侧改动跟踪 | 开发 |
 | [design/群聊设计.md](design/群聊设计.md) | 群聊/圆桌/频道模式设计 | 开发 |
+| [沙箱部署指南.md](沙箱部署指南.md) | Agent 子进程隔离：bubblewrap/firejail 生产配置 | 运维 / 安全 |
 
 ## 5 分钟跑起来
 
