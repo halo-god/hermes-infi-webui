@@ -37,7 +37,7 @@ test.describe("历史会话", () => {
         async () => {
           const res = await page.request.get("/api/v1/conversations", {
             headers: { Authorization: `Bearer ${token}` },
-            params: { q: rowTitle.slice(0, 10) },
+            params: { q: rowTitle },
           });
           if (res.status() !== 200) return false;
           const items = (await res.json()) as unknown[];

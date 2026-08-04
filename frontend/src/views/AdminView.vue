@@ -26,6 +26,7 @@ import type {
   AdminStats,
   AuditEntry,
   DeptMapping,
+  HealthReport,
   IdentityProvider,
   PermissionGroup,
   SessionCallEntry,
@@ -336,6 +337,33 @@ async function loadPerformance() {
   try { perfData.value = (await http.get("/admin/performance")).data; } catch { perfData.value = null; } finally { perfLoading.value = false; }
 }
 
+// ── 健康检查 (health check) ──
+const healthData = ref<HealthReport | null>(null);
+const healthLoading = ref(false);
+const healthAutoRefresh = ref(false);
+let _healthTimer: ReturnType<typeof setInterval> | null = null;
+async function loadHealth(deep = false) {
+  healthLoading.value = true;
+  try {
+    healthData.value = await adminApi.health(deep);
+  } catch {
+    healthData.value = null;
+  } finally {
+    healthLoading.value = false;
+  }
+}
+function toggleHealthAutoRefresh() {
+  healthAutoRefresh.value = !healthAutoRefresh.value;
+  if (_healthTimer) { clearInterval(_healthTimer); _healthTimer = null; }
+  if (healthAutoRefresh.value) {
+    _healthTimer = setInterval(() => loadHealth(false), 15_000);
+  }
+}
+const HEALTH_LABEL: Record<string, string> = { ok: "正常", error: "异常", down: "离线", unknown: "未知", degraded: "降级", stale: "过期" };
+function healthComponentLabel(h: HealthReport["core"][keyof HealthReport["core"]] | undefined): string {
+  return HEALTH_LABEL[h?.status || "unknown"] || h?.status || "未知";
+}
+
 // ── Usage dashboard ──
 const usageData = ref<UsageData | null>(null);
 const usageLoading = ref(false);
@@ -560,7 +588,7 @@ async function deleteMcpServer(name: string) {
 }
 watch(tab, (t) => {
   if (t === "mcp") loadMcpServers();
-  if (t === "performance") loadPerformance();
+  if (t === "performance") { loadPerformance(); loadHealth(false); }
   if (t === "usage") loadUsage();
   if (t === "skill-evolution") { loadEvoSkills(); loadEvoProposals(); }
   if (t === "profile-evolution") loadPevoProposals();
@@ -576,6 +604,7 @@ onMounted(load);
 onUnmounted(() => {
   if (_auditTimer) { clearInterval(_auditTimer); _auditTimer = null; }
   if (_logTimer) { clearInterval(_logTimer); _logTimer = null; }
+  if (_healthTimer) { clearInterval(_healthTimer); _healthTimer = null; }
   evoStopPolling();
 });
 async function load() {
@@ -2457,6 +2486,103 @@ async function confirmImport() {
             <button class="btn" @click="loadPerformance" :disabled="perfLoading">
               <Icon name="refresh" :size="13" /> {{ perfLoading ? "加载中…" : "刷新" }}
             </button>
+          </div>
+
+          <!-- ── 健康检查 ── -->
+          <div class="section-card" style="padding: 18px; margin-bottom: 18px">
+            <div class="flex-between" style="align-items:center;margin-bottom:14px">
+              <div style="display:flex;align-items:center;gap:10px">
+                <div class="heading-serif" style="font-size:16px">健康检查</div>
+                <span v-if="healthData" class="au-result" :class="{ ok: healthData.overall === 'ok', partial: healthData.overall === 'degraded', fail: healthData.overall === 'error' }">
+                  {{ { ok: "正常", degraded: "降级", error: "异常" }[healthData.overall] || healthData.overall }}
+                </span>
+              </div>
+              <div style="display:flex;gap:8px;align-items:center">
+                <button class="btn" :class="{ primary: healthAutoRefresh }" @click="toggleHealthAutoRefresh">
+                  <Icon name="refresh" :size="12" /> {{ healthAutoRefresh ? "自动刷新中" : "自动刷新" }}
+                </button>
+                <button class="btn primary" :disabled="healthLoading" @click="loadHealth(true)">
+                  <Icon name="search" :size="12" /> {{ healthLoading ? "检测中…" : "深度检测" }}
+                </button>
+              </div>
+            </div>
+
+            <div v-if="healthLoading && !healthData" style="padding:24px;text-align:center;color:var(--ink-mute)">检测中…</div>
+            <div v-else-if="!healthData" style="padding:24px;text-align:center;color:var(--ink-mute)">暂无数据</div>
+            <template v-else>
+              <!-- core components -->
+              <div class="hc-grid">
+                <div v-for="(label, key) in { api: 'API 服务', postgres: 'PostgreSQL', redis: 'Redis', runner: 'Agent Runner', minio: '对象存储' }" :key="key" class="hc-card">
+                  <div class="hc-card-head">
+                    <span class="hc-name">{{ label }}</span>
+                    <span class="au-result" :class="{ ok: healthData.core[key as keyof HealthReport['core']]?.status === 'ok', fail: healthData.core[key as keyof HealthReport['core']]?.status === 'error' || healthData.core[key as keyof HealthReport['core']]?.status === 'down', partial: healthData.core[key as keyof HealthReport['core']]?.status === 'unknown' }">
+                      {{ healthComponentLabel(healthData.core[key as keyof HealthReport['core']]) }}
+                    </span>
+                  </div>
+                  <div class="hc-detail">
+                    <template v-if="key === 'runner'">
+                      <div v-if="healthData.core.runner.pool" class="hc-runner-pool">
+                        <div>预热池: <strong>{{ Object.values(healthData.core.runner.pool.per_profile || {}).reduce((s, p) => s + (p.warm || 0), 0) }}</strong> / 目标 {{ healthData.core.runner.pool.target }}</div>
+                        <div v-for="(p, dir) in healthData.core.runner.pool.per_profile" :key="dir" class="hc-pool-line">
+                          <span class="hc-pool-dir">{{ dir === "default" ? "默认" : dir.split("/").pop() }}</span>
+                          <span class="hc-pool-warm">预热 {{ p.warm }}</span>
+                          <span class="au-result" :class="{ ok: p.ok, fail: !p.ok }">{{ p.ok ? "可用" : "失败" }}</span>
+                        </div>
+                      </div>
+                      <div v-else>预热池: —</div>
+                      <div v-if="healthData.core.runner.ttl_seconds != null">心跳 TTL: {{ healthData.core.runner.ttl_seconds }}s</div>
+                      <div v-if="healthData.core.runner.pool?.status === 'stale'">预热池状态: 过期</div>
+                    </template>
+                    <template v-else>
+                      <div v-if="healthData.core[key as keyof HealthReport['core']]?.latency_ms != null">延迟: {{ healthData.core[key as keyof HealthReport['core']]?.latency_ms }}ms</div>
+                      <div v-if="healthData.core[key as keyof HealthReport['core']]?.uptime_seconds != null">运行: {{ Math.floor((healthData.core[key as keyof HealthReport['core']]?.uptime_seconds || 0) / 3600) }}h</div>
+                      <div v-if="healthData.core[key as keyof HealthReport['core']]?.message" style="color:var(--danger)">{{ healthData.core[key as keyof HealthReport['core']]?.message }}</div>
+                    </template>
+                  </div>
+                </div>
+              </div>
+
+              <!-- dependencies (deep mode) -->
+              <template v-if="healthData.dependencies">
+                <div class="hc-dep-title">依赖服务</div>
+                <div class="hc-dep-grid">
+                  <!-- identity -->
+                  <div class="section-card hc-dep-card">
+                    <div class="section-head"><div class="section-title">身份提供商</div></div>
+                    <div v-if="!healthData.dependencies.identity.length" class="text-mute-sm">未启用任何提供商</div>
+                    <div v-for="p in healthData.dependencies.identity" :key="p.id" class="hc-dep-row">
+                      <span>{{ p.label }}</span>
+                      <span class="au-result" :class="{ ok: p.status === 'ok', fail: p.status === 'error' }">{{ HEALTH_LABEL[p.status] || p.status }}</span>
+                      <span v-if="p.message" class="text-mute-sm">{{ p.message }}</span>
+                    </div>
+                  </div>
+                  <!-- mcp -->
+                  <div class="section-card hc-dep-card">
+                    <div class="section-head"><div class="section-title">MCP 服务器</div></div>
+                    <div v-if="!healthData.dependencies.mcp.length" class="text-mute-sm">未启用 MCP 服务器</div>
+                    <div v-for="m in healthData.dependencies.mcp" :key="m.name" class="hc-dep-row">
+                      <span>{{ m.name }}</span>
+                      <span class="au-result" :class="{ ok: m.status === 'ok', fail: m.status !== 'ok' }">{{ HEALTH_LABEL[m.status] || m.status }}</span>
+                      <span v-if="m.http_status" class="text-mute-sm">HTTP {{ m.http_status }}</span>
+                      <span v-if="m.error" class="text-mute-sm">{{ m.error }}</span>
+                    </div>
+                  </div>
+                  <!-- profiles ACP -->
+                  <div class="section-card hc-dep-card">
+                    <div class="section-head"><div class="section-title">助手 ACP 可用性</div></div>
+                    <div v-if="!healthData.dependencies.profiles_acp.length" class="text-mute-sm">暂无活跃助手</div>
+                    <div v-for="p in healthData.dependencies.profiles_acp" :key="p.profile_id" class="hc-dep-row">
+                      <span>{{ p.name }}<span v-if="p.handle" class="text-mute-sm"> @{{ p.handle }}</span></span>
+                      <span class="au-result" :class="{ ok: p.acp_status === 'ok', fail: p.acp_status === 'error', partial: p.acp_status === 'unknown' }">
+                        {{ { ok: "可用", error: "异常", unknown: "未知" }[p.acp_status] || p.acp_status }}
+                      </span>
+                      <span v-if="p.warm_count" class="text-mute-sm">预热 {{ p.warm_count }}</span>
+                      <span v-if="p.error" class="text-mute-sm">{{ p.error }}</span>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </template>
           </div>
 
           <div v-if="perfLoading && !perfData" style="text-align:center;padding:40px;color:var(--ink-mute)">加载中…</div>

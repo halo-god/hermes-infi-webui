@@ -237,6 +237,27 @@ async def clear_cancel(conversation_id: str) -> None:
     await get_redis().delete(cancel_key(conversation_id))
 
 
+# ── Runner warm-pool stats (health check) ──
+_RUNNER_POOL_KEY = "hermes:runner:pool"
+_RUNNER_POOL_TTL = 30  # refreshed by the runner heartbeat every 10s
+
+
+async def set_runner_pool_stats(stats: dict) -> None:
+    """Publish the runner's warm-pool snapshot (per-profile ACP availability)."""
+    await get_redis().set(_RUNNER_POOL_KEY, _json.dumps(stats), ex=_RUNNER_POOL_TTL)
+
+
+async def get_runner_pool_stats() -> dict | None:
+    """Read the latest runner warm-pool snapshot; None when stale/absent."""
+    raw = await get_redis().get(_RUNNER_POOL_KEY)
+    if not raw:
+        return None
+    try:
+        return _json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+
+
 # ── AI Confirmation requests ──
 import asyncio as _asyncio  # noqa: E402
 from contextlib import suppress as _suppress  # noqa: E402

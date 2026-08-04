@@ -34,3 +34,8 @@ test_group_chat.py
 review-fndxnm.md
 *.log
 *.bak
+# 业务资料（与代码项目无关）
+Hermes-AI发布前讨论会资料汇总.md
+LED显示屏物料编码手册.md
+docs/深圳视爵光旭_部门目录.xlsx
+docs/wecom_departments.csv

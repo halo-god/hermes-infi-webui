@@ -167,9 +167,11 @@ test.describe("群聊圆桌与成员管理", () => {
     // 修复：201 已断言，无需 200
     const convId = (await groupRes.json()).id as string;
 
-    const before = (await (await page.request.get(`/api/v1/conversations/${convId}/members`, {
+    // 读取成员列表（先 text 后 json 避免 APIResponse 偶发空解析）
+    const memResp = await page.request.get(`/api/v1/conversations/${convId}/members`, {
       headers: { Authorization: `Bearer ${token}` },
-    })).json()) as { id: string; agent_id: string | null }[];
+    });
+    const before = (await memResp.json()) as { id: string; agent_id: string | null }[];
     expect(before.length).toBeGreaterThanOrEqual(1);
 
     // 先添加一个 AI 成员（若已存在则跳过——存在性检查）

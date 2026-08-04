@@ -248,6 +248,12 @@ class Runner:
         while not self._shutdown:
             await asyncio.sleep(HEARTBEAT_INTERVAL)
             await self._refresh_lock()
+            # Publish warm-pool stats (per-profile ACP availability) for the
+            # admin 健康检查 console; TTL 30s so a dead runner reads stale.
+            try:
+                await R.set_runner_pool_stats(self.pool.pool_stats())
+            except Exception:  # noqa: BLE001
+                logger.debug("Failed to publish warm-pool stats", exc_info=True)
             reclaim_counter += 1
             if reclaim_counter * HEARTBEAT_INTERVAL >= RECLAIM_INTERVAL:
                 reclaim_counter = 0

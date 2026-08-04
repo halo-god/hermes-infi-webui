@@ -3,6 +3,7 @@ import type {
   AdminStats,
   AuditEntry,
   DeptMapping,
+  HealthReport,
   IdentityProvider,
   RolesMatrix,
   SessionLogDetail,
@@ -85,6 +86,10 @@ export const adminApi = {
   },
   async getUsage(params?: { period?: string; breakdown?: string }): Promise<UsageData> {
     return (await http.get<UsageData>("/admin/usage", { params: params || {} })).data;
+  },
+  // 健康检查（deep=true 时额外探测身份提供商 / MCP / Profiles ACP）
+  async health(deep?: boolean): Promise<HealthReport> {
+    return (await http.get<HealthReport>("/admin/health", { params: deep ? { deep: "true" } : {} })).data;
   },
   async getSettings(): Promise<SystemSettings> {
     return (await http.get<SystemSettings>("/admin/settings")).data;
