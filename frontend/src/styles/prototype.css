@@ -2186,6 +2186,50 @@
   }
   body.dark .sl-turn-dur { background: rgba(255,255,255,0.06); }
   .sl-turn-dur svg { width: 11px; height: 11px; }
+
+  /* health check (健康检查) */
+  .hc-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 12px;
+  }
+  .hc-card {
+    border: 1px solid var(--rule-soft);
+    border-radius: var(--r-md);
+    padding: 12px 14px;
+    background: var(--bg-plate);
+  }
+  .hc-card-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .hc-name { font-weight: 600; font-size: 13px; color: var(--ink); }
+  .hc-detail { font-size: 12px; line-height: 1.7; color: var(--ink-soft); }
+  .hc-runner-pool { margin-bottom: 4px; }
+  .hc-pool-line {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11.5px;
+  }
+  .hc-pool-dir { max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hc-pool-warm { color: var(--ink-mute); }
+  .hc-dep-title {
+    margin: 16px 0 8px;
+    font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--ink-mute); font-weight: 600;
+  }
+  .hc-dep-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 12px;
+  }
+  .hc-dep-row {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 7px 0;
+    border-top: 1px solid var(--rule-soft);
+    font-size: 12.5px; color: var(--ink);
+  }
+  .hc-dep-row:first-of-type { border-top: none; }
+  .hc-dep-row .text-mute-sm { font-size: 11px; }
   .sl-turn-row {
     display: flex; flex-direction: column; gap: 6px;
     padding: 10px 0;

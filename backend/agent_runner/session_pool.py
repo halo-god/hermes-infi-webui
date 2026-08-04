@@ -36,6 +36,9 @@ class SessionPool:
         # Eliminates spawn+init cold start for new conversations.
         self._warm_pool: dict[str | None, deque[ACPClient]] = {}
         self._warm_lock = asyncio.Lock()
+        # Per-profile warm-up outcome: {profile_dir: {"ok": bool, "error": str|None}}.
+        # Fed to the admin 健康检查 console to show each Profile's ACP availability.
+        self._warm_results: dict[str | None, dict] = {}
         self._agents: dict = {}  # set by Runner before warmup()
 
     def _alive(self, c: ACPClient) -> bool:
@@ -158,6 +161,15 @@ class SessionPool:
                 c = await self._spawn_warm_one(agent.command, cwd, pd)
                 if c is not None:
                     self._warm_pool.setdefault(pd, deque()).append(c)
+                    self._warm_results[pd] = {"ok": True, "error": None}
+                else:
+                    # Remember the failure so the admin health check can flag
+                    # this Profile's ACP as unavailable (bad HERMES_HOME / no
+                    # LLM provider etc.).
+                    self._warm_results[pd] = {
+                        "ok": False,
+                        "error": "ACP 预热失败（spawn/init 超时或异常）",
+                    }
         total = sum(len(v) for v in self._warm_pool.values())
         logger.info("Warm pool: %d clients ready across %d profiles", total, len(self._warm_pool))
 
@@ -175,6 +187,23 @@ class SessionPool:
             c = await self._spawn_warm_one(agent.command, cwd, profile_dir)
             if c is not None:
                 dq.append(c)
+                self._warm_results[profile_dir] = {"ok": True, "error": None}
+
+    def pool_stats(self) -> dict:
+        """Snapshot of the warm pool for the admin health check: target size,
+        per-profile warm client count (alive only) and spawn outcome."""
+        return {
+            "target": settings.session_pool_warm_size,
+            "per_profile": {
+                (pd if pd is not None else "default"): {
+                    "warm": sum(1 for c in dq if self._alive(c)),
+                    "ok": bool((self._warm_results.get(pd) or {}).get("ok")),
+                    "error": (self._warm_results.get(pd) or {}).get("error"),
+                }
+                for pd, dq in self._warm_pool.items()
+            },
+            "ts": time.time(),
+        }
 
     async def get(
         self,

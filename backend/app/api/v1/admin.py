@@ -40,6 +40,7 @@ from app.schemas.admin import (
 from app.schemas.user import UserCreate, UserOut
 from app.services import (
     audit_service,
+    health_service,
     identity_service,
     session_log_service,
     settings_service,
@@ -533,43 +534,20 @@ async def mcp_server_status(name: str, db: AsyncSession = Depends(get_db)):
     server = next((s for s in servers if s["name"] == name), None)
     if not server:
         raise HTTPException(status_code=404, detail="MCP server not found")
+    return await health_service.probe_mcp_url(
+        name, server.get("url") or server.get("base_url", "")
+    )
 
-    import aiohttp
-    import ipaddress
-    import socket
-    from urllib.parse import urlparse
 
-    url = server.get("url") or server.get("base_url", "")
-    if not url:
-        return {"name": name, "status": "no_url", "reachable": False}
-
-    # SSRF protection: resolve hostname and reject private/loopback/link-local IPs.
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        return {"name": name, "status": "invalid_scheme", "reachable": False}
-    hostname = parsed.hostname or ""
-    try:
-        addr_info = socket.getaddrinfo(hostname, None)
-        for family, _, _, _, sockaddr in addr_info:
-            ip = ipaddress.ip_address(sockaddr[0])
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-                return {"name": name, "status": "blocked", "reachable": False,
-                        "error": "URL points to a private/loopback address"}
-    except (socket.gaierror, ValueError):
-        pass  # Let the request proceed; DNS resolution will fail naturally
-
-    try:
-        timeout = aiohttp.ClientTimeout(total=5)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(f"{url.rstrip('/')}/health") as resp:
-                return {
-                    "name": name,
-                    "status": "ok" if resp.status < 500 else "error",
-                    "reachable": resp.status < 500,
-                    "http_status": resp.status,
-                }
-    except Exception as e:  # noqa: BLE001
-        return {"name": name, "status": "unreachable", "reachable": False, "error": str(e)}
+# ── health check (健康检查) ──
+@router.get("/health")
+async def health(
+    deep: bool = Query(False, description="deep=true 时额外探测身份提供商 / MCP / Profiles ACP"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin health check: core components always; slow dependency probes
+    (identity providers, MCP servers, per-Profile ACP availability) on demand."""
+    return await health_service.health_report(db, deep=deep)
 
 
 # ── Usage / billing dashboard ────────────────────────────────────────────

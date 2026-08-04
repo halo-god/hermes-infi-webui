@@ -160,6 +160,58 @@ export interface SessionLogDetail {
   turns: SessionExecution[];
 }
 
+// ── 健康检查 (health check) ──
+export interface HealthComponent {
+  status: "ok" | "error" | "down" | "unknown";
+  latency_ms?: number;
+  message?: string;
+  uptime_seconds?: number;
+  ttl_seconds?: number;
+  pool?: {
+    status: "ok" | "stale";
+    target: number;
+    ts?: number;
+    per_profile: Record<string, { warm: number; ok: boolean; error: string | null }>;
+  };
+}
+
+export interface HealthDependency {
+  id?: string;
+  label?: string;
+  name?: string;
+  status: string;
+  message?: string;
+  error?: string;
+  reachable?: boolean;
+  http_status?: number;
+}
+
+export interface HealthProfileAcp {
+  profile_id: string;
+  name: string;
+  handle: string;
+  acp_status: "ok" | "error" | "unknown";
+  warm_count: number;
+  error: string | null;
+}
+
+export interface HealthReport {
+  timestamp: number;
+  overall: "ok" | "degraded" | "error";
+  core: {
+    api: HealthComponent;
+    postgres: HealthComponent;
+    redis: HealthComponent;
+    runner: HealthComponent;
+    minio: HealthComponent;
+  };
+  dependencies?: {
+    identity: HealthDependency[];
+    mcp: HealthDependency[];
+    profiles_acp: HealthProfileAcp[];
+  };
+}
+
 export interface SystemSettings {
   data: {
     branding: {
