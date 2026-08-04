@@ -16,3 +16,9 @@ __MACOSX/
 workspaces/
 CA/
 .workbuddy/
+
+# Playwright E2E artifacts
+frontend/test-results/
+frontend/playwright-report/
+frontend/e2e/.auth/
+.playwright-mcp/
