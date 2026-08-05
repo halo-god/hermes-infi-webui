@@ -36,6 +36,9 @@ async def _update_status(task_id: str, status: str) -> None:
 async def _get_or_create_conversation(db, task: ScheduledTask, user_id: str) -> uuid.UUID:
     """Get the task's dedicated conversation, creating one on first run."""
     if task.conversation_id is not None:
+        conv = await db.get(Conversation, task.conversation_id)
+        if conv is not None and conv.profile_id is None and task.profile_id is not None:
+            conv.profile_id = task.profile_id
         return task.conversation_id
     conv = Conversation(
         id=uuid.uuid4(),
@@ -43,6 +46,7 @@ async def _get_or_create_conversation(db, task: ScheduledTask, user_id: str) -> 
         owner_id=uuid.UUID(user_id),
         primary_agent_id=task.agent_id,
         active_agent_ids=[task.agent_id],
+        profile_id=task.profile_id,
         type="scheduled",
     )
     db.add(conv)
