@@ -2357,6 +2357,7 @@ async def dispatch_group(
             agent_profile = res_p.scalars().first()
             if agent_profile:
                 effective_profile_id = str(agent_profile.id)
+        profile = None
         if effective_profile_id:
             profile = await db.get(Profile, effective_profile_id)
             if profile:
@@ -2795,7 +2796,6 @@ async def get_or_create_team_group(
         # 收编历史 is_channel 频道，统一到 group 模型
         convo.type = "group"
         convo.visibility = "team"
-        await db.flush()
 
     human_ids = await _team_member_ids(db, team.id)
     if owner_id not in human_ids:
@@ -2803,6 +2803,17 @@ async def get_or_create_team_group(
     pairs = await _resolve_team_profiles(db, team)
     agents = [aid for _pid, aid in pairs]
     profile_ids = [pid for pid, _aid in pairs if pid]
+
+    if convo is not None:
+        # 复用已存在的团队固定群时，把 AI 配置与团队当前的共享助手对齐。
+        # 历史遗留的 channel（早期创建）可能 active_agent_ids 为空/旧值，
+        # sync_group_membership 只同步 group_members 表，前端按
+        # active_agent_ids 渲染 AI 成员 —— 不同步会导致「团队群聊」缺 AI。
+        convo.primary_agent_id = agents[0] if agents else (convo.primary_agent_id or "hermes")
+        convo.active_agent_ids = agents
+        convo.active_profile_ids = profile_ids
+        convo.channel_mode = team.channel_mode or convo.channel_mode or "mention"
+        await db.flush()
 
     if convo is None:
         convo = Conversation(

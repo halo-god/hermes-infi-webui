@@ -64,6 +64,16 @@ KNOWN_AGENTS = [
         "icon": "brand",
         "description": "NousResearch 自进化智能体，通过 ACP 连接本机会话",
     },
+    {
+        "id": "claude-code",
+        "label": "Claude Code",
+        "bin": "claude",
+        "acp_args": ["--acp"],
+        "official": True,
+        "color": "#d97706",
+        "icon": "code",
+        "description": "Anthropic Claude Code CLI，代码生成与分析",
+    },
 ]
 
 
