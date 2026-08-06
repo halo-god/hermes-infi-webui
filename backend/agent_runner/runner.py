@@ -77,6 +77,12 @@ _ANSI_RE = re.compile(
 def _strip_ansi(text: str | None) -> str:
     if not text:
         return ""
+    if not isinstance(text, str):
+        # tool_call rawInput / artifact content can be structured objects
+        # (dict/list) rather than text — serialize so the UI preview stays
+        # readable instead of crashing the turn.
+        import json
+        text = json.dumps(text, ensure_ascii=False)
     return _ANSI_RE.sub("", text)
 
 
