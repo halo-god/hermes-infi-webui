@@ -41,9 +41,11 @@ async def _get_or_create_conversation(db, task: ScheduledTask, user_id: str) -> 
             # 存量回填：profile_id 与 active_profile_ids 一并补齐，保证前端
             # 按 profile 渲染的助手身份正确（历史会话创建时未存）。
             if conv.profile_id is None:
-                conv.profile_id = task.profile_id
-            if task.profile_id not in (conv.active_profile_ids or []):
-                conv.active_profile_ids = [*(conv.active_profile_ids or []), task.profile_id]
+                conv.profile_id = str(task.profile_id)
+            # active_profile_ids 是 JSONB 字符串数组 —— 必须 str()，
+            # 否则 UUID 对象进 asyncpg jsonb codec 会 TypeError。
+            if str(task.profile_id) not in (conv.active_profile_ids or []):
+                conv.active_profile_ids = [*(conv.active_profile_ids or []), str(task.profile_id)]
         return task.conversation_id
     conv = Conversation(
         id=uuid.uuid4(),
@@ -51,8 +53,8 @@ async def _get_or_create_conversation(db, task: ScheduledTask, user_id: str) -> 
         owner_id=uuid.UUID(user_id),
         primary_agent_id=task.agent_id,
         active_agent_ids=[task.agent_id],
-        active_profile_ids=[task.profile_id] if task.profile_id else [],
-        profile_id=task.profile_id,
+        active_profile_ids=[str(task.profile_id)] if task.profile_id else [],
+        profile_id=str(task.profile_id) if task.profile_id else None,
         type="scheduled",
     )
     db.add(conv)
