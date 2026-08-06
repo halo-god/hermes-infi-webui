@@ -509,4 +509,11 @@ class ACPClient:
         # Notification FROM agent.
         if method == "session/update":
             if self.on_update:
-                await self.on_update(params.get("update") or params)
+                try:
+                    await self.on_update(params.get("update") or params)
+                except Exception:  # noqa: BLE001
+                    # Isolate handler failures (e.g. a transient Redis publish
+                    # error in the runner's on_update): one bad chunk must not
+                    # kill the read loop — the agent keeps sending and the
+                    # final `done` event carries the full text anyway.
+                    logger.warning("on_update handler failed; ignoring", exc_info=True)

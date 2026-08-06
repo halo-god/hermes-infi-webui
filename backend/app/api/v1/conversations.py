@@ -481,31 +481,49 @@ async def send_message(
         raise HTTPException(status_code=429, detail="发送过于频繁，请稍后再试")
     metrics.MESSAGES.inc()
 
-    # Group chat: route via @mentions
-    if convo.type == "group":
-        # Truncate oversized <knowledge> blocks injected by the frontend
-        # to prevent context length explosion (max 100KB per knowledge block).
-        text = _truncate_knowledge_blocks(payload.text)
-        user_msg, agent_msg = await svc.dispatch_group(
-            db, convo, text, payload.mentions,
-            attached_file_ids=payload.attached_file_ids,
-            knowledge_ids=payload.knowledge_ids,
-            owner_id=user.id,
-            skip_agent=payload.skip_agent,
-            reply_to_id=payload.reply_to_id,
-            task_id=payload.task_id,
-        )
-    else:
-        text = _truncate_knowledge_blocks(payload.text)
-        user_msg, agent_msg = await svc.dispatch(
-            db, convo, text,
-            attached_file_ids=payload.attached_file_ids,
-            knowledge_ids=payload.knowledge_ids,
-            owner_id=user.id,
-            skip_agent=payload.skip_agent,
-            profile_id_override=payload.profile_id,
-            task_id=payload.task_id,
-        )
+    # C1: per-conversation turn lock — two concurrent turns on the same
+    # conversation would share one ACPClient (its on_update closure is
+    # rebound), causing event cross-wiring and prompt interleaving on the
+    # agent side. Reject the second turn while the first is in flight
+    # (TTL covers the max single-turn duration).
+    turn_lock_key = f"acp:turn:{conversation_id}"
+    lock_held = await redis_core.get_redis().set(
+        turn_lock_key, "1", nx=True, ex=settings.acp_prompt_timeout + 60,
+    )
+    if not lock_held:
+        raise HTTPException(status_code=429, detail="该会话正在生成中，请等待当前回复完成")
+    try:
+        # Group chat: route via @mentions
+        if convo.type == "group":
+            # Truncate oversized <knowledge> blocks injected by the frontend
+            # to prevent context length explosion (max 100KB per knowledge block).
+            text = _truncate_knowledge_blocks(payload.text)
+            user_msg, agent_msg = await svc.dispatch_group(
+                db, convo, text, payload.mentions,
+                attached_file_ids=payload.attached_file_ids,
+                knowledge_ids=payload.knowledge_ids,
+                owner_id=user.id,
+                skip_agent=payload.skip_agent,
+                reply_to_id=payload.reply_to_id,
+                task_id=payload.task_id,
+            )
+        else:
+            text = _truncate_knowledge_blocks(payload.text)
+            user_msg, agent_msg = await svc.dispatch(
+                db, convo, text,
+                attached_file_ids=payload.attached_file_ids,
+                knowledge_ids=payload.knowledge_ids,
+                owner_id=user.id,
+                skip_agent=payload.skip_agent,
+                profile_id_override=payload.profile_id,
+                task_id=payload.task_id,
+            )
+    finally:
+        # Best-effort release; the TTL is the backstop if this fails.
+        try:
+            await redis_core.get_redis().delete(turn_lock_key)
+        except Exception:  # noqa: BLE001
+            pass
 
     return SendMessageResponse(
         user_message=MessageOut.model_validate(user_msg),

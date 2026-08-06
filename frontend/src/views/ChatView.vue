@@ -321,17 +321,18 @@ function rtProfileDisplay(agentId: string | null | undefined, profileId?: string
 // re-renders triggered by unrelated reactive changes (e.g. typing in the search box)
 // don't redo the full parse for every visible message.
 const mdCache = new Map<string, string>();
-function renderMarkdownCached(text: string): string {
-  let html = mdCache.get(text);
+function renderMarkdownCached(text: string, opts?: { citeRefs?: boolean }): string {
+  const key = opts?.citeRefs ? text + "\u0001cite" : text;
+  let html = mdCache.get(key);
   if (html === undefined) {
-    html = renderMarkdown(text);
+    html = renderMarkdown(text, opts);
     if (mdCache.size > 500) mdCache.clear();
-    mdCache.set(text, html);
+    mdCache.set(key, html);
   }
   return html;
 }
-function md(text: string) {
-  return renderMarkdownCached(text);
+function md(text: string, opts?: { citeRefs?: boolean }) {
+  return renderMarkdownCached(text, opts);
 }
 
 // ── @mention highlighting for group chats ──
@@ -616,13 +617,14 @@ function openFile(fid: string) {
 // ── RAG citations ──
 // The knowledge sources injected for a user turn live on that user message
 // (rag_refs); the agent's reply cites them as [1], [2]… Find the nearest
-// preceding user message for an agent message index.
+// PRECEDING user message (not the nearest one with rag_refs — skipping an
+// intermediate no-RAG turn would mismatch citations across rounds).
 function ragRefsFor(index: number) {
   const msgs = chat.messages;
   for (let i = index - 1; i >= 0; i--) {
     const m = msgs[i];
-    if (m.role === "user" && m.content.rag_refs?.length) {
-      return m.content.rag_refs;
+    if (m.role === "user") {
+      return m.content.rag_refs?.length ? m.content.rag_refs : undefined;
     }
   }
   return undefined;
@@ -886,8 +888,8 @@ const searchMatchIndices = computed(() => {
     .map(({ i }) => i);
 });
 
-function mdSearch(text: string): string {
-  const html = md(text);
+function mdSearch(text: string, opts?: { citeRefs?: boolean }): string {
+  const html = md(text, opts);
   if (!searchQuery.value.trim()) return html;
   const q = searchQuery.value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return html.replace(new RegExp(`(${q})`, "gi"), (m) => `<mark>${escapeHtml(m)}</mark>`);
@@ -1215,7 +1217,7 @@ onUnmounted(() => {
                     </div>
                     <span v-else class="typing"><span></span><span></span><span></span></span>
                   </template>
-                  <div v-else-if="chat.messages[row.index].role === 'agent'" class="md-body" v-html="highlightMentions(mdSearch(chat.messages[row.index].content.text))" />
+                  <div v-else-if="chat.messages[row.index].role === 'agent'" class="md-body" v-html="highlightMentions(mdSearch(chat.messages[row.index].content.text, ragRefsFor(row.index)?.length ? { citeRefs: true } : undefined))" />
                   <div v-if="chat.messages[row.index].role === 'agent' && ragRefsFor(row.index)?.length" class="rag-refs-bar">
                     <span class="rag-refs-label">📚 引用来源</span>
                     <button v-for="r in ragRefsFor(row.index)!" :key="r.n" class="rag-ref-chip"

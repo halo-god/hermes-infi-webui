@@ -107,6 +107,18 @@ async def handle_scheduled(task: dict, agents: dict) -> None:
     prompt_text = task["prompt"]
     user_id = task.get("user_id", "")
 
+    # S1: per-task run lock — a long task (up to acp_prompt_timeout) overlapping
+    # its own cron tick would otherwise double-run concurrently. If another
+    # execution holds the lock, skip silently (the running one reports back).
+    lock_key = f"acp:sched:{task_id}"
+    try:
+        locked = await R.get_redis().set(lock_key, "1", nx=True, ex=settings.acp_prompt_timeout + 60)
+    except Exception:  # noqa: BLE001 — Redis hiccup must not block execution
+        locked = True
+    if not locked:
+        logger.info("scheduled task %s already running — skipping overlapping tick", task_id[:8])
+        return
+
     await _update_status(task_id, "running")
 
     # Resolve or create the task's dedicated conversation + load profile.
@@ -196,10 +208,12 @@ async def handle_scheduled(task: dict, agents: dict) -> None:
                 content += "\n\n---\n"
             await _save_result(conv_id, agent_id, content, task_id)
             await _notify_user(user_id, conv_id, f"⏰ {task_name} 已完成", response[:100])
+            await _update_status(task_id, "success")
         else:
-            await _notify_user(user_id, conv_id, f"⏰ {task_name} 已执行", "Agent 未返回内容")
-
-        await _update_status(task_id, "success")
+            # P3: an empty response is a failure (agent produced nothing), not
+            # a success — don't inflate success_count with no-op runs.
+            await _notify_user(user_id, conv_id, f"⏰ {task_name} 未返回内容", "Agent 未返回任何内容")
+            await _update_status(task_id, "failed")
 
     except ACPTimeout:
         logger.warning("scheduled task %s timed out", task_id[:8])
@@ -214,3 +228,9 @@ async def handle_scheduled(task: dict, agents: dict) -> None:
         await _save_result(conv_id, agent_id, f"（执行失败：{exc.__class__.__name__}）", task_id)
         await _notify_user(user_id, conv_id, f"⏰ {task_name} 执行失败", str(exc)[:100])
         await _update_status(task_id, "failed")
+    finally:
+        # Release the run lock so the next tick can fire (best-effort).
+        try:
+            await R.get_redis().delete(lock_key)
+        except Exception:  # noqa: BLE001
+            pass

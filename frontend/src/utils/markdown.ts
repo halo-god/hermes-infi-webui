@@ -259,12 +259,19 @@ function preprocess(src: string): string {
 }
 
 // ── Main export ──
-export function renderMarkdown(src: string): string {
+export interface RenderOptions {
+  /** Convert "[1]" style citations to superscript badges. Only enable when
+   * the message actually carries RAG citations (rag_refs) — otherwise
+   * ordinary "[数字]" text gets mislabelled as knowledge references. */
+  citeRefs?: boolean;
+}
+
+export function renderMarkdown(src: string, opts: RenderOptions = {}): string {
   const collapsed = preprocess(src);
   let html = md.render(collapsed);
   html = postProcessBlockquotes(html);
   html = postProcessKnowledgeRefs(html);
-  html = postProcessCiteRefs(html);
+  if (opts.citeRefs) html = postProcessCiteRefs(html);
   return html;
 }
 
@@ -272,12 +279,12 @@ export function renderMarkdown(src: string): string {
  * Async version with Mermaid support.
  * Use this in components that need diagrams.
  */
-export async function renderMarkdownAsync(src: string): Promise<string> {
+export async function renderMarkdownAsync(src: string, opts: RenderOptions = {}): Promise<string> {
   const collapsed = preprocess(src);
   let html = md.render(collapsed);
   html = postProcessBlockquotes(html);
   html = postProcessKnowledgeRefs(html);
-  html = postProcessCiteRefs(html);
+  if (opts.citeRefs) html = postProcessCiteRefs(html);
   return renderMermaidBlocks(html);
 }
 

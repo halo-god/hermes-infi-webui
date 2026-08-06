@@ -1590,6 +1590,8 @@ async def dispatch(
     profile_dir: str | None = None
     mcp_servers: list[dict] = []
     profile: Profile | None = None
+    knowledge_prompt: str | None = None
+    rag_refs: list[dict] | None = None
     effective_profile_id = profile_id_override or convo.profile_id
     if effective_profile_id:
         profile = await db.get(Profile, effective_profile_id)

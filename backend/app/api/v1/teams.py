@@ -615,15 +615,21 @@ async def upload_knowledge(
 
     # Background Docling upgrade: enqueue a task that re-extracts with Docling
     # and updates content + status. Non-blocking — the record is already usable
-    # with the fast-extracted content.
+    # with the fast-extracted content. If queueing fails, roll the status back
+    # to "ready" so the UI doesn't poll "解析中" forever.
     if needs_bg and processed.storage_key:
-        from app.core import redis as redis_core
-        await redis_core.enqueue_prompt({
-            "type": "knowledge_docling_upgrade",
-            "knowledge_id": str(k.id),
-            "ext": ext,
-            "name": name,
-        })
+        try:
+            from app.core import redis as redis_core
+            await redis_core.enqueue_prompt({
+                "type": "knowledge_docling_upgrade",
+                "knowledge_id": str(k.id),
+                "ext": ext,
+                "name": name,
+            })
+        except Exception:
+            k.processing_status = "ready"
+            await db.commit()
+            raise
 
     return KnowledgeOut.model_validate(k)
 
@@ -643,13 +649,15 @@ async def reprocess_knowledge(
     k = await db.get(TeamKnowledge, kid)
     if k is None or k.team_id != team_id:
         raise HTTPException(status_code=404, detail="知识条目不存在")
-    k.processing_status = "processing"
-    await db.commit()
 
     # Re-index the current (fast-extracted) content right away; Docling's
     # upgrade task re-extracts + re-indexes again when it finishes.
     await svc.index_knowledge_best_effort(db, k.id)
 
+    # Only flip to "processing" once the docling task is actually queued —
+    # otherwise a failure/unsupported kind would leave the item stuck in
+    # "processing" forever with nothing to flip it back.
+    needs_bg = False
     if k.storage_key:
         from app.core import redis as redis_core
         from app.core.docling_converter import is_supported as docling_supported
@@ -660,6 +668,9 @@ async def reprocess_knowledge(
                 "ext": k.kind,
                 "name": k.name,
             })
+            needs_bg = True
+    k.processing_status = "processing" if needs_bg else "ready"
+    await db.commit()
     await db.refresh(k)
     return KnowledgeOut.model_validate(k)
 
