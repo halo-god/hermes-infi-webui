@@ -15,7 +15,7 @@ import logging
 import uuid
 
 from app.config import settings
-from agent_runner.acp_client import ACPClient, OnFsWrite, OnUpdate, profile_env
+from agent_runner.acp_client import ACPClient, OnFsWrite, OnUpdate, auto_deny_permission, profile_env
 from agent_runner.runner_clarify import deliver_clarify_response, pop_clarify_request
 
 logger = logging.getLogger("hermes.runner")
@@ -33,6 +33,7 @@ def make_persona_client(
     return ACPClient(
         command, cwd, protocol_version=settings.acp_protocol_version,
         on_update=on_update, on_fs_write=on_fs_write, env=profile_env(profile_dir),
+        on_permission_request=auto_deny_permission,
     )
 
 

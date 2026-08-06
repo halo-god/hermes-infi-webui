@@ -38,6 +38,13 @@ CANCEL_TIMEOUT = 5       # session/cancel (fire-and-forget)
 
 OnUpdate = Callable[[dict], Awaitable[None]]
 OnFsWrite = Callable[[str, str], Awaitable[None]]  # (path, content)
+OnPermissionRequest = Callable[[str, dict], Awaitable[bool]]  # (path, tool_call) -> approved
+
+
+async def auto_deny_permission(_path: str, _tool_call: dict) -> bool:
+    """Fail-closed permission callback for unattended runners (scheduled,
+    roundtable, chain, subagent, memory): never prompt, never approve."""
+    return False
 
 
 class ACPError(Exception):
@@ -88,6 +95,7 @@ class ACPClient:
         on_update: OnUpdate | None = None,
         on_fs_write: OnFsWrite | None = None,
         env: dict[str, str] | None = None,
+        on_permission_request: Callable[[str, dict], Awaitable[bool]] | None = None,
     ) -> None:
         self.command = command
         self.cwd = cwd
@@ -95,6 +103,10 @@ class ACPClient:
         self.on_update = on_update
         self.on_fs_write = on_fs_write
         self.env = env
+        # ACP request_permission outside the workspace: async callback returning
+        # True (approve) / False (deny). None → deny (fail-closed). Workspace
+        # edits are auto-approved without consulting this callback.
+        self.on_permission_request = on_permission_request
 
         self._proc: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task | None = None
@@ -251,26 +263,53 @@ class ACPClient:
             timeout=SESSION_TIMEOUT,
         )
 
-    async def prompt(self, content: str | list[dict]) -> str:
+    async def prompt(
+        self,
+        content: str | list[dict],
+        *,
+        task_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> str:
         """Run one user turn. Returns the stopReason.
 
         content can be:
           - str: plain text prompt (backward compatible)
           - list[dict]: mixed content blocks (text, image, resource_link, etc.)
+
+        Optional ACP prompt params (taskId/metadata) are only included when
+        set — agents ignore unknown optional parameters per the spec, so this
+        stays backward compatible.
         """
         if isinstance(content, str):
             blocks = [{"type": "text", "text": content}]
         else:
             blocks = content
+        params: dict = {
+            "sessionId": self._session_id,
+            "prompt": blocks,
+        }
+        if task_id:
+            params["taskId"] = task_id
+        if metadata:
+            params["metadata"] = metadata
         res = await self._request(
             "session/prompt",
-            {
-                "sessionId": self._session_id,
-                "prompt": blocks,
-            },
+            params,
             timeout=PROMPT_TIMEOUT,
         )
         return res.get("stopReason", "end_turn")
+
+    async def delete_session(self, session_id: str | None = None) -> None:
+        """Best-effort session/delete — tells the agent to release session
+        state (history/temp files). Fire-and-forget: callers must swallow
+        failures (the local drop still proceeds without it)."""
+        sid = session_id or self._session_id
+        if not sid:
+            return
+        try:
+            await self._request("session/delete", {"sessionId": sid}, timeout=10)
+        except Exception:  # noqa: BLE001 — cleanup must never block
+            logger.debug("session/delete failed for %s", sid, exc_info=True)
 
     async def cancel(self) -> None:
         if self._session_id:
@@ -401,6 +440,19 @@ class ACPClient:
                     real_cwd = os.path.realpath(self.cwd)
                     real_edit = os.path.realpath(os.path.expanduser(edit_path))
                     approved = real_edit.startswith(real_cwd + os.sep) or real_edit == real_cwd
+                if not approved and edit_path and self.on_permission_request:
+                    # Outside the workspace: ask the user (via the runner's
+                    # callback → SSE confirmation modal). Fail-closed: any
+                    # exception/timeout in the callback denies the request.
+                    try:
+                        approved = await self.on_permission_request(edit_path, tool_call)
+                        logger.info(
+                            "Permission request for %s → %s",
+                            edit_path, "APPROVED" if approved else "denied",
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.warning("on_permission_request failed — denying %s", edit_path, exc_info=True)
+                        approved = False
                 if approved:
                     logger.info("Auto-approved edit: %s", edit_path)
                     # Also save to database via on_fs_write so workspace panel can see it.

@@ -18,6 +18,7 @@ from app.db.base import async_session_maker
 from app.db.models.conversation import Conversation, Message
 from app.db.models.user import User
 from agent_runner.acp_client import ACPClient, ACPTimeout
+from agent_runner.acp_client import auto_deny_permission
 
 logger = logging.getLogger("hermes.runner")
 
@@ -282,6 +283,7 @@ async def handle_memory_consolidate(task: dict, agents: dict) -> None:
         client = ACPClient(
             agent.command, cwd, protocol_version=settings.acp_protocol_version,
             on_update=on_update, on_fs_write=_noop_fs,
+            on_permission_request=auto_deny_permission,
         )
         try:
             await client.start()

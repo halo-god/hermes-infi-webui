@@ -27,6 +27,12 @@ os.environ.setdefault(
 # (env vars take precedence over .env in pydantic-settings).
 os.environ["STORAGE_BACKEND"] = "db"
 
+# Tests assume the 'db' storage backend (small files inline in Postgres);
+# minio-offload tests switch to moto themselves. The repo's backend/.env sets
+# STORAGE_BACKEND=minio for production — override it so it can't leak in
+# (env vars take precedence over .env in pydantic-settings).
+os.environ["STORAGE_BACKEND"] = "db"
+
 from app.core.security import create_token  # noqa: E402
 from app.db import base as db_base  # noqa: E402
 from app.db.models.user import User  # noqa: E402
@@ -51,6 +57,7 @@ async def _create_tables():
     here, and legacy tables outside the metadata may exist)."""
     from sqlalchemy import text as sa_text
     from app.db.base import Base
+    import app.db.models  # noqa: F401 — register every model so create_all is complete
     async with test_engine.begin() as conn:
         await conn.execute(sa_text("DROP SCHEMA public CASCADE"))
         await conn.execute(sa_text("CREATE SCHEMA public"))

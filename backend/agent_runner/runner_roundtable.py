@@ -13,6 +13,7 @@ from app.db.base import async_session_maker
 from app.db.models.conversation import Conversation, Message
 from agent_runner import storage
 from agent_runner.acp_client import ACPClient, ACPTimeout, profile_env
+from agent_runner.acp_client import auto_deny_permission
 from agent_runner.acp_persona import (
     make_persona_client,
     run_prompt_with_clarify_guard,
@@ -212,6 +213,7 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
         mclient = ACPClient(
             hermes.command, cwd, protocol_version=settings.acp_protocol_version,
             on_update=on_merge, on_fs_write=_noop, env=profile_env(None),
+            on_permission_request=auto_deny_permission,
         )
         try:
             await mclient.start()

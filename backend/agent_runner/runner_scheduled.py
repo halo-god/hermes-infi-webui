@@ -12,6 +12,7 @@ import os
 import uuid
 
 from agent_runner.acp_client import ACPClient, ACPTimeout
+from agent_runner.acp_client import auto_deny_permission
 from app.config import settings
 from app.core import redis as R
 from app.db.base import async_session_maker
@@ -159,6 +160,7 @@ async def handle_scheduled(task: dict, agents: dict) -> None:
             protocol_version=settings.acp_protocol_version,
             on_update=on_update, on_fs_write=_noop_fs,
             env=profile_env(profile_dir),
+            on_permission_request=auto_deny_permission,
         )
         try:
             await client.start()

@@ -1043,6 +1043,9 @@ class Runner:
                 acp_session_id=acp_session_id, profile_dir=profile_dir,
                 mcp_servers=mcp_servers,
                 session_namespace=session_namespace,
+                on_permission_request=self._permission_request_handler(
+                    conversation_id, acc,
+                ),
             )
             # Publish the client into the late-bound ref so on_update can fire
             # session/cancel when the iteration cap is reached.
@@ -1193,6 +1196,57 @@ class Runner:
                 "text": acc["text"],
             },
         )
+
+    def _permission_request_handler(
+        self, conversation_id: str, acc: dict,
+    ):
+        """Build the ACP request_permission callback for this turn.
+
+        Returns an async callable (path, tool_call) -> bool. Workspace edits
+        are auto-approved inside acp_client; anything else surfaces an SSE
+        confirmation modal (允许/拒绝) and waits for the user — fail-closed:
+        timeout/cancel/error all deny. The callback blocks the agent's tool
+        call until answered (that's the point of the permission gate).
+        """
+        async def _handle(path: str, tool_call: dict) -> bool:
+            import uuid as _uuid
+            request_id = str(_uuid.uuid4())
+            question = f"Agent 请求写入文件 {path}"
+            req_payload = {
+                "id": request_id,
+                "conversation_id": conversation_id,
+                "message_id": acc.get("current_msg_id"),
+                "question": question,
+                "questions": [{
+                    "question": question,
+                    "options": ["允许", "拒绝"],
+                    "allow_free_text": False,
+                }],
+                "options": ["允许", "拒绝"],
+                "permission": True,
+                "path": path,
+            }
+            try:
+                await R.publish_event(
+                    conversation_id,
+                    {
+                        "type": "confirmation_request",
+                        "message_id": acc.get("current_msg_id"),
+                        "request": req_payload,
+                    },
+                )
+                resp = await R.wait_for_confirmation(
+                    conversation_id, request_id,
+                    timeout=settings.clarify_timeout_seconds, cancel_check=True,
+                )
+                choice = resp.get("choice", "超时")
+            except Exception:
+                logger.warning("Permission request failed for %s — denying", path, exc_info=True)
+                return False
+            logger.info("Permission request %s for %s → %s", request_id[:8], path, choice)
+            return choice == "允许"
+
+        return _handle
 
     async def _wait_and_unblock_clarify_native(
         self, conversation_id: str, request_id: str, *,

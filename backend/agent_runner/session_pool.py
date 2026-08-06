@@ -11,6 +11,7 @@ import logging
 import os
 import time
 from collections import deque
+from collections.abc import Awaitable, Callable
 
 from app.config import settings
 from agent_runner.acp_client import ACPClient, OnFsWrite, OnUpdate, profile_env
@@ -216,6 +217,7 @@ class SessionPool:
         profile_dir: str | None = None,
         mcp_servers: list | None = None,
         session_namespace: str = "",
+        on_permission_request: Callable[[str, dict], Awaitable[bool]] | None = None,
     ) -> tuple[ACPClient, str | None]:
         """Return (client, new_session_id_or_None). session id is set only when
         a fresh subprocess+session was created.
@@ -234,6 +236,7 @@ class SessionPool:
             ):
                 c.on_update = on_update
                 c.on_fs_write = on_fs_write
+                c.on_permission_request = on_permission_request
                 return c, None
             # Profile or MCP server set changed mid-conversation: mcpServers is
             # fixed at session/new time just like HERMES_HOME, so respawn. The
@@ -264,6 +267,7 @@ class SessionPool:
                     if self._alive(c):
                         c.on_update = on_update
                         c.on_fs_write = on_fs_write
+                        c.on_permission_request = on_permission_request
                         c.cwd = cwd
                         init_result = getattr(c, "_init_result", {}) or {}
                         logger.info(
@@ -290,6 +294,7 @@ class SessionPool:
                 on_update=on_update,
                 on_fs_write=on_fs_write,
                 env=profile_env(profile_dir),
+                on_permission_request=on_permission_request,
             )
             try:
                 await asyncio.wait_for(c.start(), timeout=POOL_START_TIMEOUT)
@@ -352,6 +357,14 @@ class SessionPool:
         self._profile_dirs.pop(pool_key, None)
         self._mcp_servers.pop(pool_key, None)
         if c:
+            # Best-effort session/delete so the agent releases its session
+            # state; fire-and-forget — failure must not block the drop.
+            try:
+                sid = getattr(c, "_session_id", None)
+                if sid:
+                    await c.delete_session(sid)
+            except Exception:  # noqa: BLE001
+                pass
             await c.stop()
 
     async def evict_idle(self) -> None:
