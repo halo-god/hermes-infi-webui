@@ -70,6 +70,14 @@ const selected = ref<Profile | null>(null);
 const stagedFiles = ref<File[]>([]);
 const stagedKnowledge = ref<{ id: string; name: string }[]>([]);
 const stagedPreviews = ref<Map<number, string>>(new Map());
+// P2-4: knowledge picker search filter (the list can be long).
+const knowledgeSearch = ref("");
+const filteredKnowledge = computed(() => {
+  const q = knowledgeSearch.value.trim().toLowerCase();
+  const items = props.knowledgeItems || [];
+  if (!q) return items;
+  return items.filter((k) => k.name.toLowerCase().includes(q));
+});
 
 // ── Draft auto-save ──
 let _draftTimer: ReturnType<typeof setTimeout> | null = null;
@@ -629,21 +637,28 @@ function fileIcon(f: File): string {
             <button class="menu-item" style="color:var(--accent)" @click="showFilePicker = false">确定 ({{ stagedFileRefs.length }} 已选)</button>
           </div>
           <!-- knowledge picker -->
-          <div v-if="showKnowledgePicker && knowledgeItems?.length" class="menu" style="bottom: 120%; left: 0; min-width: 260px; max-height: 240px; overflow-y: auto;">
-            <div class="menu-label">选择知识库条目</div>
-            <button
-              v-for="item in knowledgeItems"
-              :key="item.id"
-              class="menu-item"
-              :class="{ active: isKnowledgeSelected(item.id) }"
-              @click="toggleKnowledge(item)"
-            >
-              <Icon name="doc" :size="13" />
-              <span class="m-name">{{ item.name }}</span>
-              <Icon v-if="isKnowledgeSelected(item.id)" name="check" :size="12" style="margin-left:auto;color:var(--accent)" />
-            </button>
+          <div v-if="showKnowledgePicker && knowledgeItems?.length" class="menu" style="bottom: 120%; left: 0; min-width: 280px; max-height: 300px; display:flex; flex-direction:column;">
+            <div class="menu-label" style="display:flex;align-items:center;gap:6px;">
+              选择知识库条目
+              <input v-model="knowledgeSearch" placeholder="搜索…" class="menu-search"
+                style="flex:1;min-width:0;font-size:11px;padding:3px 8px;border-radius:6px;border:1px solid var(--rule-soft);background:var(--bg-canvas);color:var(--ink)" />
+            </div>
+            <div style="overflow-y:auto;flex:1">
+              <button
+                v-for="item in filteredKnowledge"
+                :key="item.id"
+                class="menu-item"
+                :class="{ active: isKnowledgeSelected(item.id) }"
+                @click="toggleKnowledge(item)"
+              >
+                <Icon name="doc" :size="13" />
+                <span class="m-name">{{ item.name }}</span>
+                <Icon v-if="isKnowledgeSelected(item.id)" name="check" :size="12" style="margin-left:auto;color:var(--accent)" />
+              </button>
+              <div v-if="!filteredKnowledge.length" style="padding:10px;font-size:11px;color:var(--ink-mute);text-align:center">无匹配条目</div>
+            </div>
             <div class="menu-sep"></div>
-            <button class="menu-item" style="color:var(--accent)" @click="showKnowledgePicker = false">确定 ({{ stagedKnowledge.length }} 已选)</button>
+            <button class="menu-item" style="color:var(--accent)" @click="showKnowledgePicker = false; knowledgeSearch = ''">确定 ({{ stagedKnowledge.length }} 已选)</button>
           </div>
         </div>
         <span class="composer-spacer"></span>

@@ -548,6 +548,33 @@
     transition: background 120ms;
   }
   .msg-file-chip:hover { background: rgba(255,255,255,0.28); }
+  /* P1-3 RAG citation badges + source bar */
+  .cite-ref {
+    font-size: 10px; color: var(--accent, #6d7ff5); cursor: help;
+    margin: 0 1px; font-weight: 600; vertical-align: super;
+  }
+  .rag-refs-bar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 5px;
+    margin-top: 7px; padding-top: 7px; border-top: 1px dashed var(--rule-soft, rgba(128,128,128,.25));
+  }
+  .rag-refs-label { font-size: 11px; color: var(--ink-faint, #999); margin-right: 2px; }
+  .rag-ref-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 11px; padding: 2px 8px; border-radius: 999px;
+    background: var(--bg-panel, rgba(255,255,255,.16)); border: 1px solid var(--rule-soft, rgba(128,128,128,.25));
+    color: inherit; cursor: help; max-width: 220px;
+  }
+  .rag-ref-chip .rag-ref-chunk { font-size: 10px; color: var(--ink-faint, #999); }
+  .knowledge-chip { border-style: dashed; }
+  .knowledge-chip:hover { border-color: var(--accent, #6d7ff5); }
+  /* P2-4: retry button on failed knowledge parsing */
+  .retry-btn {
+    margin-left: 6px; font-size: 10.5px; padding: 1px 8px; border-radius: 999px;
+    border: 1px solid var(--rule-soft, rgba(128,128,128,.3)); background: transparent;
+    color: var(--accent, #6d7ff5); cursor: pointer; vertical-align: middle;
+  }
+  .retry-btn:hover { background: rgba(255,255,255,0.12); }
+  .retry-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .staged-files {
     display: flex; flex-wrap: wrap; gap: 5px;
     padding: 6px 12px 0;

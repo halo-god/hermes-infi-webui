@@ -612,6 +612,33 @@ function openFile(fid: string) {
   openFileId.value = fid;
   showWorkspace.value = true;
 }
+
+// ── RAG citations ──
+// The knowledge sources injected for a user turn live on that user message
+// (rag_refs); the agent's reply cites them as [1], [2]… Find the nearest
+// preceding user message for an agent message index.
+function ragRefsFor(index: number) {
+  const msgs = chat.messages;
+  for (let i = index - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m.role === "user" && m.content.rag_refs?.length) {
+      return m.content.rag_refs;
+    }
+  }
+  return undefined;
+}
+
+// Open a knowledge source referenced by a chip: jump to the team's knowledge
+// tab (or the project page) so the user can see the actual document.
+function openKnowledgeRef(ref: { id: string; name: string; team_id?: string; project_id?: string }) {
+  if (ref.team_id) {
+    router.push({ path: `/teams/${ref.team_id}`, query: { tab: "knowledge", file: ref.id } });
+  } else if (ref.project_id) {
+    router.push({ path: `/projects/${ref.project_id}`, query: { file: ref.id } });
+  } else {
+    ns.toast("该知识条目没有关联团队或项目", "warn");
+  }
+}
 // ── Message actions ──
 async function copyMessage(text: string) {
   try {
@@ -1189,6 +1216,13 @@ onUnmounted(() => {
                     <span v-else class="typing"><span></span><span></span><span></span></span>
                   </template>
                   <div v-else-if="chat.messages[row.index].role === 'agent'" class="md-body" v-html="highlightMentions(mdSearch(chat.messages[row.index].content.text))" />
+                  <div v-if="chat.messages[row.index].role === 'agent' && ragRefsFor(row.index)?.length" class="rag-refs-bar">
+                    <span class="rag-refs-label">📚 引用来源</span>
+                    <button v-for="r in ragRefsFor(row.index)!" :key="r.n" class="rag-ref-chip"
+                      :title="`来源: ${r.source_name} · 第${r.chunk_index}段`">
+                      [{{ r.n }}] {{ r.source_name }}<span class="rag-ref-chunk">#{{ r.chunk_index }}</span>
+                    </button>
+                  </div>
                   <template v-else>
                     <div v-if="isGroup && chat.messages[row.index].reply_to" class="reply-quote">
                       <Icon name="corner-up-left" :size="11" />
@@ -1197,7 +1231,7 @@ onUnmounted(() => {
                     <div v-if="chat.messages[row.index].deleted_at" class="recalled-msg">该消息已撤回</div>
                     <div v-else-if="displayText(chat.messages[row.index].content.text)" class="md-body" v-html="highlightMentions(displayHtml(chat.messages[row.index].content.text))"></div>
                     <div v-if="chat.messages[row.index].content.knowledge_refs?.length" class="msg-files">
-                      <button v-for="k in chat.messages[row.index].content.knowledge_refs" :key="k.id" class="msg-file-chip knowledge-chip">
+                      <button v-for="k in chat.messages[row.index].content.knowledge_refs" :key="k.id" class="msg-file-chip knowledge-chip" :title="k.team_id ? '打开知识库来源' : ''" @click="openKnowledgeRef(k)">
                         <Icon name="book" :size="11" /> {{ k.name }}
                       </button>
                     </div>

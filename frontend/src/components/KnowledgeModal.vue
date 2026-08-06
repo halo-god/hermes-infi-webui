@@ -14,7 +14,7 @@ const emit = defineEmits<{ close: []; saved: [] }>();
 
 const form = ref({ name: "", kind: "pdf", size_bytes: 0 });
 const saving = ref(false);
-const selectedFile = ref<File | null>(null);
+const selectedFiles = ref<File[]>([]);
 const fileInput = ref<HTMLInputElement | null>(null);
 const uploadProgress = ref(0);
 const processingDoc = ref(false);  // Docling parsing phase (after upload completes)
@@ -36,9 +36,10 @@ onMounted(() => {
 });
 
 function onFileSelect(e: Event) {
-  const file = (e.target as HTMLInputElement).files?.[0];
-  if (!file) return;
-  selectedFile.value = file;
+  const files = (e.target as HTMLInputElement).files;
+  if (!files || !files.length) return;
+  selectedFiles.value = Array.from(files);
+  const file = files[0];
   const ext = file.name.split(".").pop()?.toLowerCase() || "";
   form.value.name = file.name;
   form.value.kind = KIND_MAP[ext] || "txt";
@@ -55,13 +56,18 @@ async function save() {
         kind: form.value.kind,
         size_bytes: form.value.size_bytes,
       });
-    } else if (selectedFile.value) {
-      uploadProgress.value = 0;
-      processingDoc.value = false;
-      await teamsApi.uploadKnowledge(props.teamId, selectedFile.value, props.folderId, (pct) => {
-        uploadProgress.value = pct;
-        if (pct >= 100) processingDoc.value = true;  // upload done, server is now parsing
-      });
+    } else if (selectedFiles.value.length) {
+      // Multi-file: upload each sequentially, showing aggregate progress.
+      const total = selectedFiles.value.length;
+      for (let i = 0; i < total; i++) {
+        uploadProgress.value = Math.round((i / total) * 100);
+        processingDoc.value = false;
+        await teamsApi.uploadKnowledge(props.teamId, selectedFiles.value[i], props.folderId, (pct) => {
+          const overall = Math.round(((i + pct / 100) / total) * 100);
+          uploadProgress.value = overall;
+          if (pct >= 100) processingDoc.value = true;  // upload done, server is now parsing
+        });
+      }
     } else {
       await teamsApi.addKnowledge(props.teamId, {
         name: form.value.name.trim(),
@@ -71,6 +77,8 @@ async function save() {
       });
     }
     emit("saved");
+  } catch {
+    // Error toast is surfaced globally via the hermes:api-error listener (P2-1).
   } finally {
     saving.value = false;
   }
@@ -82,7 +90,7 @@ async function save() {
     <div style="display: flex; flex-direction: column; gap: 14px">
       <!-- file picker (new upload only) -->
       <div v-if="!editing">
-        <input ref="fileInput" type="file" style="display:none"
+        <input ref="fileInput" type="file" multiple style="display:none"
           accept=".pdf,.doc,.docx,.txt,.csv,.md,.json,.html,.htm,.xlsx,.xls"
           @change="onFileSelect" />
         <button
@@ -91,10 +99,10 @@ async function save() {
           @click="fileInput?.click()"
         >
           <Icon name="paperclip" :size="14" />
-          {{ selectedFile ? selectedFile.name : '点击选择文件' }}
+          {{ selectedFiles.length > 1 ? `已选 ${selectedFiles.length} 个文件` : (selectedFiles[0]?.name || '点击选择文件（可多选）') }}
         </button>
         <div style="font-size:11.5px;color:var(--ink-mute);margin-top:4px;text-align:center">
-          支持 PDF · Word · TXT · CSV · Markdown · JSON · HTML · Excel
+          支持 PDF · Word · TXT · CSV · Markdown · JSON · HTML · Excel（可多选）
         </div>
         <div v-if="saving && uploadProgress > 0 && uploadProgress < 100" style="margin-top:8px">
           <div style="height:4px;background:var(--rule);border-radius:2px;overflow:hidden">
@@ -128,7 +136,7 @@ async function save() {
             <option v-for="k in KINDS" :key="k" :value="k">{{ k.toUpperCase() }}</option>
           </select>
         </div>
-        <div v-if="!selectedFile && !editing" class="flex-1">
+        <div v-if="!selectedFiles.length && !editing" class="flex-1">
           <label class="text-mute-label">文件大小 (字节)</label>
           <input
             v-model.number="form.size_bytes"
@@ -137,8 +145,10 @@ async function save() {
             class="form-input-lg"
           />
         </div>
-        <div v-if="selectedFile" style="flex: 1; display: flex; flex-direction: column; justify-content: flex-end">
-          <span style="font-size:12px;color:var(--ink-mute);padding-bottom:8px">{{ (selectedFile.size / 1024).toFixed(1) }} KB</span>
+        <div v-if="selectedFiles.length" style="flex: 1; display: flex; flex-direction: column; justify-content: flex-end">
+          <span style="font-size:12px;color:var(--ink-mute);padding-bottom:8px">
+            {{ selectedFiles.length > 1 ? `共 ${selectedFiles.length} 个文件 · ${(selectedFiles.reduce((s, f) => s + f.size, 0) / 1024).toFixed(1)} KB` : `${(selectedFiles[0].size / 1024).toFixed(1)} KB` }}
+          </span>
         </div>
       </div>
     </div>
