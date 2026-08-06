@@ -21,6 +21,12 @@ os.environ.setdefault(
     "DATABASE_URL", "postgresql+asyncpg://hermes:hermes@localhost:5432/hermes_test"
 )
 
+# Tests assume the 'db' storage backend (small files inline in Postgres);
+# minio-offload tests switch to moto themselves. The repo's backend/.env sets
+# STORAGE_BACKEND=minio for production — override it so it can't leak in
+# (env vars take precedence over .env in pydantic-settings).
+os.environ["STORAGE_BACKEND"] = "db"
+
 from app.core.security import create_token  # noqa: E402
 from app.db import base as db_base  # noqa: E402
 from app.db.models.user import User  # noqa: E402
@@ -40,9 +46,16 @@ db_base.async_session_maker = test_session_maker
 
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def _create_tables():
-    """Create all tables once."""
+    """Recreate all tables once (drop schema first so model changes — e.g. new
+    chunk metadata columns — are reflected; alembic migrations aren't run
+    here, and legacy tables outside the metadata may exist)."""
+    from sqlalchemy import text as sa_text
     from app.db.base import Base
     async with test_engine.begin() as conn:
+        await conn.execute(sa_text("DROP SCHEMA public CASCADE"))
+        await conn.execute(sa_text("CREATE SCHEMA public"))
+        # pgvector's "vector" type lives in the schema we just dropped — recreate.
+        await conn.execute(sa_text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
     yield
 

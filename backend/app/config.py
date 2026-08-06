@@ -193,6 +193,19 @@ class Settings(BaseSettings):
     rag_chunk_size: int = 500        # chars per chunk (CJK ≈ 250 tokens)
     rag_chunk_overlap: int = 100     # overlap between adjacent chunks
     rag_top_k: int = 5               # chunks fetched per query
+    # P1-3: cosine-similarity floor for vector hits. pgvector distance is
+    # 0 (identical)..2 (opposite); hits with distance > 1 - min_score are
+    # dropped so unrelated chunks don't pollute the prompt. Calibrated
+    # against bge-small-zh (relevant ~0.2-0.45, irrelevant ~0.7+).
+    rag_min_score: float = 0.35
+    # P1-4: hybrid retrieval — fuse a keyword (tsvector/BM25-style) rank with
+    # the vector rank via Reciprocal Rank Fusion. Requires migration 0083
+    # (tsvector generated column + GIN index). Off by default.
+    rag_hybrid: bool = False
+    # P3: cross-encoder rerank of the vector shortlist (bge-reranker-base,
+    # ~+110MB local model, ~+200ms per query). Off by default.
+    rag_rerank: bool = False
+    rag_rerank_model: str = "BAAI/bge-reranker-base"
     # When the combined top-k chunks exceed this many chars, they are
     # truncated to fit the prompt budget (mirrors the legacy _KNOWLEDGE_TOTAL).
     rag_max_context_chars: int = 8000

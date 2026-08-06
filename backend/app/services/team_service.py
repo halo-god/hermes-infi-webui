@@ -384,6 +384,12 @@ async def _maybe_index_knowledge(db: AsyncSession, knowledge_id: uuid.UUID) -> N
         )
 
 
+async def index_knowledge_best_effort(db: AsyncSession, knowledge_id: uuid.UUID) -> None:
+    """Public best-effort RAG indexing hook for API endpoints (e.g. upload),
+    so route layers don't reach into the private helper."""
+    await _maybe_index_knowledge(db, knowledge_id)
+
+
 async def _maybe_index_project_doc(db: AsyncSession, project_doc_id: uuid.UUID) -> None:
     """P2-file: same best-effort hook for project docs. Mirrors
     _maybe_index_knowledge but calls index_project_doc."""

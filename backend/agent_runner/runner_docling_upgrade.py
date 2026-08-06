@@ -48,6 +48,17 @@ async def handle_docling_upgrade(task: dict) -> None:
             if md and md.strip():
                 k.content = md
                 logger.info("Docling upgrade: knowledge %s updated (%d chars)", knowledge_id[:8], len(md))
+                # Content changed — rebuild the vector index so retrieval stays
+                # consistent with what the UI shows. Best-effort: a failure here
+                # must not flip the status to error (chunks-count=0 stays the
+                # visible signal), so it's wrapped separately.
+                try:
+                    from app.services import rag_service
+                    await rag_service.index_knowledge(db, k.id)
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "Docling upgrade: re-index failed for knowledge %s", knowledge_id, exc_info=True,
+                    )
             else:
                 # Docling failed — keep the fast-extracted content from upload.
                 logger.info("Docling upgrade: knowledge %s — Docling returned nothing, keeping fast content", knowledge_id[:8])

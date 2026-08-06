@@ -608,6 +608,11 @@ async def upload_knowledge(
     await db.commit()
     await db.refresh(k)
 
+    # P1-1 RAG: index the fast-extracted content right away (same as the JSON
+    # create endpoint) so uploads are immediately vector-searchable. Docling
+    # upgrade below re-extracts content; runner_docling_upgrade re-indexes.
+    await svc.index_knowledge_best_effort(db, k.id)
+
     # Background Docling upgrade: enqueue a task that re-extracts with Docling
     # and updates content + status. Non-blocking — the record is already usable
     # with the fast-extracted content.
@@ -620,6 +625,42 @@ async def upload_knowledge(
             "name": name,
         })
 
+    return KnowledgeOut.model_validate(k)
+
+
+@router.post("/teams/{team_id}/knowledge/{kid}/reprocess", response_model=KnowledgeOut)
+async def reprocess_knowledge(
+    team_id: uuid.UUID,
+    kid: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """P2-4: retry a failed/processing knowledge item — re-indexes the current
+    content immediately and re-enqueues the Docling upgrade when raw bytes are
+    stored. Lets the UI offer a "重试" button on parsing failures."""
+    from app.db.models.team import TeamKnowledge
+    await svc.require_permission(db, team_id, user.id, "knowledge.upload")
+    k = await db.get(TeamKnowledge, kid)
+    if k is None or k.team_id != team_id:
+        raise HTTPException(status_code=404, detail="知识条目不存在")
+    k.processing_status = "processing"
+    await db.commit()
+
+    # Re-index the current (fast-extracted) content right away; Docling's
+    # upgrade task re-extracts + re-indexes again when it finishes.
+    await svc.index_knowledge_best_effort(db, k.id)
+
+    if k.storage_key:
+        from app.core import redis as redis_core
+        from app.core.docling_converter import is_supported as docling_supported
+        if docling_supported(k.kind):
+            await redis_core.enqueue_prompt({
+                "type": "knowledge_docling_upgrade",
+                "knowledge_id": str(k.id),
+                "ext": k.kind,
+                "name": k.name,
+            })
+    await db.refresh(k)
     return KnowledgeOut.model_validate(k)
 
 

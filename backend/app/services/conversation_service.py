@@ -640,7 +640,7 @@ async def _build_moa_targets(
         if not target_profile or not target_profile.is_active:
             continue
         t_system_prompt = target_profile.system_prompt or None
-        t_knowledge_prompt = await _build_knowledge_prompt(db, target_profile, query=query)
+        t_knowledge_prompt, _rag_refs = await _build_knowledge_prompt(db, target_profile, query=query)
         if t_knowledge_prompt:
             t_system_prompt = (
                 f"{t_system_prompt}\n\n{t_knowledge_prompt}" if t_system_prompt else t_knowledge_prompt
@@ -767,6 +767,7 @@ async def send_message(
     matched_skill_ids: list[uuid.UUID] | None = None,
     max_iterations: int | None = None,
     stage: str | None = None,
+    rag_refs: list[dict] | None = None,
 ) -> tuple[Message, Message]:
     """Persist the user turn + an empty streaming agent turn, then enqueue ACP work.
 
@@ -795,7 +796,11 @@ async def send_message(
             ]
         if knowledge_ids:
             _knames = await _resolve_knowledge_names(db, knowledge_ids)
-            user_content["knowledge_refs"] = [{"id": kid, "name": _knames.get(kid, kid[:8])} for kid in knowledge_ids]
+            user_content["knowledge_refs"] = [{"id": kid, **_knames.get(kid, {"name": kid[:8]})} for kid in knowledge_ids]
+        # P1-3: RAG citations — numbered sources injected into the prompt this
+        # turn ([1], [2], …). Rendered as badges on the agent's reply.
+        if rag_refs:
+            user_content["rag_refs"] = rag_refs
         user_msg = Message(
             conversation_id=convo.id,
             owner_id=owner_id,
@@ -908,7 +913,7 @@ async def send_roundtable(
             ]
         if knowledge_ids:
             _knames = await _resolve_knowledge_names(db, knowledge_ids)
-            user_content["knowledge_refs"] = [{"id": kid, "name": _knames.get(kid, kid[:8])} for kid in knowledge_ids]
+            user_content["knowledge_refs"] = [{"id": kid, **_knames.get(kid, {"name": kid[:8]})} for kid in knowledge_ids]
         user_msg = Message(
             conversation_id=convo.id, owner_id=owner_id, role="user", content=user_content, mentions=mentions or [], status="complete", task_id=task_id
         )
@@ -1001,7 +1006,7 @@ async def send_chain(
             ]
         if knowledge_ids:
             _knames = await _resolve_knowledge_names(db, knowledge_ids)
-            user_content["knowledge_refs"] = [{"id": kid, "name": _knames.get(kid, kid[:8])} for kid in knowledge_ids]
+            user_content["knowledge_refs"] = [{"id": kid, **_knames.get(kid, {"name": kid[:8]})} for kid in knowledge_ids]
         user_msg = Message(
             conversation_id=convo.id, owner_id=owner_id, role="user", content=user_content, mentions=mentions or [], status="complete", task_id=task_id
         )
@@ -1159,14 +1164,17 @@ def _html_to_plain_text(html: str) -> str:
 
 async def _collect_folder_knowledge_ids(
     db: AsyncSession, folder_ids: list[str]
-) -> list[uuid.UUID]:
+) -> tuple[list[uuid.UUID], list[uuid.UUID]]:
     """Recursively collect all non-folder item IDs under the given folder IDs.
 
-    Works for both TeamKnowledge and ProjectDoc tables.
+    Works for both TeamKnowledge and ProjectDoc tables. Returns
+    (team_knowledge_ids, project_doc_ids) split so callers can route each
+    type to the correct RAG index (chunks are keyed by table-specific FK).
     """
     from app.db.models.team import TeamKnowledge, ProjectDoc
 
-    result: list[uuid.UUID] = []
+    tk_result: list[uuid.UUID] = []
+    pd_result: list[uuid.UUID] = []
     seen_folders: set[uuid.UUID] = set()
 
     async def _recurse(fids: list[uuid.UUID]):
@@ -1182,7 +1190,7 @@ async def _collect_folder_knowledge_ids(
                 )
             )).scalars().all()
             for r in tk_rows:
-                result.append(r.id)
+                tk_result.append(r.id)
             # ProjectDoc children
             pd_rows = (await db.execute(
                 select(ProjectDoc).where(
@@ -1191,7 +1199,7 @@ async def _collect_folder_knowledge_ids(
                 )
             )).scalars().all()
             for r in pd_rows:
-                result.append(r.id)
+                pd_result.append(r.id)
             # Recurse into sub-folders (both tables)
             tk_sub = (await db.execute(
                 select(TeamKnowledge.id).where(
@@ -1214,7 +1222,7 @@ async def _collect_folder_knowledge_ids(
         except (ValueError, TypeError):
             continue
     await _recurse(valid_ids)
-    return result
+    return tk_result, pd_result
 
 
 async def _batch_load_knowledge_entries(
@@ -1247,7 +1255,7 @@ async def _batch_load_knowledge_entries(
 
 async def _build_knowledge_prompt(
     db: AsyncSession, profile: Profile | None, query: str | None = None,
-) -> str | None:
+) -> tuple[str | None, list[dict]]:
     """Inject the content of a Profile's bound knowledge into the prompt.
 
     Supports:
@@ -1260,13 +1268,20 @@ async def _build_knowledge_prompt(
     the top-k chunks relevant to `query` are injected, instead of whole docs.
     Falls back to the legacy whole-doc injection on any failure path (RAG off,
     nothing indexed, embedding unavailable, pgvector missing).
+
+    Returns (prompt_or_None, refs) — refs is the citation list in injection
+    order for the RAG path ([] for legacy) and is stored on the user message
+    so the frontend can render citation badges.
     """
     if not profile:
-        return None
+        return None, []
     from app.db.models.team import TeamKnowledge
 
-    # Collect all knowledge IDs to load
+    # Collect all knowledge IDs to load, split by source table: chunks are
+    # keyed by table-specific FK (knowledge_id / project_doc_id), so the RAG
+    # path must know which list an id belongs to.
     all_ids: list[uuid.UUID] = []
+    project_doc_ids: list[uuid.UUID] = []
 
     # 1. Direct item bindings (backward compat)
     for kid in (getattr(profile, "knowledge_ids", None) or []):
@@ -1278,8 +1293,9 @@ async def _build_knowledge_prompt(
     # 2. Folder bindings — recursively collect all items under folders
     folder_ids = getattr(profile, "knowledge_folder_ids", None) or []
     if folder_ids:
-        folder_item_ids = await _collect_folder_knowledge_ids(db, folder_ids)
-        all_ids.extend(folder_item_ids)
+        folder_tk, folder_pd = await _collect_folder_knowledge_ids(db, folder_ids)
+        all_ids.extend(folder_tk)
+        project_doc_ids.extend(folder_pd)
 
     # 3. Whole-team bindings — every non-folder item under these teams
     team_ids = getattr(profile, "knowledge_team_ids", None) or []
@@ -1302,21 +1318,27 @@ async def _build_knowledge_prompt(
     # An item may be reachable via more than one binding (direct + folder + team) —
     # dedup while preserving first-seen order so it isn't injected multiple times.
     all_ids = list(dict.fromkeys(all_ids))
+    project_doc_ids = list(dict.fromkeys(project_doc_ids))
 
-    if not all_ids:
-        return None
+    if not all_ids and not project_doc_ids:
+        return None, []
 
-    # ── P1-1 RAG path ──
-    if settings.rag_enabled and query and query.strip():
-        rag_prompt = await _build_knowledge_prompt_rag(db, all_ids, query)
+    # ── P1-1 RAG path (effective switch: DB override wins over env) ──
+    from app.services.settings_service import rag_enabled as rag_enabled_effective
+    if await rag_enabled_effective(db) and query and query.strip():
+        rag_prompt, rag_refs = await _build_knowledge_prompt_rag(
+            db, all_ids, project_doc_ids, query,
+        )
         if rag_prompt is not None:
-            return rag_prompt
+            return rag_prompt, rag_refs
         # else: fall through to legacy whole-doc injection.
 
     parts: list[str] = []
     used = 0
-    entries_by_id = await _batch_load_knowledge_entries(db, all_ids)
-    for kid in all_ids:
+    # Legacy whole-doc injection covers both source tables (merged list).
+    legacy_ids = list(dict.fromkeys([*all_ids, *project_doc_ids]))
+    entries_by_id = await _batch_load_knowledge_entries(db, legacy_ids)
+    for kid in legacy_ids:
         entry = entries_by_id.get(kid)
         if entry is None or not getattr(entry, "content", None):
             continue
@@ -1335,68 +1357,92 @@ async def _build_knowledge_prompt(
         if used >= _KNOWLEDGE_TOTAL:
             break
     if not parts:
-        return None
+        return None, []
     return (
         "【团队知识库】请在回答时参考以下资料，不要向用户复述这段说明：\n"
-        + "\n\n".join(parts)
+        + "\n\n".join(parts),
+        [],
     )
 
 
 async def _build_knowledge_prompt_rag(
-    db: AsyncSession, knowledge_ids: list[uuid.UUID], query: str,
-) -> str | None:
+    db: AsyncSession,
+    knowledge_ids: list[uuid.UUID],
+    project_doc_ids: list[uuid.UUID],
+    query: str,
+) -> tuple[str | None, list[dict]]:
     """P1-1: vector-retrieve the top-k chunks relevant to `query` across the
-    given knowledge items and assemble them into the knowledge prompt.
+    given knowledge items (TeamKnowledge + ProjectDoc) and assemble them into
+    the knowledge prompt.
 
-    Returns None to signal "fall back to legacy whole-doc injection" when:
+    Returns (None, []) to signal "fall back to legacy whole-doc injection"
+    when:
       - no item has been indexed yet (nothing to search)
       - the embedding model / pgvector is unavailable
       - search returns zero hits
+    On success returns (prompt, refs) where refs is the citation metadata in
+    injection order ([{"n": 1, "source_name": ...}]) — stored on the user
+    message so the frontend can render [n] citation badges on the reply.
     Never raises — _build_knowledge_prompt must stay robust.
     """
     from app.core.embedding import EmbeddingUnavailable
     from app.services import rag_service
 
     # Only bother searching if at least one item is indexed. Avoids the cost
-    # of embedding the query when the whole corpus is un-indexed.
+    # of embedding the query when the whole corpus is un-indexed. Each id type
+    # routes to its own chunks table FK (knowledge_id / project_doc_id).
     indexed: list[uuid.UUID] = []
     for kid in knowledge_ids:
         try:
-            if await rag_service.is_indexed(db, kid):
+            if await rag_service.is_indexed(db, knowledge_id=kid):
                 indexed.append(kid)
         except Exception:  # noqa: BLE001 — pgvector missing etc.
-            return None
-    if not indexed:
-        return None
+            return None, []
+    indexed_pd: list[uuid.UUID] = []
+    for pid in project_doc_ids:
+        try:
+            if await rag_service.is_indexed(db, project_doc_id=pid):
+                indexed_pd.append(pid)
+        except Exception:  # noqa: BLE001 — pgvector missing etc.
+            return None, []
+    if not indexed and not indexed_pd:
+        return None, []
 
     try:
-        hits = await rag_service.search(db, query, indexed)
+        hits = await rag_service.search(db, query, indexed, indexed_pd)
     except EmbeddingUnavailable:
-        return None
+        return None, []
     except Exception:  # noqa: BLE001 — pgvector/SQL errors: silently fall back
-        return None
+        return None, []
     if not hits:
-        return None
+        return None, []
 
     # Truncate the assembled chunks to the prompt budget (mirrors the legacy
     # _KNOWLEDGE_TOTAL guard so RAG never blows the context window either).
     budget = settings.rag_max_context_chars
     parts: list[str] = []
+    refs: list[dict] = []
     used = 0
-    for content, _distance in hits:
+    for n, hit in enumerate(hits, start=1):
         remaining = budget - used
         if remaining <= 0:
             break
-        body = content[:remaining]
-        parts.append(body)
-        used += len(body)
+        body = hit.content[:remaining]
+        src = hit.source_name or "未知来源"
+        loc = f"来源: {src} · 第{hit.chunk_index}段"
+        if hit.parent_title:
+            loc += f" · 章节: {hit.parent_title}"
+        parts.append(f"[{n}] {loc}\n{body}")
+        refs.append({"n": n, "source_name": src, "chunk_index": hit.chunk_index})
+        used += len(body) + len(loc) + 8
     if not parts:
-        return None
-    return (
+        return None, []
+    prompt = (
         "【团队知识库·检索】以下是根据你的问题检索到的相关资料片段，"
-        "不要向用户复述这段说明：\n"
+        "回答时用 [1]、[2] 等编号标注引用出处，不要向用户复述这段说明：\n"
         + "\n\n---\n\n".join(parts)
     )
+    return prompt, refs
 
 
 async def _build_request_knowledge_prompt(db: AsyncSession, knowledge_ids: list[str]) -> str | None:
@@ -1439,8 +1485,10 @@ async def _build_request_knowledge_prompt(db: AsyncSession, knowledge_ids: list[
     return "\n\n".join(parts) if parts else None
 
 
-async def _resolve_knowledge_names(db, knowledge_ids: list[str]) -> dict[str, str]:
-    """Map knowledge IDs to their display names for persisting in message metadata."""
+async def _resolve_knowledge_names(db, knowledge_ids: list[str]) -> dict[str, dict]:
+    """Map knowledge IDs to display info for persisting in message metadata:
+    {"name", "team_id"?, "project_id"?} — the team/project context lets the
+    frontend open the source location when a knowledge chip is clicked."""
     valid_ids: list[uuid.UUID] = []
     for kid_str in knowledge_ids:
         try:
@@ -1450,11 +1498,18 @@ async def _resolve_knowledge_names(db, knowledge_ids: list[str]) -> dict[str, st
     if not valid_ids:
         return {}
     entries_by_id = await _batch_load_knowledge_entries(db, valid_ids)
-    out: dict[str, str] = {}
+    out: dict[str, dict] = {}
     for kid_str, kid in zip(knowledge_ids, valid_ids):
         entry = entries_by_id.get(kid)
         if entry:
-            out[kid_str] = getattr(entry, "name", "") or kid_str[:8]
+            info: dict = {"name": getattr(entry, "name", "") or kid_str[:8]}
+            tid = getattr(entry, "team_id", None)
+            if tid:
+                info["team_id"] = str(tid)
+            pid = getattr(entry, "project_id", None)
+            if pid:
+                info["project_id"] = str(pid)
+            out[kid_str] = info
     return out
 
 
@@ -1567,7 +1622,7 @@ async def dispatch(
             mcp_servers = await _resolve_mcp_servers(db, profile, allowed_names=stage_tools)
             # Inject the Profile's bound knowledge-base content (reuse loop).
             # Pass the user's query so RAG can retrieve only relevant chunks.
-            knowledge_prompt = await _build_knowledge_prompt(db, profile, query=text)
+            knowledge_prompt, rag_refs = await _build_knowledge_prompt(db, profile, query=text)
             if knowledge_prompt:
                 system_prompt = (
                     f"{system_prompt}\n\n{knowledge_prompt}" if system_prompt else knowledge_prompt
@@ -1683,6 +1738,7 @@ async def dispatch(
         system_prompt=system_prompt, profile_dir=profile_dir, mcp_servers=mcp_servers,
         task_id=task_id, profile_id=effective_profile_id, matched_skill_ids=matched_skill_ids,
         max_iterations=profile.max_iterations if profile else None,
+        rag_refs=rag_refs if knowledge_prompt else None,
         stage=convo.staged_stage if (profile and getattr(profile, "staged_enabled", False)) else None,
     )
 
@@ -2268,7 +2324,7 @@ async def _persist_group_user_msg(
         ]
     if knowledge_ids:
         _knames = await _resolve_knowledge_names(db, knowledge_ids)
-        content["knowledge_refs"] = [{"id": kid, "name": _knames.get(kid, kid[:8])} for kid in knowledge_ids]
+        content["knowledge_refs"] = [{"id": kid, **_knames.get(kid, {"name": kid[:8]})} for kid in knowledge_ids]
     user_msg = Message(
         conversation_id=convo.id,
         owner_id=owner_id,
