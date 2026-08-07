@@ -168,7 +168,7 @@
   }
 
   .side-foot {
-    border-top: 1px solid var(--rule);
+    /* separator is the .side-sep gradient line above; no duplicate border */
     padding: 10px;
     display: flex; flex-direction: column; gap: 2px;
     flex-shrink: 0;
