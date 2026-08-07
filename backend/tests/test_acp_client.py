@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
+import pytest
 
 from agent_runner.acp_client import ACPClient, auto_deny_permission
 
@@ -154,6 +155,49 @@ class TestStabilityFixes:
             # Second notification still handled despite the first raising.
             await client._dispatch({"method": "session/update", "params": {"update": {"sessionUpdate": "agent_thought_chunk"}}})
         assert calls == ["agent_message_chunk", "agent_thought_chunk"]
+
+    async def test_history_replay_suppressed_during_resume(self):
+        """History replay inside session/resume must not reach on_update —
+        the replayed transcript is history, not new output (fixes turns that
+        accumulate the previous turn's full reply into the new message)."""
+        client = _mk_client()
+        calls = []
+
+        async def fake_update(update):
+            calls.append(update.get("sessionUpdate"))
+
+        client.on_update = fake_update
+
+        async def resume_with_replay(*a, **kw):
+            # The agent replays the persisted transcript as session/update
+            # notifications while session/resume is in flight.
+            await client._dispatch(
+                {"method": "session/update",
+                 "params": {"update": {"sessionUpdate": "agent_message_chunk",
+                                       "content": {"text": "replayed history"}}}}
+            )
+            return {}
+
+        with patch.object(client, "_request", AsyncMock(side_effect=resume_with_replay)):
+            await client.resume_session("sess-1", "/tmp/hermes-ws")
+        assert calls == []  # replay suppressed
+        # After resume returns, normal streaming updates flow again.
+        await client._dispatch(
+            {"method": "session/update",
+             "params": {"update": {"sessionUpdate": "agent_message_chunk",
+                                   "content": {"text": "new"}}}}
+        )
+        assert calls == ["agent_message_chunk"]
+
+    async def test_suppress_flag_cleared_when_resume_fails(self):
+        """The suppress window must close even if session/resume errors."""
+        client = _mk_client()
+        with patch.object(
+            client, "_request", AsyncMock(side_effect=RuntimeError("agent gone"))
+        ):
+            with pytest.raises(RuntimeError):
+                await client.resume_session("sess-1", "/tmp/hermes-ws")
+        assert client._suppress_updates is False
 
     def test_friendly_error_mapping(self):
         """P7: exception class names map to readable messages."""

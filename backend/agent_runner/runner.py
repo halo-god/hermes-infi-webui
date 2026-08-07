@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 
 from redis.exceptions import ResponseError
 
-from sqlalchemy import func, select, text as sa_text
+from sqlalchemy import select
 
 from app.config import settings
 from app.core.logging import configure_logging
@@ -398,24 +398,25 @@ class Runner:
         an eternal spinner and the conversation can't continue cleanly.
         """
         from datetime import timedelta
+        from sqlalchemy import select as sa_sel
         from sqlalchemy import update as sa_upd
         async with async_session_maker() as db:
             cutoff = datetime.now(timezone.utc) - timedelta(minutes=2)
-            res = await db.execute(
-                sa_upd(Message)
-                .where(Message.status == "streaming", Message.updated_at < cutoff)
-                .values(
-                    status="error",
-                    content=func.jsonb_set(
-                        func.coalesce(Message.content, {}),
-                        "{text}",
-                        sa_text('"⚠ 生成中断（服务重启）"'),
-                        create_missing=True,
-                    ),
+            rows = await db.execute(
+                sa_sel(Message.id, Message.content).where(
+                    Message.status == "streaming", Message.updated_at < cutoff
                 )
-                .returning(Message.id)
             )
-            ids = [row[0] for row in res.all()]
+            ids: list = []
+            for mid, content in rows.all():
+                content = dict(content or {})
+                content["text"] = "⚠ 生成中断（服务重启）"
+                await db.execute(
+                    sa_upd(Message)
+                    .where(Message.id == mid)
+                    .values(status="error", content=content)
+                )
+                ids.append(mid)
             if ids:
                 await db.commit()
                 logger.warning("Reclaimed %d stuck streaming message(s)", len(ids))
@@ -538,8 +539,11 @@ class Runner:
                 TASK_DURATION.labels(type=task_type).observe(duration)
                 if attempt < MAX_RETRIES:
                     next_attempt = attempt + 1
-                    logger.warning("Task %s failed (retry %d/%d): %s",
-                                   entry_id, next_attempt, MAX_RETRIES, exc)
+                    logger.warning(
+                        "Task %s failed (retry %d/%d): %s",
+                        entry_id, next_attempt, MAX_RETRIES, exc,
+                        exc_info=True,
+                    )
                     # Exponential backoff before re-enqueue to avoid fail-fast storms
                     delay = min(RETRY_BACKOFF_BASE ** next_attempt, 60)
                     await asyncio.sleep(delay)
@@ -565,6 +569,43 @@ class Runner:
                         )
                     except Exception:
                         logger.exception("Failed to send task %s to DLQ", entry_id)
+                    # The turn is gone for good — close out the conversation
+                    # message so the UI is not stuck in "streaming" forever
+                    # (which locks the conversation against new messages).
+                    await self._mark_task_failed(task_data, exc)
+
+    async def _mark_task_failed(self, task_data: dict, exc: Exception) -> None:
+        """Idempotently close out a conversation message left in "streaming"
+        when a turn died outside the normal finalize path (e.g. an escaped
+        exception that exhausted the retry budget and landed in the DLQ).
+
+        The UI treats a streaming message as "conversation busy" — without
+        this the conversation stays locked against new messages forever.
+        """
+        conv_id = task_data.get("conversation_id")
+        msg_id = task_data.get("message_id")
+        if not conv_id or not msg_id:
+            return
+        try:
+            async with async_session_maker() as db:
+                m = await db.get(Message, uuid.UUID(str(msg_id)))
+                if m is not None and m.status == "streaming":
+                    m.status = "error"
+                    content = dict(m.content or {})
+                    content["error"] = _friendly_error(exc)
+                    m.content = content
+                    await db.commit()
+            await R.publish_event(
+                str(conv_id),
+                {"type": "error", "message_id": str(msg_id), "detail": _friendly_error(exc)},
+            )
+            await R.publish_event(
+                str(conv_id), {"type": "done", "message_id": str(msg_id), "status": "error"}
+            )
+        except Exception:
+            logger.exception(
+                "Failed to mark task failed for conv=%s msg=%s", conv_id, msg_id,
+            )
 
     def _on_task_done(self, task: asyncio.Task) -> None:
         """Clean up completed tasks from the active set."""

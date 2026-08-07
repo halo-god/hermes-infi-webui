@@ -357,14 +357,14 @@ class SessionPool:
         self._profile_dirs.pop(pool_key, None)
         self._mcp_servers.pop(pool_key, None)
         if c:
-            # Best-effort session/delete so the agent releases its session
-            # state; fire-and-forget — failure must not block the drop.
-            try:
-                sid = getattr(c, "_session_id", None)
-                if sid:
-                    await c.delete_session(sid)
-            except Exception:  # noqa: BLE001
-                pass
+            # NOTE: no session/delete call here. "session/delete" is not part
+            # of the ACP v1 schema (acp/meta.py AGENT_METHODS has no delete),
+            # so the hermes agent answers -32601 Method not found — and in the
+            # observed crash (turn dying mid-prompt with "Background task
+            # failed (unknown method: session/delete)") the unknown-method
+            # request path cascaded into a subprocess exit. Killing the
+            # subprocess is sufficient cleanup; agent-side session state is
+            # rebuilt on the next load/resume.
             await c.stop()
 
     async def evict_idle(self) -> None:

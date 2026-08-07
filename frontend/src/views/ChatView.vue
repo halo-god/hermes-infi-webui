@@ -1220,6 +1220,10 @@ onUnmounted(() => {
                     </div>
                     <span v-else class="typing"><span></span><span></span><span></span></span>
                   </template>
+                  <div v-else-if="chat.messages[row.index].role === 'agent' && chat.messages[row.index].status === 'error'" class="msg-error-tag">
+                    ⚠ {{ chat.messages[row.index].content.error || '生成中断' }}
+                    <button class="inline-retry-btn" @click="regenerate(chat.messages[row.index].id)">重新生成</button>
+                  </div>
                   <div v-else-if="chat.messages[row.index].role === 'agent'" class="md-body" v-html="highlightMentions(mdSearch(chat.messages[row.index].content.text, ragRefsFor(row.index)?.length ? { citeRefs: true } : undefined))" />
                   <div v-if="chat.messages[row.index].role === 'agent' && ragRefsFor(row.index)?.length" class="rag-refs-bar">
                     <span class="rag-refs-label">📚 引用来源</span>
@@ -1228,7 +1232,7 @@ onUnmounted(() => {
                       [{{ r.n }}] {{ r.source_name }}<span class="rag-ref-chunk">#{{ r.chunk_index }}</span>
                     </button>
                   </div>
-                  <template v-else>
+                  <template v-else-if="chat.messages[row.index].role !== 'agent'">
                     <div v-if="isGroup && chat.messages[row.index].reply_to" class="reply-quote">
                       <Icon name="corner-up-left" :size="11" />
                       <span class="rq-label">{{ chat.messages[row.index].reply_to!.snippet }}</span>
@@ -1454,6 +1458,31 @@ onUnmounted(() => {
   color: #c0392b;
   border-color: rgba(192, 57, 43, 0.4);
   background: rgba(192, 57, 43, 0.1);
+}
+.msg-error-tag {
+  margin-top: 5px;
+  font-size: 12.5px;
+  color: #c0392b;
+  border: 1px solid rgba(192, 57, 43, 0.4);
+  background: rgba(192, 57, 43, 0.08);
+  border-radius: 6px;
+  padding: 7px 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.inline-retry-btn {
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  font-size: 11.5px;
+  padding: 1px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.inline-retry-btn:hover {
+  background: rgba(192, 57, 43, 0.12);
 }
 .msg-cancelled-tag.risk-blocked {
   color: #b8852a;

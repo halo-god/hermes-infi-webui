@@ -82,9 +82,6 @@ async def save_file(
     inline: str | None = content
     if settings.storage_backend == "minio":
         storage_key = f"{conversation_id}/{name}"
-        await asyncio.to_thread(
-            object_storage.put, storage_key, data, _CONTENT_TYPE.get(kind, "text/plain")
-        )
         inline = None  # offloaded
 
     async with async_session_maker() as db:
@@ -105,6 +102,23 @@ async def save_file(
         # "_edited" copy instead so the user can review/diff/adopt it.
         # Agent-authored files and user-driven edits are unaffected.
         if f is not None and f.created_by_agent is None and agent_id is not None:
+            # Content-unchanged shortcut: the watcher re-syncs a file right
+            # after the API wrote the user's edit back to the workspace disk
+            # (patch_file syncs DB → disk). At that point disk == DB, so
+            # creating an "_edited" copy would be pure noise. Only protect
+            # when the agent's content actually differs from the stored one.
+            old_content = f.content
+            if old_content is None and f.storage_key:
+                try:
+                    old_content = await asyncio.to_thread(object_storage.get, f.storage_key)
+                    if isinstance(old_content, bytes):
+                        old_content = old_content.decode("utf-8", "ignore")
+                except Exception:
+                    old_content = None
+            if (old_content or "").strip() == (content or "").strip():
+                await db.commit()
+                await db.refresh(f)
+                return f
             logger.info(
                 "Agent %s writing user-uploaded file %s — creating _edited copy "
                 "instead of overwriting (version %d preserved)",
@@ -124,6 +138,10 @@ async def save_file(
                 current_version=1,
             )
             db.add(edited)
+            if settings.storage_backend == "minio" and storage_key:
+                await asyncio.to_thread(
+                    object_storage.put, storage_key, data, _CONTENT_TYPE.get(kind, "text/plain")
+                )
             await db.commit()
             await db.refresh(edited)
             return edited
@@ -192,6 +210,14 @@ async def save_file(
             f.storage_key = storage_key
             f.size_bytes = size
             f.current_version += 1
+        # Upload AFTER the change-detection/versioning logic above: PUT
+        # overwrites the object, so reading the "old" content after the PUT
+        # would always see the new bytes and every write would look
+        # unchanged — silently skipping the version snapshot forever.
+        if settings.storage_backend == "minio" and storage_key:
+            await asyncio.to_thread(
+                object_storage.put, storage_key, data, _CONTENT_TYPE.get(kind, "text/plain")
+            )
         await db.commit()
         await db.refresh(f)
         return f
