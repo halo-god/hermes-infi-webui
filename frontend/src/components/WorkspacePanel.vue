@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from "vue";
 import Icon from "@/components/Icon.vue";
 import { renderMarkdown, renderMarkdownAsync } from "@/utils/markdown";
+import { computeLineDiff, colorDiff } from "@/utils/diff";
 import type { FileItem, WsAdapter, WorkspaceFileVersion } from "@/types";
 
 const props = defineProps<{
@@ -102,7 +103,9 @@ const fullscreen = ref(false);
 const showVersions = ref(false);
 const versions = ref<WorkspaceFileVersion[]>([]);
 const versionsLoading = ref(false);
-const previewVersion = ref<{ num: number; content: string } | null>(null);
+const previewVersion = ref<{ num: number; content: string; diff: string | null } | null>(null);
+/** Preview mode: true = unified diff vs current content, false = raw content. */
+const showPreviewDiff = ref(true);
 const newFileBadges = ref<Set<string>>(new Set());
 const uploadInput = ref<HTMLInputElement | null>(null);
 const uploading = ref(false);
@@ -352,7 +355,14 @@ async function toggleVersions() {
 }
 async function previewVer(v: WorkspaceFileVersion) {
   if (!activeFile.value) return;
-  previewVersion.value = { num: v.version_num, content: v.content || "" };
+  // Diff direction: old version → current content, so "+" lines are what the
+  // current version added and "-" lines what it removed since this snapshot.
+  previewVersion.value = {
+    num: v.version_num,
+    content: v.content || "",
+    diff: computeLineDiff(v.content || "", content.value || ""),
+  };
+  showPreviewDiff.value = true;
 }
 async function restoreVer(v: WorkspaceFileVersion) {
   if (!activeFile.value || saving.value || !props.adapter.restoreVersion) return;
@@ -568,7 +578,16 @@ function fmtDate(s: string) {
             </div>
           </div>
           <div v-if="previewVersion" class="ws-ver-preview-banner">
-            预览 v{{ previewVersion.num }} — <button class="ws-btn" @click="previewVersion = null">退出预览</button>
+            <span>预览 v{{ previewVersion.num }}</span>
+            <button
+              class="ws-btn"
+              :class="{ active: showPreviewDiff && previewVersion.diff }"
+              :disabled="!previewVersion.diff"
+              @click="showPreviewDiff = !showPreviewDiff"
+            >
+              Diff 对比
+            </button>
+            <button class="ws-btn" @click="previewVersion = null">退出预览</button>
           </div>
         </div>
 
@@ -590,9 +609,15 @@ function fmtDate(s: string) {
 
           <!-- File previews -->
           <template v-else-if="activeFile">
+            <!-- Version diff vs current content (previewing an old snapshot) -->
+            <div
+              v-if="previewVersion && showPreviewDiff && previewVersion.diff"
+              class="code-preview version-diff"
+              v-html="colorDiff(previewVersion.diff)"
+            />
             <!-- Markdown -->
             <div
-              v-if="fileMode(activeFile) === 'md'"
+              v-else-if="fileMode(activeFile) === 'md'"
               class="md-preview"
               v-html="mdHtml"
             />
@@ -934,6 +959,9 @@ function fmtDate(s: string) {
 .code-preview :deep(.hl-str) { color: #8aaf62; }
 .code-preview :deep(.hl-kw) { color: #c89a4a; font-weight: 600; }
 .code-preview :deep(.hl-num) { color: #7ab0d8; }
+/* Version snapshot diff view: keep +/- prefix visible with per-line tinting */
+.version-diff { user-select: text; }
+.version-diff :deep(.diff-add), .version-diff :deep(.diff-del) { display: block; border-radius: 3px; }
 
 /* JSON / txt */
 .json-preview, .txt-preview {
