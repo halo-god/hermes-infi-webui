@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, computed, nextTick } from "vue";
+import { ref, watch, computed, nextTick, onMounted, onUnmounted } from "vue";
 import ModalShell from "@/components/ModalShell.vue";
 import type { ConfirmationRequest } from "@/types";
 
@@ -18,6 +18,20 @@ const freeText = ref("");
 const textInput = ref<HTMLInputElement | null>(null);
 
 const isMultiQuestion = computed(() => (props.request?.questions?.length || 0) > 1);
+
+// Number keys 1-9 select the matching option directly (only while the modal
+// is visible and the free-text input is not focused).
+function onGlobalKeydown(e: KeyboardEvent) {
+  if (!props.request) return;
+  const target = e.target as HTMLElement | null;
+  if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
+  const n = Number(e.key);
+  if (n >= 1 && n <= currentOptions.value.length) {
+    selectOption(currentOptions.value[n - 1]);
+  }
+}
+onMounted(() => window.addEventListener("keydown", onGlobalKeydown));
+onUnmounted(() => window.removeEventListener("keydown", onGlobalKeydown));
 
 const currentQ = computed(() => {
   if (props.request?.questions?.length) {
@@ -114,12 +128,13 @@ const modalTitle = computed(() => {
       <!-- Options list -->
       <div v-if="hasOptions" class="cf-options">
         <button
-          v-for="opt in currentOptions"
+          v-for="(opt, i) in currentOptions"
           :key="opt"
           class="cf-option"
           @click="selectOption(opt)"
         >
-          <span class="cf-option-dot" />
+          <span v-if="i < 9" class="cf-option-key">{{ i + 1 }}</span>
+          <span v-else class="cf-option-dot" />
           <span>{{ opt }}</span>
         </button>
       </div>
@@ -188,13 +203,33 @@ const modalTitle = computed(() => {
   color: var(--ink);
   text-align: left;
   cursor: pointer;
-  transition: background 120ms, border-color 120ms;
+  transition: background 120ms, border-color 120ms, transform 80ms;
   border: 1px solid transparent;
   background: transparent;
 }
 .cf-option:hover {
   background: var(--accent-tint);
   border-color: var(--accent-soft);
+}
+.cf-option:active { transform: scale(0.985); }
+.cf-option-key {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-deep);
+  background: var(--accent-tint);
+  border: 1px solid var(--accent-soft);
+  flex-shrink: 0;
+  transition: background 120ms, color 120ms;
+}
+.cf-option:hover .cf-option-key {
+  background: var(--accent);
+  color: var(--ink-on-accent);
+  border-color: var(--accent);
 }
 .cf-option-dot {
   width: 6px;
