@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 
 from redis.exceptions import ResponseError
 
-from sqlalchemy import func, select, text as sa_text
+from sqlalchemy import select
 
 from app.config import settings
 from app.core.logging import configure_logging
@@ -398,24 +398,25 @@ class Runner:
         an eternal spinner and the conversation can't continue cleanly.
         """
         from datetime import timedelta
+        from sqlalchemy import select as sa_sel
         from sqlalchemy import update as sa_upd
         async with async_session_maker() as db:
             cutoff = datetime.now(timezone.utc) - timedelta(minutes=2)
-            res = await db.execute(
-                sa_upd(Message)
-                .where(Message.status == "streaming", Message.updated_at < cutoff)
-                .values(
-                    status="error",
-                    content=func.jsonb_set(
-                        func.coalesce(Message.content, {}),
-                        "{text}",
-                        sa_text('"⚠ 生成中断（服务重启）"'),
-                        create_missing=True,
-                    ),
+            rows = await db.execute(
+                sa_sel(Message.id, Message.content).where(
+                    Message.status == "streaming", Message.updated_at < cutoff
                 )
-                .returning(Message.id)
             )
-            ids = [row[0] for row in res.all()]
+            ids: list = []
+            for mid, content in rows.all():
+                content = dict(content or {})
+                content["text"] = "⚠ 生成中断（服务重启）"
+                await db.execute(
+                    sa_upd(Message)
+                    .where(Message.id == mid)
+                    .values(status="error", content=content)
+                )
+                ids.append(mid)
             if ids:
                 await db.commit()
                 logger.warning("Reclaimed %d stuck streaming message(s)", len(ids))

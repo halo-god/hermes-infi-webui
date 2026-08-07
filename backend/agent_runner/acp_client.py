@@ -144,6 +144,13 @@ class ACPClient:
             stderr=asyncio.subprocess.PIPE,
             preexec_fn=sandbox.preexec_fn(),
             env=spawn_env,
+            # StreamReader line limit. Agents stream large single-line JSON-RPC
+            # frames (a full assistant message chunk can exceed the 64 KiB
+            # default when the model emits a big batch of tokens at once) —
+            # readline() raises ValueError past the limit and would kill the
+            # read loop. 16 MiB gives generous headroom; _read_loop still
+            # tolerates the unlikely over-limit case defensively.
+            limit=16 * 1024 * 1024,
         )
         self._reader_task = asyncio.create_task(self._read_loop())
         # Drain stderr so a chatty real CLI can't deadlock on a full pipe buffer.
@@ -373,7 +380,16 @@ class ACPClient:
         assert self._proc and self._proc.stdout
         try:
             while not self._closed:
-                line = await self._proc.stdout.readline()
+                try:
+                    line = await self._proc.stdout.readline()
+                except ValueError:
+                    # A single frame exceeded the StreamReader line limit.
+                    # The over-limit bytes are already consumed, so the stream
+                    # position is still valid — skip the frame and keep going
+                    # instead of crashing the read loop (which would fail the
+                    # in-flight turn with "subprocess closed").
+                    logger.warning("ACP frame exceeded line limit; skipping oversized line")
+                    continue
                 if not line:
                     break
                 line = line.strip()
