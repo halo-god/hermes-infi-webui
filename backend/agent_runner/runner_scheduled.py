@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import uuid
 
 from agent_runner.acp_client import ACPClient, ACPTimeout
@@ -111,6 +112,40 @@ async def _sync_workspace_files(cwd: str, conv_id: uuid.UUID, agent_id: str) -> 
                 logger.info("Scheduled run synced workspace file: %s", rel)
             except Exception:
                 logger.exception("Failed to sync scheduled workspace file: %s", rel)
+
+
+_MEDIA_RE = re.compile(r"MEDIA:(\S+)")
+_MEDIA_MAX_BYTES = 5 * 1024 * 1024
+
+
+async def _sync_media_files(response: str, cwd: str, conv_id: uuid.UUID, agent_id: str) -> None:
+    """Pull files the agent pointed at with ``MEDIA:/abs/path`` into the
+    conversation workspace. Scheduled agents often run external scripts whose
+    output lands outside cwd (e.g. ~/Downloads), so those files never show up
+    in the workspace panel without this. Text-like files only; anything bigger
+    than _MEDIA_MAX_BYTES or not decodable as UTF-8 is skipped."""
+    for m in _MEDIA_RE.finditer(response or ""):
+        raw = m.group(1).strip().strip("`'\"")
+        if not raw or raw.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".zip")):
+            continue
+        path = raw if os.path.isabs(raw) else os.path.join(cwd, raw)
+        if not await asyncio.to_thread(os.path.isfile, path):
+            continue
+        if await asyncio.to_thread(os.path.getsize, path) > _MEDIA_MAX_BYTES:
+            logger.info("Skipping oversized MEDIA file: %s", path)
+            continue
+        rel = os.path.basename(path)
+        try:
+            with open(path, "r", encoding="utf-8", errors="strict") as fh:
+                content = fh.read()
+        except (UnicodeDecodeError, OSError):
+            logger.info("Skipping non-text MEDIA file: %s", path)
+            continue
+        try:
+            await storage.save_file(conv_id, rel, content, agent_id, None)
+            logger.info("Scheduled run synced MEDIA file: %s", rel)
+        except Exception:
+            logger.exception("Failed to sync MEDIA file: %s", path)
 
 
 async def _notify_user(user_id: str, conversation_id: uuid.UUID, title: str, snippet: str) -> None:
@@ -238,6 +273,7 @@ async def handle_scheduled(task: dict, agents: dict) -> None:
         # any DB row — sync them so the workspace panel shows them).
         try:
             await _sync_workspace_files(cwd, conv_id, agent_id)
+            await _sync_media_files(response, cwd, conv_id, agent_id)
         except Exception:
             logger.exception("scheduled workspace sync failed for %s", task_id[:8])
 
