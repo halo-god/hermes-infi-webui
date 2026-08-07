@@ -954,7 +954,10 @@ function doDeleteFolder() {
 }
 .convo-tabs > button:hover { color: var(--ink-soft); }
 .convo-tabs > button.active {
-  background: var(--bg-card);
+  /* --bg-panel is overridden to a dark tone by the dark atmos themes
+     (night/ink) but stays white under light themes; --accent-tint can't be
+     used here because branding.ts inlines it as pure white on <html>. */
+  background: var(--bg-panel);
   color: var(--ink);
   box-shadow: var(--shadow-sm);
 }
