@@ -97,13 +97,15 @@
     font-weight: 600;
     flex-shrink: 0;
   }
-  /* Top/bottom borders on the three scrollable list blocks so teams / group
-     chats / conversations are clearly separated from each other and from the
-     surrounding nav / footer areas. */
-  .side .team-scroll,
-  .side .convo-list {
-    border-top: 1px solid var(--rule);
-    border-bottom: 1px solid var(--rule);
+  /* Section separators: soft gradient lines whose ends fade out and stay
+     clear of the edges — more visible than a full-width 1px border (which
+     was nearly invisible against --rule) and rounder in feel. */
+  .side-sep {
+    height: 1px;
+    margin: 2px 14px 4px;
+    flex-shrink: 0;
+    background: linear-gradient(90deg, transparent 0%, var(--ink-faint) 18%, var(--ink-faint) 82%, transparent 100%);
+    border: none;
   }
   .side-label button {
     color: var(--ink-mute);

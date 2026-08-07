@@ -498,6 +498,8 @@ function doDeleteFolder() {
         </div>
       </div>
 
+      <div class="side-sep" />
+
       <div class="side-label">
         {{ t('nav.teams') }}
         <button :title="t('nav.newTeam')" @click="showNewTeam = true">+</button>
@@ -515,6 +517,8 @@ function doDeleteFolder() {
         </div>
         <div v-if="!chat.teams.length" style="padding: 4px 12px; font-size: 12px; color: var(--ink-mute)">还没有团队</div>
       </div>
+
+      <div class="side-sep" />
 
       <!-- Conversation tabs: personal + group unified -->
       <div class="convo-tabs">
@@ -825,6 +829,8 @@ function doDeleteFolder() {
           {{ chat.loadingMoreConvos ? '加载中…' : '' }}
         </div>
       </div>
+
+      <div class="side-sep" />
 
       <div class="side-foot" v-if="auth.user">
         <div v-if="isAdmin" class="side-row" :class="{ active: route.name === 'admin' }" @click="router.push('/admin')">
