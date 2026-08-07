@@ -1845,6 +1845,11 @@ async def update_file_content(
             author=author,
         )
         db.add(ver)
+    # The user just edited (or restored) this file — transfer ownership from
+    # the agent so storage.save_file's user-file protection kicks in: an
+    # agent writing the same path afterwards creates an "_edited" copy
+    # instead of silently overwriting the user's changes.
+    f.created_by_agent = None
     # Keep only the latest 10 versions
     old_versions = (
         await db.execute(
