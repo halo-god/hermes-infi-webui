@@ -890,11 +890,12 @@ function fmtDate(s: string) {
 
 /* Markdown */
 .md-preview { max-width: 680px; margin: 0 auto; color: var(--ink); font-size: 13.5px; line-height: 1.7; }
+.md-preview :deep(p) { margin: 0 0 8px; }
 .md-preview :deep(h1) { font-family: var(--font-serif); font-size: 24px; margin: 0 0 10px; }
-.md-preview :deep(h2) { font-family: var(--font-serif); font-size: 18px; margin: 20px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--rule); }
-.md-preview :deep(h3) { font-size: 15px; margin: 14px 0 6px; }
-.md-preview :deep(ul), .md-preview :deep(ol) { padding-left: 20px; }
-.md-preview :deep(li) { margin-bottom: 4px; }
+.md-preview :deep(h2) { font-family: var(--font-serif); font-size: 18px; margin: 16px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--rule); }
+.md-preview :deep(h3) { font-size: 15px; margin: 12px 0 6px; }
+.md-preview :deep(ul), .md-preview :deep(ol) { padding-left: 20px; margin: 2px 0 6px; }
+.md-preview :deep(li) { margin-bottom: 3px; }
 .md-preview :deep(li > p) { margin: 0; }
 .md-preview :deep(li > p + p) { margin-top: 8px; }
 .md-preview :deep(blockquote) { border-left: 3px solid var(--accent); padding-left: 12px; color: var(--ink-mute); font-style: italic; margin: 0 0 12px; }

@@ -140,6 +140,75 @@ function postProcessCiteRefs(html: string): string {
   return html;
 }
 
+// ── Single-paragraph list items ──
+// A list becomes "loose" the moment any item contains a blank line, and
+// markdown-it then wraps EVERY item's content in <p>. LLM output is full of
+// trailing blank lines / multi-line items, so nearly every list ends up loose
+// and gains paragraph-level spacing. When an item holds exactly one paragraph
+// and no other block content, drop the <p> wrapper — independent of the
+// list-level loose/tight flag. Multi-paragraph items keep their <p> so the
+// paragraph break inside the item stays visible.
+const defaultParagraphOpen =
+  md.renderer.rules.paragraph_open ||
+  function (tokens: any[], idx: number, options: any, _env: any, self: any) {
+    return self.renderToken(tokens, idx, options);
+  };
+const defaultParagraphClose =
+  md.renderer.rules.paragraph_close ||
+  function (tokens: any[], idx: number, options: any, _env: any, self: any) {
+    return self.renderToken(tokens, idx, options);
+  };
+
+function isLoneParagraphItem(tokens: any[], idx: number): boolean {
+  // Find the enclosing list_item_open (tokens[idx] is a paragraph_open)
+  let closes = 0;
+  let itemOpen = -1;
+  for (let i = idx - 1; i >= 0; i--) {
+    const t = tokens[i];
+    if (t.type === "list_item_close") closes++;
+    else if (t.type === "list_item_open") {
+      if (closes === 0) { itemOpen = i; break; }
+      closes--;
+    }
+  }
+  if (itemOpen === -1) return false;
+  // Find this item's matching list_item_close
+  let opens = 0;
+  let itemEnd = tokens.length;
+  for (let i = itemOpen + 1; i < tokens.length; i++) {
+    if (tokens[i].type === "list_item_open") opens++;
+    else if (tokens[i].type === "list_item_close") {
+      if (opens === 0) { itemEnd = i; break; }
+      opens--;
+    }
+  }
+  // The item must contain exactly one paragraph and no other block content.
+  // Counting paragraph_open tokens (rather than scanning up to `idx`) keeps
+  // the check identical whether called from paragraph_open or _close.
+  let paragraphCount = 0;
+  for (let i = itemOpen + 1; i < itemEnd; i++) {
+    const t = tokens[i];
+    if (t.type === "paragraph_open") paragraphCount++;
+    else if (
+      t.type === "blockquote_open" || t.type === "list_open" || t.type === "code_block" ||
+      t.type === "fence" || t.type === "table_open" || t.type === "hr" || t.type === "heading_open"
+    ) {
+      return false;
+    }
+    // inline / text / softbreak / paragraph_close tokens are fine
+  }
+  return paragraphCount === 1;
+}
+
+md.renderer.rules.paragraph_open = function (tokens, idx, options, env, self) {
+  if (isLoneParagraphItem(tokens, idx)) return "";
+  return defaultParagraphOpen(tokens, idx, options, env, self);
+};
+md.renderer.rules.paragraph_close = function (tokens, idx, options, env, self) {
+  if (isLoneParagraphItem(tokens, idx)) return "";
+  return defaultParagraphClose(tokens, idx, options, env, self);
+};
+
 // ── Code copy button + language label ──
 const defaultFence =
   md.renderer.rules.fence ||
@@ -222,6 +291,23 @@ function collapseNewlines(text: string): string {
   return text.replace(/\n{3,}/g, "\n\n");
 }
 
+// ── Pre-processing: strip trailing spaces (hard line breaks) ──
+// CommonMark turns two trailing spaces into a <br> hard break even with
+// `breaks: false`. LLM output frequently carries trailing spaces from
+// copy-paste/alignment, which then renders as unwanted extra line breaks.
+// Strip trailing whitespace outside fenced code blocks (where trailing
+// spaces are semantically meaningful).
+function stripTrailingSpaces(text: string): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let inFence = false;
+  for (const line of lines) {
+    if (/^\s*(?:`{3,}|~{3,})/.test(line)) inFence = !inFence;
+    out.push(inFence ? line : line.trimEnd());
+  }
+  return out.join("\n");
+}
+
 // ── Pre-processing: tighten loose lists ──
 // LLMs habitually put a blank line between list items. CommonMark then treats
 // the list as "loose" and wraps each item's text in its own <p>, which reads
@@ -255,7 +341,7 @@ function tightenLooseLists(text: string): string {
 }
 
 function preprocess(src: string): string {
-  return tightenLooseLists(collapseNewlines(src || ""));
+  return tightenLooseLists(stripTrailingSpaces(collapseNewlines(src || "")));
 }
 
 // ── Main export ──

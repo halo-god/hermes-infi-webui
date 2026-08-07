@@ -3708,15 +3708,15 @@ body[data-atmos="cinnabar"] {
     font-weight: 600; color: var(--ink); line-height: 1.25;
   }
   .md-body h1 { font-size: 21px; margin: 4px 0 10px; }
-  .md-body h2 { font-size: 18px; margin: 18px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--rule-soft); }
-  .md-body h3 { font-size: 15.5px; margin: 14px 0 6px; }
-  .md-body h4, .md-body h5, .md-body h6 { font-size: 14px; margin: 12px 0 5px; }
+  .md-body h2 { font-size: 18px; margin: 14px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--rule-soft); }
+  .md-body h3 { font-size: 15.5px; margin: 12px 0 6px; }
+  .md-body h4, .md-body h5, .md-body h6 { font-size: 14px; margin: 10px 0 5px; }
   .md-body strong { font-weight: 700; color: var(--ink); }
   .md-body em { font-style: italic; }
   .md-body del { color: var(--ink-mute); }
   .md-body a { color: var(--accent-deep); text-decoration: underline; text-underline-offset: 2px; }
   .md-body a:hover { color: var(--accent); }
-  .md-body ul, .md-body ol { margin: 2px 0 8px; padding-left: 22px; }
+  .md-body ul, .md-body ol { margin: 2px 0 6px; padding-left: 22px; }
   .md-body ul { list-style: none; padding-left: 4px; }
   .md-body ul > li { position: relative; padding-left: 18px; margin-bottom: 2px; }
   .md-body ul > li::before {
