@@ -959,9 +959,13 @@ function fmtDate(s: string) {
 .code-preview :deep(.hl-str) { color: #8aaf62; }
 .code-preview :deep(.hl-kw) { color: #c89a4a; font-weight: 600; }
 .code-preview :deep(.hl-num) { color: #7ab0d8; }
-/* Version snapshot diff view: keep +/- prefix visible with per-line tinting */
+/* Version snapshot diff view: keep +/- prefix visible with per-line tinting.
+   :deep() is required — colorDiff's output is injected via v-html, so the
+   scoped [data-v] attribute never lands on those spans. */
 .version-diff { user-select: text; }
-.version-diff :deep(.diff-add), .version-diff :deep(.diff-del) { display: block; border-radius: 3px; }
+.version-diff :deep(.diff-add) { display: block; background: rgba(80, 160, 80, 0.2); color: #7fcf7f; border-radius: 3px; }
+.version-diff :deep(.diff-del) { display: block; background: rgba(180, 60, 60, 0.2); color: #cf7f7f; border-radius: 3px; }
+.version-diff :deep(.diff-ctx) { color: #9a9080; }
 
 /* JSON / txt */
 .json-preview, .txt-preview {
