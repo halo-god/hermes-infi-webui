@@ -65,6 +65,7 @@ async def _get_or_create_conversation(db, task: ScheduledTask, user_id: str) -> 
 
 async def _save_result(
     conversation_id: uuid.UUID, agent_id: str, text: str, task_id: str,
+    profile_id: str | None = None,
 ) -> None:
     """Persist the agent's response as a message in the task's conversation."""
     async with async_session_maker() as db:
@@ -72,6 +73,7 @@ async def _save_result(
             conversation_id=conversation_id,
             role="agent",
             agent_id=agent_id,
+            profile_id=uuid.UUID(profile_id) if profile_id else None,
             content={"text": text, "scheduled_task_id": task_id},
             status="complete",
         )
@@ -206,7 +208,7 @@ async def handle_scheduled(task: dict, agents: dict) -> None:
             content = response
             if buf["steps"]:
                 content += "\n\n---\n"
-            await _save_result(conv_id, agent_id, content, task_id)
+            await _save_result(conv_id, agent_id, content, task_id, profile_id)
             await _notify_user(user_id, conv_id, f"⏰ {task_name} 已完成", response[:100])
             await _update_status(task_id, "success")
         else:
@@ -217,7 +219,7 @@ async def handle_scheduled(task: dict, agents: dict) -> None:
 
     except ACPTimeout:
         logger.warning("scheduled task %s timed out", task_id[:8])
-        await _save_result(conv_id, agent_id, "（执行超时）", task_id)
+        await _save_result(conv_id, agent_id, "（执行超时）", task_id, profile_id)
         await _notify_user(user_id, conv_id, f"⏰ {task_name} 超时", "任务执行超时")
         await _update_status(task_id, "failed")
     except asyncio.CancelledError:
