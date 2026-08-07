@@ -13,6 +13,7 @@ import uuid
 
 from agent_runner.acp_client import ACPClient, ACPTimeout
 from agent_runner.acp_client import auto_deny_permission
+from agent_runner import storage
 from app.config import settings
 from app.core import redis as R
 from app.db.base import async_session_maker
@@ -86,6 +87,32 @@ async def _save_result(
         await db.commit()
 
 
+async def _sync_workspace_files(cwd: str, conv_id: uuid.UUID, agent_id: str) -> None:
+    """Register files the agent produced during this scheduled run into the
+    conversation workspace (DB + MinIO) so the workspace panel lists them —
+    scheduled runs have no workspace_watcher, so without this the files stay
+    invisible even though they live in the conversation's workspace dir."""
+    from app.core.files import safe_relative_path
+
+    for dirpath, dirnames, filenames in os.walk(cwd):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for fn in filenames:
+            if fn.startswith(".") or fn.endswith((".tmp", ".hermes")):
+                continue
+            full = os.path.join(dirpath, fn)
+            rel = safe_relative_path(os.path.relpath(full, cwd))
+            try:
+                with open(full, "r", encoding="utf-8", errors="ignore") as fh:
+                    content = fh.read()
+            except Exception:
+                continue
+            try:
+                await storage.save_file(conv_id, rel, content, agent_id, None)
+                logger.info("Scheduled run synced workspace file: %s", rel)
+            except Exception:
+                logger.exception("Failed to sync scheduled workspace file: %s", rel)
+
+
 async def _notify_user(user_id: str, conversation_id: uuid.UUID, title: str, snippet: str) -> None:
     """Send a cross-conversation notification so the user sees a toast + badge."""
     try:
@@ -152,7 +179,10 @@ async def handle_scheduled(task: dict, agents: dict) -> None:
         await _notify_user(user_id, conv_id, f"⏰ {task_name} 执行失败", "没有可用的 Agent")
         return
 
-    cwd = os.path.join(settings.workspace_root, f"sched-{task_id}")
+    # Work in the conversation's own workspace dir (same layout as normal
+    # chats) so files the agent produces land where the workspace panel
+    # expects them — not in a separate sched-{task_id} dir.
+    cwd = os.path.join(settings.workspace_root, str(conv_id))
     os.makedirs(cwd, exist_ok=True)
 
     buf = {"text": "", "steps": []}
@@ -203,6 +233,14 @@ async def handle_scheduled(task: dict, agents: dict) -> None:
             task_id[:8], len(response), len(buf["steps"]),
         )
 
+        # Register files the agent produced into the conversation workspace
+        # (files written via execute_code/terminal land on disk in cwd without
+        # any DB row — sync them so the workspace panel shows them).
+        try:
+            await _sync_workspace_files(cwd, conv_id, agent_id)
+        except Exception:
+            logger.exception("scheduled workspace sync failed for %s", task_id[:8])
+
         # Persist the result + notify.
         if response:
             content = response
@@ -227,7 +265,7 @@ async def handle_scheduled(task: dict, agents: dict) -> None:
         raise
     except Exception as exc:  # noqa: BLE001
         logger.exception("scheduled task %s failed: %s", task_id[:8], exc)
-        await _save_result(conv_id, agent_id, f"（执行失败：{exc.__class__.__name__}）", task_id)
+        await _save_result(conv_id, agent_id, f"（执行失败：{exc.__class__.__name__}）", task_id, profile_id)
         await _notify_user(user_id, conv_id, f"⏰ {task_name} 执行失败", str(exc)[:100])
         await _update_status(task_id, "failed")
     finally:
