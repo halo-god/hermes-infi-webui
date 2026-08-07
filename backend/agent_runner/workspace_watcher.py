@@ -342,15 +342,19 @@ class WorkspaceWatcher:
 
                 rel = os.path.relpath(path, self.cwd)
                 rel = safe_relative_path(rel)
-                msg_id = self.get_current_msg_id() or self.message_id
+                # Scanned files are pre-existing history, NOT artifacts of the
+                # current turn — keep message_id unset so the API enrichment
+                # (_enrich_messages_with_files) does not attach them to the
+                # active message as if this turn produced them.
+                msg_id = None
 
                 try:
-                    f = await storage.save_file(
+                    await storage.save_file(
                         uuid.UUID(self.conversation_id),
                         rel,
                         content,
                         self.agent_id,
-                        uuid.UUID(msg_id),
+                        msg_id,
                     )
                 except Exception:
                     logger.exception("scan_existing failed to save file: %s", path)
@@ -358,21 +362,11 @@ class WorkspaceWatcher:
 
                 synced_count += 1
                 logger.info("Scanned file synced to workspace: %s", rel)
-
-                try:
-                    await self.publish_event(
-                        {
-                            "type": "file",
-                            "message_id": msg_id,
-                            "file_id": str(f.id),
-                            "name": f.name,
-                            "kind": f.kind,
-                            "version": f.current_version,
-                            "diff": None,
-                        }
-                    )
-                except Exception:
-                    logger.exception("Failed to publish file event for scanned file")
+                # NOTE: no "file" event here. scan_existing runs at turn start
+                # and would otherwise attach every historical workspace file to
+                # the current message, flooding the message with stale file
+                # chips. Only files actually written during this turn (runtime
+                # _sync_path) publish events.
 
         logger.info(
             "Scan complete for %s: %d file(s) synced",
