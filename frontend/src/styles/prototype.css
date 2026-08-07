@@ -2460,6 +2460,7 @@ body[data-atmos="cinnabar"] {
   body[data-atmos="ink"] .send-btn { color: #0c1016; }
   body[data-atmos="ink"] .send-btn.armed { background: var(--accent); }
   body[data-atmos="ink"] .msg.user .msg-bubble { background: var(--accent-tint); border-color: var(--accent-soft); }
+  body[data-atmos="ink"] .msg.agent .msg-bubble { background: rgba(78,203,192,0.08); }
   body[data-atmos="ink"] .brand-mark { background: linear-gradient(180deg, #1a2330, #0b0f15); color: var(--accent); }
   body[data-atmos="ink"] .table-row.head,
   body[data-atmos="ink"] .ut-row.head,
