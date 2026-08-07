@@ -122,6 +122,12 @@ class ACPClient:
         self._pending: dict[int, asyncio.Future] = {}
         self._session_id: str | None = None
         self._closed = False
+        # True while a session/load or session/resume request is in flight.
+        # Some agents (hermes-cli) replay the persisted transcript as
+        # session/update notifications before answering the request — those
+        # chunks are history, not new output, and must not reach on_update
+        # (the runner would accumulate them into the current turn).
+        self._suppress_updates = False
 
     # ── lifecycle ──
     async def start(self) -> None:
@@ -216,9 +222,9 @@ class ACPClient:
 
     async def load_session(self, session_id: str, cwd: str, mcp_servers: list | None = None) -> str:
         """Load an existing session (replays history via session/update)."""
-        await self._request(
+        await self._silent_request(
             "session/load",
-            {"sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers or []},
+            {"sessionId": session_id, "cwd": cwd, "mcp_servers": mcp_servers or []},
             timeout=SESSION_TIMEOUT,
         )
         self._session_id = session_id
@@ -226,13 +232,27 @@ class ACPClient:
 
     async def resume_session(self, session_id: str, cwd: str, mcp_servers: list | None = None) -> str:
         """Resume an existing session without replaying history."""
-        await self._request(
+        await self._silent_request(
             "session/resume",
-            {"sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers or []},
+            {"sessionId": session_id, "cwd": cwd, "mcp_servers": mcp_servers or []},
             timeout=SESSION_TIMEOUT,
         )
         self._session_id = session_id
         return self._session_id
+
+    async def _silent_request(self, method: str, params: dict, timeout: float) -> dict:
+        """Request whose window suppresses session/update notifications.
+
+        session/load and session/resume replies are preceded by the agent
+        replaying the persisted transcript (user + assistant chunks) — history
+        the client already has. Suppress the callbacks so replayed text never
+        leaks into the current turn's accumulated message.
+        """
+        self._suppress_updates = True
+        try:
+            return await self._request(method, params, timeout=timeout)
+        finally:
+            self._suppress_updates = False
 
     async def fork_session(self, session_id: str, cwd: str, mcp_servers: list | None = None) -> str:
         """Fork (branch) an existing session into a new one with copied history."""
@@ -514,6 +534,9 @@ class ACPClient:
 
         # Notification FROM agent.
         if method == "session/update":
+            if self._suppress_updates:
+                # History replay inside session/load|resume — not new output.
+                return
             if self.on_update:
                 try:
                     await self.on_update(params.get("update") or params)
