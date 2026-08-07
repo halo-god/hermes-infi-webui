@@ -538,8 +538,11 @@ class Runner:
                 TASK_DURATION.labels(type=task_type).observe(duration)
                 if attempt < MAX_RETRIES:
                     next_attempt = attempt + 1
-                    logger.warning("Task %s failed (retry %d/%d): %s",
-                                   entry_id, next_attempt, MAX_RETRIES, exc)
+                    logger.warning(
+                        "Task %s failed (retry %d/%d): %s",
+                        entry_id, next_attempt, MAX_RETRIES, exc,
+                        exc_info=True,
+                    )
                     # Exponential backoff before re-enqueue to avoid fail-fast storms
                     delay = min(RETRY_BACKOFF_BASE ** next_attempt, 60)
                     await asyncio.sleep(delay)
