@@ -22,11 +22,13 @@ class FakeACPClient:
 
     def __init__(
         self, command, cwd, *, protocol_version=1, on_update=None, on_fs_write=None, env=None,
+        on_permission_request=None,
     ):
         self.command = command
         self.cwd = cwd
         self.on_update = on_update
         self.on_fs_write = on_fs_write
+        self.on_permission_request = on_permission_request
         self.env = env
         self._closed = False
         self._proc = FakeProc()
@@ -74,13 +76,14 @@ async def test_profile_dir_sets_hermes_home(pool, tmp_path):
     prof.mkdir(parents=True)
     c, sid = await pool.get("conv1", ["hermes", "acp"], "/tmp", _noop_update, _noop_fs,
                             profile_dir=str(prof))
-    assert c.env == {"HERMES_HOME": str(prof)}
+    assert c.env is not None and c.env["HERMES_HOME"] == str(prof)
     assert sid is not None
 
 
 async def test_no_profile_inherits_default_env(pool):
     c, _ = await pool.get("conv1", ["hermes", "acp"], "/tmp", _noop_update, _noop_fs)
-    assert c.env is None
+    # profile_env always returns a dict; no profile → no HERMES_HOME override.
+    assert c.env is not None and "HERMES_HOME" not in c.env
 
 
 async def test_same_profile_reuses_client(pool, tmp_path):
@@ -105,7 +108,7 @@ async def test_profile_switch_respawns(pool, tmp_path):
                               profile_dir=str(b))
     assert c2 is not c1
     assert c1.stopped
-    assert c2.env == {"HERMES_HOME": str(b)}
+    assert c2.env is not None and c2.env["HERMES_HOME"] == str(b)
     assert sid2 is not None  # fresh session in the new profile
 
 
@@ -133,6 +136,11 @@ async def test_mcp_servers_change_respawns(pool):
 
 
 def test_profile_env_missing_dir_falls_back(tmp_path):
-    assert profile_env(None) is None
-    assert profile_env(str(tmp_path / "nope")) is None
-    assert profile_env(str(tmp_path)) == {"HERMES_HOME": str(tmp_path)}
+    # profile_env always returns a dict (advanced HERMES_* config); a missing
+    # dir simply means no HERMES_HOME override, never None.
+    env_none = profile_env(None)
+    assert isinstance(env_none, dict) and "HERMES_HOME" not in env_none
+    env_missing = profile_env(str(tmp_path / "nope"))
+    assert isinstance(env_missing, dict) and "HERMES_HOME" not in env_missing
+    env_ok = profile_env(str(tmp_path))
+    assert isinstance(env_ok, dict) and env_ok["HERMES_HOME"] == str(tmp_path)

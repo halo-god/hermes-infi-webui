@@ -2,7 +2,7 @@
 /* 1:1 port of the prototype team page (project/hermes-team.js), wired to the
    real API. Only the data wiring differs from the prototype; the markup/classes
    and UX structure are reproduced faithfully. */
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import Icon from "@/components/Icon.vue";
 import NewProjectModal from "@/components/NewProjectModal.vue";
@@ -41,8 +41,10 @@ const teamProfiles = ref<Profile[]>([]);
 const currentFolderId = ref<string | null>(null);
 const folderTrail = ref<{ id: string; name: string }[]>([]);
 const knowledgeItems = ref<Knowledge[]>([]);
-// P1-1 RAG: per-item chunk counts for the "已索引 N 块" badge. Keyed by item id.
+// P1-1 RAG: per-item chunk counts for the "已索引 N 块" badge + whether the
+// vector retrieval is actually on (server reports rag_enabled per request).
 const knowledgeChunks = ref<Record<string, number>>({});
+const ragEnabled = ref<boolean | null>(null);
 const loadingKnowledge = ref(false);
 const movingKnowledgeItem = ref<Knowledge | null>(null);
 
@@ -83,6 +85,19 @@ watch(() => route.params.id, async (newId, oldId) => {
     currentFolderId.value = null;
     folderTrail.value = [];
     await load();
+  }
+});
+// P1-3: deep-link support — ?tab=knowledge&file=<id> (from a knowledge chip
+// in chat) switches to the knowledge tab and opens the file in the panel.
+watch(() => route.query.tab, async (t) => {
+  if (t === "knowledge") {
+    tab.value = "knowledge";
+    await nextTick();
+    const fid = route.query.file as string | undefined;
+    if (fid) {
+      const item = knowledgeItems.value.find((i) => i.id === fid);
+      if (item && !item.is_folder) openKnowledgeFile(item.id);
+    }
   }
 });
 function closeMenus() {
@@ -137,6 +152,20 @@ async function loadKnowledge() {
   scheduleProcessingRefresh();
 }
 
+// P2-4: retry parsing/indexing of a failed knowledge item.
+const reprocessingId = ref<string | null>(null);
+async function reprocessKnowledgeItem(f: { id: string }) {
+  reprocessingId.value = f.id;
+  try {
+    await teamsApi.reprocessKnowledge(teamId.value, f.id);
+    await loadKnowledge();
+  } catch {
+    // global hermes:api-error toast covers the failure message
+  } finally {
+    reprocessingId.value = null;
+  }
+}
+
 let processingTimer: ReturnType<typeof setTimeout> | null = null;
 function scheduleProcessingRefresh() {
   if (processingTimer) { clearTimeout(processingTimer); processingTimer = null; }
@@ -154,7 +183,12 @@ function scheduleProcessingRefresh() {
 async function loadKnowledgeChunks() {
   const items = knowledgeItems.value.filter((f) => !f.is_folder);
   const entries = await Promise.all(
-    items.map((f) => teamsApi.knowledgeChunksCount(teamId.value, f.id).then((r) => [f.id, r.count] as const).catch(() => [f.id, 0] as const)),
+    items.map((f) => teamsApi.knowledgeChunksCount(teamId.value, f.id)
+      .then((r) => {
+        if (ragEnabled.value === null) ragEnabled.value = r.rag_enabled;
+        return [f.id, r.count] as const;
+      })
+      .catch(() => [f.id, 0] as const)),
   );
   knowledgeChunks.value = Object.fromEntries(entries);
 }
@@ -686,11 +720,17 @@ async function deleteTeam() {
                 <template v-else>
                   {{ fmtSize(f.size_bytes) }} · 由 {{ f.uploaded_by_name || "成员" }} 上传
                   <span v-if="knowledgeChunks[f.id]" style="color:var(--accent);font-weight:500" title="已建立向量索引">· 已索引 {{ knowledgeChunks[f.id] }} 块</span>
+                  <span v-else-if="ragEnabled === false" style="color:var(--ink-faint)" title="管理后台可开启向量检索">· 未启用向量检索</span>
+                  <span v-else-if="f.processing_status !== 'processing' && f.processing_status !== 'error'" style="color:var(--ink-faint)" title="内容为空或索引未生成">· 未索引</span>
                   <span v-if="f.processing_status === 'processing'" style="color:var(--ink-mute)" class="kb-processing-tag">
                     <span class="typing" style="transform:scale(0.5);display:inline-block;vertical-align:middle"><span></span><span></span><span></span></span>
                     文档解析中
                   </span>
-                  <span v-else-if="f.processing_status === 'error'" style="color:#c0392b">· 解析失败</span>
+                  <span v-else-if="f.processing_status === 'error'" style="color:#c0392b">· 解析失败
+                    <button class="retry-btn" :disabled="reprocessingId === f.id" @click.stop="reprocessKnowledgeItem(f)">
+                      {{ reprocessingId === f.id ? "重试中…" : "重试" }}
+                    </button>
+                  </span>
                 </template>
               </div>
             </div>

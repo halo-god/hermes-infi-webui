@@ -145,6 +145,11 @@ class WorkspaceWatcher:
             if existing:
                 existing.cancel()
 
+            # P6: a new write event means the file changed again — drop the
+            # dedup marker so this second write re-syncs (otherwise the DB
+            # content silently diverges from disk until the set truncates).
+            self._synced.discard(real_path)
+
             # Schedule a new debounced sync
             self._pending[real_path] = asyncio.get_event_loop().call_later(
                 _DEBOUNCE_SECONDS + _GRACE_SECONDS,

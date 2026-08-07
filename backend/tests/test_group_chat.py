@@ -282,12 +282,10 @@ async def test_mention_targets_own_profile_not_conversation_default(db):
 
 
 @pytest.mark.asyncio
-async def test_auto_reply_member_participates_without_mention(db):
-    """A GroupMember with auto_reply=True answers even when nobody @-mentioned
-    it, purely under channel_mode="mention" — no group-wide "always" needed.
-    A member that neither opted into auto_reply nor was mentioned must not
-    be targeted at all.
-    """
+async def test_auto_reply_no_longer_auto_participates(db):
+    """Since the mention-routing refactor, participation is driven purely by
+    @-mentions (auto_reply is a legacy flag that no longer pulls members in):
+    an unmentioned message with no auto-reply targeting must save-only."""
     owner = await _mk_user(db, "o9@h.io")
     team = await _mk_team_with_members(db, owner, [])
     group = await svc.get_or_create_team_group(db, team, owner.id)  # channel_mode="mention"
@@ -299,10 +297,10 @@ async def test_auto_reply_member_participates_without_mention(db):
     coder_member.auto_reply = True
     await db.flush()
 
-    _, reply = await svc.dispatch_group(db, group, "大家好", [], owner_id=owner.id)
-    assert reply is not None
-    assert reply.role == "agent"  # single target => single-agent branch, not roundtable
-    assert reply.agent_id == "coder"
+    # No @mention → save-only (auto_reply does not pull members in anymore).
+    user_msg, reply = await svc.dispatch_group(db, group, "大家好", [], owner_id=owner.id)
+    assert reply is None
+    assert user_msg is not None
 
 
 @pytest.mark.asyncio

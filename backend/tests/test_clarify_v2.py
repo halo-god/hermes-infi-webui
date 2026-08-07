@@ -16,7 +16,6 @@ import pytest
 import pytest_asyncio
 
 from app.core import redis as R
-from agent_runner.runner import Runner
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -43,8 +42,8 @@ async def test_blpop_unblocks_even_when_response_arrives_first():
         pytest.skip("Redis not reachable")
     sid, clarify_id = uuid.uuid4().hex, uuid.uuid4().hex[:12]
 
-    runner = Runner()
-    assert await runner._deliver_clarify_response(sid, clarify_id, "选项A")
+    from agent_runner.runner_clarify import deliver_clarify_response
+    assert await deliver_clarify_response(sid, clarify_id, "选项A")
 
     # Agent-side wait happens AFTER the answer was pushed — must return at once.
     res = await R.get_redis().blpop(R.clarify_resp_key(sid, clarify_id), timeout=2)
@@ -57,7 +56,6 @@ async def test_pop_clarify_request_consumes_v2_then_legacy():
     if not await _redis_ok():
         pytest.skip("Redis not reachable")
     sid = uuid.uuid4().hex
-    runner = Runner()
     r = R.get_redis()
 
     # v2 list entry
@@ -65,9 +63,10 @@ async def test_pop_clarify_request_consumes_v2_then_legacy():
     # legacy pending key (dual-protocol compat)
     await r.set(f"hermes:clarify_pending:{sid}", json.dumps({"clarify_id": "c2", "question": "Q2"}))
 
-    first = await runner._pop_clarify_request(sid)
-    second = await runner._pop_clarify_request(sid)
-    third = await runner._pop_clarify_request(sid)
+    from agent_runner.runner_clarify import pop_clarify_request
+    first = await pop_clarify_request(sid)
+    second = await pop_clarify_request(sid)
+    third = await pop_clarify_request(sid)
 
     assert first and first["clarify_id"] == "c1"
     assert second and second["clarify_id"] == "c2"
@@ -80,12 +79,12 @@ async def test_queued_clarify_requests_do_not_overwrite():
     if not await _redis_ok():
         pytest.skip("Redis not reachable")
     sid = uuid.uuid4().hex
-    runner = Runner()
     r = R.get_redis()
     await r.rpush(R.clarify_req_key(sid), json.dumps({"clarify_id": "a", "question": "QA"}))
     await r.rpush(R.clarify_req_key(sid), json.dumps({"clarify_id": "b", "question": "QB"}))
 
-    got = [await runner._pop_clarify_request(sid), await runner._pop_clarify_request(sid)]
+    from agent_runner.runner_clarify import pop_clarify_request
+    got = [await pop_clarify_request(sid), await pop_clarify_request(sid)]
     assert [g["clarify_id"] for g in got] == ["a", "b"]
 
 
@@ -130,15 +129,16 @@ async def test_interactive_clarify_round_trip(monkeypatch):
     from app.config import settings
     monkeypatch.setattr(settings, "clarify_strategy", "interactive")
 
-    runner = Runner()
     cid = str(uuid.uuid4())
     sid = uuid.uuid4().hex
     message_id = str(uuid.uuid4())
     acc: dict = {}
 
-    await runner._handle_clarify_request(
+    from agent_runner.runner_clarify import handle_clarify_request
+    await handle_clarify_request(
         cid, message_id, acc, sid,
         {"clarify_id": "cl-1", "question": "用哪个方案？", "options": ["方案A", "方案B"]},
+        bg_tasks=set(),
     )
 
     # The confirmation_request event reached the conversation stream

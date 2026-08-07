@@ -131,3 +131,32 @@ async def test_large_project_doc_upload_offloads_to_object_storage(client, auth_
     finally:
         settings.minio_endpoint, settings.minio_bucket = prev_endpoint, prev_bucket
         object_storage.reset_client()
+
+
+@pytest.mark.asyncio
+async def test_knowledge_upload_builds_index(client, auth_headers, test_user, db, monkeypatch):
+    """B1: uploading a file must immediately build the vector index (the
+    endpoint used to skip indexing — chunks stayed 0 until a manual PATCH)."""
+    from unittest.mock import AsyncMock, patch
+
+    from app.config import settings
+    from app.db.models.team import TeamKnowledge
+    from app.services import rag_service
+
+    monkeypatch.setattr(settings, "rag_enabled", True)
+    with patch("app.services.rag_service.get_embedding_service") as mock_svc:
+        mock_svc.return_value.encode = AsyncMock(
+            side_effect=lambda texts: [[1.0 / 512 ** 0.5] * 512 for _ in texts]
+        )
+        team = await _mk_team(db, test_user)
+        await db.commit()
+
+        r = await client.post(
+            f"/api/v1/teams/{team.id}/knowledge/upload",
+            files={"file": ("notes.md", ("# Hello\n" + "人工智能知识库测试内容。" * 30).encode("utf-8"), "text/markdown")},
+            headers=auth_headers,
+        )
+        assert r.status_code == 201, r.text
+
+        k = await db.get(TeamKnowledge, uuid.UUID(r.json()["id"]))
+        assert await rag_service.count_chunks(db, k.id) > 0

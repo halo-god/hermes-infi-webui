@@ -97,6 +97,10 @@ export const teamsApi = {
       } : undefined,
     });
   },
+  /** P2-4: retry parsing/indexing of a failed knowledge item. */
+  async reprocessKnowledge(id: string, kid: string): Promise<{ id: string }> {
+    return (await http.post(`/teams/${id}/knowledge/${kid}/reprocess`)).data;
+  },
   async getChannel(id: string): Promise<{ channel: import("@/types").Conversation; channel_mode: string }> {
     return (await http.get(`/teams/${id}/channel`)).data;
   },

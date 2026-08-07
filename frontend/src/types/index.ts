@@ -243,6 +243,19 @@ export interface SystemSettings {
       skills_sync_enabled?: boolean;
       [key: string]: unknown;
     };
+    /** P1-3: RAG (vector knowledge retrieval) config — DB override of env
+     * settings; only `enabled` is read at runtime (rest are informational). */
+    rag?: {
+      enabled?: boolean;
+      embedding_model?: string;
+      chunk_size?: number;
+      chunk_overlap?: number;
+      top_k?: number;
+      min_score?: number;
+      hybrid?: boolean;
+      rerank?: boolean;
+      [key: string]: unknown;
+    };
   };
   updated_at: string;
 }
@@ -312,7 +325,10 @@ export interface Agent {
 export interface MessageContent {
   text: string;
   files?: Array<{ id: string; name: string; kind: string; diff?: string | null }>;
-  knowledge_refs?: Array<{ id: string; name: string }>;
+  knowledge_refs?: Array<{ id: string; name: string; team_id?: string; project_id?: string }>;
+  /** P1-3: RAG citation metadata in injection order — rendered as [n] badges
+   * on the following agent reply. */
+  rag_refs?: Array<{ n: number; source_name: string; chunk_index: number }>;
   [k: string]: unknown;
 }
 

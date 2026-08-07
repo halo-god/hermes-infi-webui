@@ -75,7 +75,10 @@ class EmbeddingService:
         logger.info("Loading embedding model %s (first use, may take a moment)", model_name)
         # bge-small-zh-v1.5 recommends normalised embeddings for cosine
         # similarity — we normalise on encode() so raw dot-product == cosine.
-        m = SentenceTransformer(model_name)
+        # Local-only load: the model ships in the venv HF cache; a network
+        # round-trip to HF Hub (etag check) can hang for tens of seconds when
+        # DNS/egress is down, stalling the first RAG query.
+        m = SentenceTransformer(model_name, local_files_only=True)
         self._model = m
         # sentence-transformers renamed this method in newer versions; support both.
         get_dim = getattr(m, "get_embedding_dimension", None) or m.get_sentence_embedding_dimension

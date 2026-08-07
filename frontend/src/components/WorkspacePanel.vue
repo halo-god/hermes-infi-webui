@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import Icon from "@/components/Icon.vue";
-import { renderMarkdown } from "@/utils/markdown";
+import { renderMarkdown, renderMarkdownAsync } from "@/utils/markdown";
 import type { FileItem, WsAdapter, WorkspaceFileVersion } from "@/types";
 
 const props = defineProps<{
@@ -158,6 +158,30 @@ const mdHtml = computed(() => {
     return `<pre style="white-space:pre-wrap;color:var(--ink-mute)">${src.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}</pre>`;
   }
 });
+
+// Mermaid: the sync renderer leaves ```mermaid blocks as code — post-process
+// them into diagrams (same DOM-swap approach as ChatView). Runs whenever the
+// previewed content or active file changes.
+watch(
+  [content, previewVersion, () => activeTab.value?.fileId],
+  async () => {
+    await nextTick();
+    const blocks = document.querySelectorAll(".md-preview pre code.language-mermaid");
+    for (const block of blocks) {
+      const pre = block.parentElement;
+      if (!pre || pre.dataset.mermaidDone) continue;
+      pre.dataset.mermaidDone = "1";
+      const code = block.textContent || "";
+      try {
+        const html = await renderMarkdownAsync("```mermaid\n" + code + "\n```");
+        const wrapper = document.createElement("div");
+        wrapper.innerHTML = html;
+        pre.replaceWith(wrapper.firstElementChild!);
+      } catch { /* leave as code block */ }
+    }
+  },
+  { immediate: true },
+);
 const officeHtml = computed(() => {
   // Backend already returns sanitized, pre-rendered HTML for office docs
   // (see extract_docx_html/extract_xlsx_html/extract_pptx_html) — render

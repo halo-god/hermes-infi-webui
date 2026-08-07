@@ -28,13 +28,14 @@ from datetime import datetime, timezone
 
 from redis.exceptions import ResponseError
 
+from sqlalchemy import func, select, text as sa_text
+
 from app.config import settings
 from app.core.logging import configure_logging
 from app.core import redis as R
 from app.db.base import async_session_maker
 from app.db.models.agent import Agent
 from app.db.models.conversation import Conversation, Message
-from sqlalchemy import select
 from agent_runner import discovery, storage
 from agent_runner.acp_client import ACPTimeout
 from agent_runner.call_log import CallCollector
@@ -77,7 +78,33 @@ _ANSI_RE = re.compile(
 def _strip_ansi(text: str | None) -> str:
     if not text:
         return ""
+    if not isinstance(text, str):
+        # tool_call rawInput / artifact content can be structured objects
+        # (dict/list) rather than text — serialize so the UI preview stays
+        # readable instead of crashing the turn.
+        import json
+        text = json.dumps(text, ensure_ascii=False)
+        # json.dumps escapes control chars (\x1b → \u001b); restore them so
+        # the ANSI regex below can actually strip terminal codes.
+        text = text.replace("\\u001b", "\x1b")
     return _ANSI_RE.sub("", text)
+
+
+def _friendly_error(exc: Exception) -> str:
+    """P7: map exception classes to user-readable failure messages instead of
+    exposing bare class names (ACPError, UnboundLocalError, …)."""
+    name = exc.__class__.__name__
+    msg = str(exc) or ""
+    low = msg.lower()
+    if "acp" in name.lower() or "acp" in low:
+        return f"Agent 通信异常：{msg[:120]}" if msg else "Agent 通信异常"
+    if "timeout" in name.lower() or "timed out" in low:
+        return "响应超时"
+    if "connection" in name.lower() or "redis" in name.lower():
+        return "服务连接异常，请重试"
+    if name in ("TypeError", "ValueError", "UnboundLocalError", "KeyError", "IndexError"):
+        return f"处理异常（{name}），请重试"
+    return f"{name}：{msg[:120]}" if msg else name
 
 
 # ── Stability constants ──
@@ -363,6 +390,36 @@ class Runner:
                 await stop_subagent(subagent_id, self.subagent_pool)
 
     # ── main loop ──
+    async def _reclaim_stuck_streaming(self) -> None:
+        """Mark leftover 'streaming' agent messages as failed.
+
+        Runs once at startup: with no tasks executing, every streaming message
+        is the remnant of a crashed/stopped runner. Without this the UI shows
+        an eternal spinner and the conversation can't continue cleanly.
+        """
+        from datetime import timedelta
+        from sqlalchemy import update as sa_upd
+        async with async_session_maker() as db:
+            cutoff = datetime.now(timezone.utc) - timedelta(minutes=2)
+            res = await db.execute(
+                sa_upd(Message)
+                .where(Message.status == "streaming", Message.updated_at < cutoff)
+                .values(
+                    status="error",
+                    content=func.jsonb_set(
+                        func.coalesce(Message.content, {}),
+                        "{text}",
+                        sa_text('"⚠ 生成中断（服务重启）"'),
+                        create_missing=True,
+                    ),
+                )
+                .returning(Message.id)
+            )
+            ids = [row[0] for row in res.all()]
+            if ids:
+                await db.commit()
+                logger.warning("Reclaimed %d stuck streaming message(s)", len(ids))
+
     async def run(self) -> None:
         configure_logging()
 
@@ -387,6 +444,13 @@ class Runner:
             await reconcile_background_subagents()
         except Exception:
             logger.exception("Failed to reconcile background subagents at startup")
+        # C2: reclaim messages left in "streaming" by a crashed runner — no
+        # task is executing at startup, so any streaming message is a leftover
+        # that would otherwise pin the UI spinner forever.
+        try:
+            await self._reclaim_stuck_streaming()
+        except Exception:
+            logger.exception("Failed to reclaim stuck streaming messages at startup")
         logger.info("Runner consuming %s as %s/%s (max_concurrent=%d)",
                     settings.acp_stream, settings.acp_group, settings.acp_consumer, MAX_CONCURRENT)
 
@@ -533,10 +597,6 @@ class Runner:
         if task.get("type") == "profile_evolution":
             from agent_runner.runner_profile_evolution import handle_profile_evolution
             await handle_profile_evolution(task, self.agents)
-            return
-        if task.get("type") == "roundtable":
-            from agent_runner.runner_roundtable import handle_roundtable
-            await handle_roundtable(task, self.agents)
             return
         if task.get("type") == "chain":
             from agent_runner.runner_chain import handle_chain
@@ -931,6 +991,10 @@ class Runner:
                         existing["tool_kind"] = sub_kind
                 else:
                     steps.append({"title": title, "status": status, "raw_input": raw_input, "tool_kind": sub_kind})
+                    # P5: cap the steps list so a very long tool-heavy turn
+                    # doesn't bloat the persisted message JSON unboundedly.
+                    if len(steps) > 200:
+                        del steps[: len(steps) - 200]
                 if kind == "tool_call_begin":
                     acc["tool_calls"] = int(acc.get("tool_calls", 0)) + 1
                 call_collector.on_tool_call(
@@ -1043,6 +1107,9 @@ class Runner:
                 acp_session_id=acp_session_id, profile_dir=profile_dir,
                 mcp_servers=mcp_servers,
                 session_namespace=session_namespace,
+                on_permission_request=self._permission_request_handler(
+                    conversation_id, acc,
+                ),
             )
             # Publish the client into the late-bound ref so on_update can fire
             # session/cancel when the iteration cap is reached.
@@ -1124,10 +1191,14 @@ class Runner:
         except Exception as exc:  # noqa: BLE001
             logger.exception("prompt failed")
             await self.pool.drop(conversation_id, session_namespace=session_namespace)
-            await self._fail(conversation_id, acc["current_msg_id"], f"{exc.__class__.__name__}",
-                             calls=call_collector.records(),
-                             thinking=acc.get("thinking") or "", plan=acc.get("plan"),
-                             files=acc.get("files"), clarifies=acc.get("clarifies"))
+            # P7: map exception classes to readable messages instead of
+            # exposing bare class names like "ACPError".
+            await self._fail(
+                conversation_id, acc["current_msg_id"], _friendly_error(exc),
+                calls=call_collector.records(),
+                thinking=acc.get("thinking") or "", plan=acc.get("plan"),
+                files=acc.get("files"), clarifies=acc.get("clarifies"),
+            )
             return
 
         if acc["cancelled"]:
@@ -1194,6 +1265,57 @@ class Runner:
             },
         )
 
+    def _permission_request_handler(
+        self, conversation_id: str, acc: dict,
+    ):
+        """Build the ACP request_permission callback for this turn.
+
+        Returns an async callable (path, tool_call) -> bool. Workspace edits
+        are auto-approved inside acp_client; anything else surfaces an SSE
+        confirmation modal (允许/拒绝) and waits for the user — fail-closed:
+        timeout/cancel/error all deny. The callback blocks the agent's tool
+        call until answered (that's the point of the permission gate).
+        """
+        async def _handle(path: str, tool_call: dict) -> bool:
+            import uuid as _uuid
+            request_id = str(_uuid.uuid4())
+            question = f"Agent 请求写入文件 {path}"
+            req_payload = {
+                "id": request_id,
+                "conversation_id": conversation_id,
+                "message_id": acc.get("current_msg_id"),
+                "question": question,
+                "questions": [{
+                    "question": question,
+                    "options": ["允许", "拒绝"],
+                    "allow_free_text": False,
+                }],
+                "options": ["允许", "拒绝"],
+                "permission": True,
+                "path": path,
+            }
+            try:
+                await R.publish_event(
+                    conversation_id,
+                    {
+                        "type": "confirmation_request",
+                        "message_id": acc.get("current_msg_id"),
+                        "request": req_payload,
+                    },
+                )
+                resp = await R.wait_for_confirmation(
+                    conversation_id, request_id,
+                    timeout=settings.clarify_timeout_seconds, cancel_check=True,
+                )
+                choice = resp.get("choice", "超时")
+            except Exception:
+                logger.warning("Permission request failed for %s — denying", path, exc_info=True)
+                return False
+            logger.info("Permission request %s for %s → %s", request_id[:8], path, choice)
+            return choice == "允许"
+
+        return _handle
+
     async def _wait_and_unblock_clarify_native(
         self, conversation_id: str, request_id: str, *,
         sid: str, message_id: str | None = None, acc: dict | None = None,
@@ -1232,8 +1354,11 @@ class Runner:
         saved_names: set[str] = set()
         extracted: list[tuple[str, str]] = []
 
+        # P2: the filename must be a bare standalone name — excluding leading
+        # '#'/'//' comments (LLMs often write "# main.py" before the code) and
+        # path separators, so comment lines aren't mistaken for artifacts.
         code_block_re = re.compile(
-            r"```(?:(\w+)\s+)?(\S+\.\w+)\s*\n(.*?)```",
+            r"```(?:(\w+)\s+)?([^\s#/\\]+\.\w+)\s*\n(.*?)```",
             re.DOTALL,
         )
         for m in code_block_re.finditer(text):

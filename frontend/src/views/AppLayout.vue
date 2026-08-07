@@ -13,9 +13,11 @@ import HelpPanel from "@/components/HelpPanel.vue";
 import ToastContainer from "@/components/ToastContainer.vue";
 import { useChatStore } from "@/stores/chat";
 import { useAuthStore } from "@/stores/auth";
+import { useNotificationStore } from "@/stores/notifications";
 import { usePresence } from "@/composables/usePresence";
 
 const chat = useChatStore();
+const ns = useNotificationStore();
 const { startHeartbeat, stopHeartbeat } = usePresence();
 const collapsed = ref(false);
 const showTweaks = ref(false);
@@ -75,12 +77,21 @@ onMounted(async () => {
   startHeartbeat();
   window.addEventListener("keydown", onKey);
   window.addEventListener("hermes:search", openSearch);
+  // P2-1: surface API errors globally (the axios client only dispatches the
+  // event — this is the single listener that turns it into a toast).
+  onApiError = (e: Event) => {
+    const msg = (e as CustomEvent<string>).detail;
+    if (msg) ns.toast(msg, "error");
+  };
+  window.addEventListener("hermes:api-error", onApiError);
 });
 onBeforeUnmount(() => {
   stopHeartbeat();
   window.removeEventListener("keydown", onKey);
   window.removeEventListener("hermes:search", openSearch);
+  if (onApiError) window.removeEventListener("hermes:api-error", onApiError);
 });
+let onApiError: ((e: Event) => void) | null = null;
 function openSearch() {
   showSearch.value = true;
 }

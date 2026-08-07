@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
@@ -165,6 +165,28 @@ async def tick(db: AsyncSession) -> int:
     # tick passes UTC. Convert to local-tz-aware before computing next_run
     # so croniter matches the same hour/minute the user configured.
     tz_base = now.astimezone(_get_tz())
+
+    # S1: reclaim tasks stuck in "running" — a crashed runner leaves them
+    # looking perpetually in-flight. Anything older than 2× the prompt
+    # timeout can't still be executing (single turn is capped at
+    # acp_prompt_timeout), so mark it failed and let the next tick fire.
+    stale_cutoff = now - timedelta(seconds=settings.acp_prompt_timeout * 2)
+    stale = (
+        await db.execute(
+            select(ScheduledTask).where(
+                ScheduledTask.enabled.is_(True),
+                ScheduledTask.last_status == "running",
+                ScheduledTask.updated_at < stale_cutoff,
+            )
+        )
+    ).scalars().all()
+    for t in stale:
+        logger.warning(
+            "Reclaiming stale running task %s (updated %s)", t.id, t.updated_at,
+        )
+        t.last_status = "failed"
+        t.fail_count = (t.fail_count or 0) + 1
+
     due = (
         await db.execute(
             select(ScheduledTask).where(

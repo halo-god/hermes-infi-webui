@@ -121,6 +121,25 @@ function postProcessKnowledgeRefs(html: string): string {
   });
 }
 
+// ── RAG citation badges ──
+// Turn "[1]" style inline citations into superscript badges. Runs after
+// markdown rendering so links are already HTML; the pattern excludes link
+// syntax "[n](url)" and bracketed text like "[Important]". Code blocks are
+// protected (a "[1]" inside code must stay literal).
+function postProcessCiteRefs(html: string): string {
+  const blocks: string[] = [];
+  html = html.replace(/<pre[\s\S]*?<\/pre>/g, (m) => {
+    blocks.push(m);
+    return `\u0000CITE${blocks.length - 1}\u0000`;
+  });
+  html = html.replace(
+    /\[(\d{1,3})\](?!\()/g,
+    '<sup class="cite-ref" title="知识库引用">[$1]</sup>'
+  );
+  html = html.replace(/\u0000CITE(\d+)\u0000/g, (_m, i) => blocks[Number(i)]);
+  return html;
+}
+
 // ── Code copy button + language label ──
 const defaultFence =
   md.renderer.rules.fence ||
@@ -240,11 +259,19 @@ function preprocess(src: string): string {
 }
 
 // ── Main export ──
-export function renderMarkdown(src: string): string {
+export interface RenderOptions {
+  /** Convert "[1]" style citations to superscript badges. Only enable when
+   * the message actually carries RAG citations (rag_refs) — otherwise
+   * ordinary "[数字]" text gets mislabelled as knowledge references. */
+  citeRefs?: boolean;
+}
+
+export function renderMarkdown(src: string, opts: RenderOptions = {}): string {
   const collapsed = preprocess(src);
   let html = md.render(collapsed);
   html = postProcessBlockquotes(html);
   html = postProcessKnowledgeRefs(html);
+  if (opts.citeRefs) html = postProcessCiteRefs(html);
   return html;
 }
 
@@ -252,11 +279,12 @@ export function renderMarkdown(src: string): string {
  * Async version with Mermaid support.
  * Use this in components that need diagrams.
  */
-export async function renderMarkdownAsync(src: string): Promise<string> {
+export async function renderMarkdownAsync(src: string, opts: RenderOptions = {}): Promise<string> {
   const collapsed = preprocess(src);
   let html = md.render(collapsed);
   html = postProcessBlockquotes(html);
   html = postProcessKnowledgeRefs(html);
+  if (opts.citeRefs) html = postProcessCiteRefs(html);
   return renderMermaidBlocks(html);
 }
 

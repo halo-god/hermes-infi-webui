@@ -651,6 +651,17 @@ async function loadSettings() {
       skills_sync_enabled: true,
       ...((raw.hermes as Record<string, unknown>) || {}),
     },
+    rag: {
+      enabled: false,
+      embedding_model: "BAAI/bge-small-zh-v1.5",
+      chunk_size: 500,
+      chunk_overlap: 100,
+      top_k: 5,
+      min_score: 0.35,
+      hybrid: false,
+      rerank: false,
+      ...((raw.rag as Record<string, unknown>) || {}),
+    },
   };
 }
 async function loadRoles() {
@@ -2458,6 +2469,58 @@ async function confirmImport() {
                   </label>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- P1-3: RAG (vector knowledge retrieval) config -->
+        <div class="section-card" style="margin-top: 18px">
+          <div class="section-head">
+            <Icon name="book" :size="15" />
+            <span>知识库检索（RAG）</span>
+            <span class="section-hint">向量化开关即时生效；分块/阈值参数需重跑索引后生效</span>
+          </div>
+          <div class="cfg-grid">
+            <div class="lbl">启用向量检索 <span style="font-size:10px;color:var(--ink-faint)">[覆盖环境变量]</span></div>
+            <div class="val">
+              <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-mute);cursor:pointer">
+                <input type="checkbox" v-model="settings.rag!.enabled" /> 上传/编辑知识库时构建向量索引，对话时按相关性检索
+              </label>
+            </div>
+
+            <div class="lbl">嵌入模型</div>
+            <div class="val">
+              <input class="cfg-input" v-model="settings.rag!.embedding_model" placeholder="BAAI/bge-small-zh-v1.5" style="font-family:var(--font-mono);font-size:12px" />
+              <span style="font-size:10px;color:var(--ink-faint)">换模型需重建向量列（512 维固定）——仅展示，不可热切换</span>
+            </div>
+
+            <div class="lbl">分块</div>
+            <div class="val" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+              <label style="font-size:12px;color:var(--ink-mute)">大小
+                <input type="number" class="cfg-input" v-model.number="settings.rag!.chunk_size" style="width:90px" min="100" max="2000" />
+              </label>
+              <label style="font-size:12px;color:var(--ink-mute)">重叠
+                <input type="number" class="cfg-input" v-model.number="settings.rag!.chunk_overlap" style="width:80px" min="0" max="500" />
+              </label>
+              <label style="font-size:12px;color:var(--ink-mute)">Top-K
+                <input type="number" class="cfg-input" v-model.number="settings.rag!.top_k" style="width:70px" min="1" max="20" />
+              </label>
+            </div>
+
+            <div class="lbl">相似度阈值</div>
+            <div class="val">
+              <input type="number" class="cfg-input" v-model.number="settings.rag!.min_score" style="width:90px" step="0.05" min="0" max="1" />
+              <span style="font-size:10px;color:var(--ink-faint)">低于该相似度的检索结果会被丢弃（0.35 为 bge 经验值）</span>
+            </div>
+
+            <div class="lbl">进阶检索 <span style="font-size:10px;color:var(--ink-faint)">[需重启 Runner]</span></div>
+            <div class="val" style="display:flex;gap:14px;flex-wrap:wrap">
+              <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-mute);cursor:pointer">
+                <input type="checkbox" v-model="settings.rag!.hybrid" /> 混合检索（关键词 + 向量 RRF 融合）
+              </label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-mute);cursor:pointer">
+                <input type="checkbox" v-model="settings.rag!.rerank" /> 交叉编码重排（bge-reranker，+200ms/查询）
+              </label>
             </div>
           </div>
         </div>

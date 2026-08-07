@@ -4,8 +4,8 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, func
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import Boolean, Computed, Date, DateTime, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -234,6 +234,20 @@ class TeamKnowledgeChunk(UUIDPrimaryKey, Timestamps, Base):
     )
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    # P1-1 citation metadata: owning doc name (denormalized), optional page
+    # number, and the section heading for parent-child chunking. Used to
+    # annotate prompt injection with traceable sources.
+    source_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    page: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    parent_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # P1-4 hybrid retrieval: generated tsvector for keyword search (migration
+    # 0083 adds the GIN index). SQLAlchemy Computed keeps ORM selects working;
+    # the column is read-only in queries.
+    content_tsv = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('simple', content)", persisted=True),
+        nullable=True,
+    )
     # 512 = BAAI/bge-small-zh-v1.5 output dim. See migration 0057 for the
     # rationale on keeping the dim explicit.
     embedding: Mapped[list[float] | None] = mapped_column(
