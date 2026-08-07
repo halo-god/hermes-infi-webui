@@ -82,6 +82,12 @@ def profile_env(profile_dir: str | None) -> dict[str, str]:
     env["HERMES_COMPRESSION__ENABLED"] = str(settings.hermes_compression_enabled).lower()
     env["HERMES_TOOL_OUTPUT__MAX_BYTES"] = str(settings.hermes_tool_output_max_bytes)
     env["HERMES_PRIVACY__REDACT_PII"] = str(settings.hermes_redact_pii).lower()
+    # The agent's clarify callback bridges agent ↔ runner over Redis
+    # (RPUSH hermes:clarify:req:{sid} / BLPOP hermes:clarify:resp:...).
+    # Without an explicit REDIS_URL it falls back to localhost:6379, which
+    # does not exist in this deployment (password + port 1979) — clarify
+    # would silently fail to reach the confirmation modal.
+    env["REDIS_URL"] = settings.redis_url
     return env
 
 
