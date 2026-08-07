@@ -903,7 +903,7 @@ function fmtDate(s: string) {
 .md-preview :deep(th) { text-align: left; padding: 7px 10px; border-bottom: 2px solid var(--ink); font-size: 11px; text-transform: uppercase; color: var(--ink-mute); }
 .md-preview :deep(td) { padding: 7px 10px; border-bottom: 1px solid var(--rule-soft); color: var(--ink-soft); }
 .md-preview :deep(code) { font-family: var(--font-mono); font-size: 0.88em; background: rgba(29,26,20,0.07); padding: 1.5px 5px; border-radius: 5px; color: var(--accent-deep); }
-.md-preview :deep(pre) { background: #1d1a14; color: #f0ebde; border-radius: var(--r-sm); padding: 13px 15px; overflow-x: auto; }
+.md-preview :deep(pre) { background: #1d1a14 !important; color: #f0ebde; border-radius: var(--r-sm); padding: 13px 15px; overflow-x: auto; }
 .md-preview :deep(pre code) { background: none; color: inherit; padding: 0; }
 
 /* Office document preview (pptx slide dividers) */

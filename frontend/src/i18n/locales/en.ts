@@ -25,6 +25,7 @@ export default {
   },
   nav: {
     newChat: "New Chat",
+    home: "Home",
     allChats: "All Chats",
     search: "Search",
     schedule: "Scheduled Tasks",

@@ -3789,7 +3789,8 @@ body[data-atmos="cinnabar"] {
   }
   body.dark .md-body code, body[data-atmos="night"] .md-body code { background: rgba(255,255,255,0.08); }
   .md-body pre {
-    background: #1d1a14; color: #f0ebde;
+    background: #1d1a14 !important; /* shiki inlines its theme bg (#0d1117); keep our uniform dark */
+    color: #f0ebde;
     border-radius: var(--r-sm); padding: 13px 15px; margin: 4px 0 12px;
     overflow-x: auto;
   }
@@ -3848,17 +3849,9 @@ body[data-atmos="cinnabar"] {
     background: #2a1515; border-color: #4a2020; color: #e08080;
   }
 
-  /* ── highlight.js overrides for dark code blocks ── */
-  .md-body pre .hljs-keyword { color: #c792ea; }
-  .md-body pre .hljs-string { color: #c3e88d; }
-  .md-body pre .hljs-number { color: #f78c6c; }
-  .md-body pre .hljs-comment { color: #676e95; font-style: italic; }
-  .md-body pre .hljs-function { color: #82aaff; }
-  .md-body pre .hljs-built_in { color: #ffcb6b; }
-  .md-body pre .hljs-title { color: #82aaff; }
-  .md-body pre .hljs-params { color: #f0ebde; }
-  .md-body pre .hljs-attr { color: #ffcb6b; }
-  .md-body pre .hljs-literal { color: #f78c6c; }
+  /* ── shiki token colors (github-dark theme) ──
+     Token colors come from the theme itself via inline styles; this block
+     only needs to exist if we ever override theme colors. */
 
   /* ── group channel chat ── */
   .ch-row { display: flex; }
