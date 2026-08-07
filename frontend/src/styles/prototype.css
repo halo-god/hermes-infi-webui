@@ -3708,15 +3708,15 @@ body[data-atmos="cinnabar"] {
     font-weight: 600; color: var(--ink); line-height: 1.25;
   }
   .md-body h1 { font-size: 21px; margin: 4px 0 10px; }
-  .md-body h2 { font-size: 18px; margin: 18px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--rule-soft); }
-  .md-body h3 { font-size: 15.5px; margin: 14px 0 6px; }
-  .md-body h4, .md-body h5, .md-body h6 { font-size: 14px; margin: 12px 0 5px; }
+  .md-body h2 { font-size: 18px; margin: 14px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--rule-soft); }
+  .md-body h3 { font-size: 15.5px; margin: 12px 0 6px; }
+  .md-body h4, .md-body h5, .md-body h6 { font-size: 14px; margin: 10px 0 5px; }
   .md-body strong { font-weight: 700; color: var(--ink); }
   .md-body em { font-style: italic; }
   .md-body del { color: var(--ink-mute); }
   .md-body a { color: var(--accent-deep); text-decoration: underline; text-underline-offset: 2px; }
   .md-body a:hover { color: var(--accent); }
-  .md-body ul, .md-body ol { margin: 2px 0 8px; padding-left: 22px; }
+  .md-body ul, .md-body ol { margin: 2px 0 6px; padding-left: 22px; }
   .md-body ul { list-style: none; padding-left: 4px; }
   .md-body ul > li { position: relative; padding-left: 18px; margin-bottom: 2px; }
   .md-body ul > li::before {
@@ -3789,7 +3789,8 @@ body[data-atmos="cinnabar"] {
   }
   body.dark .md-body code, body[data-atmos="night"] .md-body code { background: rgba(255,255,255,0.08); }
   .md-body pre {
-    background: #1d1a14; color: #f0ebde;
+    background: #1d1a14 !important; /* shiki inlines its theme bg (#0d1117); keep our uniform dark */
+    color: #f0ebde;
     border-radius: var(--r-sm); padding: 13px 15px; margin: 4px 0 12px;
     overflow-x: auto;
   }
@@ -3848,17 +3849,9 @@ body[data-atmos="cinnabar"] {
     background: #2a1515; border-color: #4a2020; color: #e08080;
   }
 
-  /* ── highlight.js overrides for dark code blocks ── */
-  .md-body pre .hljs-keyword { color: #c792ea; }
-  .md-body pre .hljs-string { color: #c3e88d; }
-  .md-body pre .hljs-number { color: #f78c6c; }
-  .md-body pre .hljs-comment { color: #676e95; font-style: italic; }
-  .md-body pre .hljs-function { color: #82aaff; }
-  .md-body pre .hljs-built_in { color: #ffcb6b; }
-  .md-body pre .hljs-title { color: #82aaff; }
-  .md-body pre .hljs-params { color: #f0ebde; }
-  .md-body pre .hljs-attr { color: #ffcb6b; }
-  .md-body pre .hljs-literal { color: #f78c6c; }
+  /* ── shiki token colors (github-dark theme) ──
+     Token colors come from the theme itself via inline styles; this block
+     only needs to exist if we ever override theme colors. */
 
   /* ── group channel chat ── */
   .ch-row { display: flex; }

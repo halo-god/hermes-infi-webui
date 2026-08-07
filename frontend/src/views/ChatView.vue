@@ -16,7 +16,7 @@ import { useNotificationStore } from "@/stores/notifications";
 import { conversationsApi } from "@/api/conversations";
 import { teamsApi } from "@/api/teams";
 import { projectsApi } from "@/api/projects";
-import { renderMarkdown, renderMarkdownAsync } from "@/utils/markdown";
+import { renderMarkdown, renderMarkdownAsync, ensureShiki } from "@/utils/markdown";
 import { fmtNum } from "@/utils/format";
 import { colorDiff } from "@/utils/diff";
 import type { GroupMember, Knowledge, Message, RoundtableReply, WsAdapter } from "@/types";
@@ -58,6 +58,9 @@ const showProjectTasks = ref(false);
 const chosenMap = ref<Record<string, boolean>>({});
 
 onMounted(async () => {
+  // Warm up the shiki highlighter so initial code fences render highlighted
+  // (already kicked off on module load; this just guarantees readiness).
+  await ensureShiki();
   if (!chat.profiles.length) await chat.loadProfiles();
   // Request browser notification permission
   if ("Notification" in window && Notification.permission === "default") {
