@@ -332,6 +332,13 @@ async def _resolve_attached_files(
         # (the agent has no native reader for those).
         native_readable = ext in ("docx", "xlsx")
         file_content = f.content or ""
+        if native_readable:
+            # docx/xlsx must never inject extracted text, regardless of what
+            # the DB already holds: the upload pipeline backfills wf.content
+            # after background conversion, so gating on `not file_content`
+            # below would make this branch dead code in production (the agent
+            # would get truncated HTML extraction instead of the original).
+            file_content = ""
         raw_bytes: bytes | None = None
         if f.storage_key and not file_content:
             try:

@@ -243,6 +243,78 @@ class TestNativeReadableOfficeInjection:
         assert entry["workspace_path"], f"{kind} must keep its workspace path"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", ["docx", "xlsx"])
+    async def test_docx_xlsx_suppress_prefilled_content(self, monkeypatch, kind, tmp_path):
+        """Production reality: the upload pipeline backfills content after
+        background conversion, so a ready docx/xlsx ALWAYS carries extracted
+        text in the DB. The resolver must suppress it anyway."""
+        from unittest.mock import MagicMock
+
+        import uuid as _uuid
+
+        from app.services import conversation_service as svc
+        from app.db.models.workspace import WorkspaceFile
+
+        raw = b"PK\x03\x04 fake-office-bytes"
+        f = WorkspaceFile(
+            id=_uuid.uuid4(),
+            conversation_id=_uuid.uuid4(),
+            name=f"report.{kind}",
+            kind=kind,
+            content=f"<p>old-extracted-html-for-{kind}</p>",  # backfilled by _convert_upload_bg
+            storage_key="conversations/x/report." + kind,
+            size_bytes=len(raw),
+            processing_status="ready",
+        )
+
+        fake_storage = MagicMock()
+        fake_storage.get = MagicMock(return_value=raw)
+        import app.core as core_pkg
+        from app.core import object_storage as _real  # noqa: F401
+        monkeypatch.setattr(core_pkg, "object_storage", fake_storage)
+        monkeypatch.setattr(
+            svc, "settings", MagicMock(workspace_root=str(tmp_path))
+        )
+
+        class FakeResult:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def scalars(self):
+                return self
+
+            def all(self):
+                return self._rows
+
+            def first(self):
+                return self._rows[0] if self._rows else None
+
+            def scalar_one_or_none(self):
+                return self._rows[0] if self._rows else None
+
+        calls = iter([
+            FakeResult([f]),
+            FakeResult([]),
+        ])
+
+        class FakeDB:
+            async def execute(self, stmt):
+                return next(calls)
+
+        attached = await svc._resolve_attached_files(
+            FakeDB(), [str(f.id)], conversation_id=str(f.conversation_id),
+        )
+        assert len(attached) == 1
+        entry = attached[0]
+        assert entry["content"] == "", f"{kind} with prefilled content must not inject"
+        assert entry["workspace_path"], f"{kind} must keep its workspace path"
+        # The original bytes must be materialized on disk so read_file can
+        # natively extract them — lock the drop-to-disk chain too.
+        disk_file = tmp_path / str(f.conversation_id) / entry["workspace_path"]
+        assert disk_file.exists(), f"workspace file not written: {disk_file}"
+        assert disk_file.read_bytes() == raw, "workspace file must hold the original bytes"
+
+    @pytest.mark.asyncio
     async def test_pptx_keeps_injected_extraction(self, monkeypatch, tmp_path):
         from unittest.mock import MagicMock
 
