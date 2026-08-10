@@ -16,6 +16,17 @@ logger = logging.getLogger(__name__)
 
 _RATE_CFG_KEY = "cfg:rate_limit_per_min"
 
+# Atomic fixed-window increment: INCR + first-time EXPIRE in one Lua round trip.
+# Fixes the race where a crash between INCR and EXPIRE left a key with no TTL
+# (permanent counter / silent unbounded growth).
+_INCR_EXPIRE_LUA = """
+local cur = redis.call('INCR', KEYS[1])
+if cur == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return cur
+"""
+
 
 async def get_rate_limit() -> int:
     val = await get_redis().get(_RATE_CFG_KEY)
@@ -30,11 +41,9 @@ async def set_rate_limit(per_min: int) -> None:
 
 
 async def hit(key: str, limit: int, window_seconds: int = 60) -> tuple[bool, int]:
-    """Increment a fixed-window counter. Returns (allowed, remaining)."""
+    """Increment a fixed-window counter atomically. Returns (allowed, remaining)."""
     r = get_redis()
-    cur = await r.incr(key)
-    if cur == 1:
-        await r.expire(key, window_seconds)
+    cur = int(await r.eval(_INCR_EXPIRE_LUA, 1, key, window_seconds))
     return cur <= limit, max(0, limit - cur)
 
 
@@ -43,9 +52,7 @@ async def incr_monthly_messages(user_id: str) -> int:
     month = datetime.now(tz=timezone.utc).strftime("%Y%m")
     key = f"usage:msg:{user_id}:{month}"
     r = get_redis()
-    cur = await r.incr(key)
-    if cur == 1:
-        await r.expire(key, 60 * 60 * 24 * 40)  # ~40 days
+    cur = int(await r.eval(_INCR_EXPIRE_LUA, 1, key, 60 * 60 * 24 * 40))  # ~40 days
     return cur
 
 
