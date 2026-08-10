@@ -564,14 +564,13 @@ def _mcp_server_entry(server: dict) -> dict | None:
     url = server.get("url")
     if not url:
         return None
-    env = server.get("env") or {}
+    headers_cfg = server.get("headers") or server.get("env") or {}
     headers = (
-        [{"name": str(k), "value": str(v)} for k, v in env.items()]
-        if isinstance(env, dict)
+        [{"name": str(k), "value": str(v)} for k, v in headers_cfg.items()]
+        if isinstance(headers_cfg, dict)
         else []
     )
     return {"name": name, "url": url, "headers": headers}
-
 
 # P1-3: ordered stage keys. A staged conversation flows clarify → implement →
 # review, but users can jump manually via the stage API/indicator.
