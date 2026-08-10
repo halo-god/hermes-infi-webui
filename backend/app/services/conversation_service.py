@@ -325,6 +325,12 @@ async def _resolve_attached_files(
         FULL_INLINE_BYTES = 30_000
         MAX_INLINE_BYTES = 100_000
         _TRUNCATE_HINT = "\n\n... [truncated, use read_file tool to read in chunks]"
+        # docx/xlsx are natively extractable by the agent's read_file
+        # (python-docx/openpyxl) — skip injecting converted text and let the
+        # agent read the original bytes directly: no conversion loss, no
+        # truncation, paginated reads. pptx/pdf keep the injected extraction
+        # (the agent has no native reader for those).
+        native_readable = ext in ("docx", "xlsx")
         file_content = f.content or ""
         raw_bytes: bytes | None = None
         if f.storage_key and not file_content:
@@ -332,7 +338,11 @@ async def _resolve_attached_files(
                 from app.core import object_storage
                 raw_bytes = await asyncio.to_thread(object_storage.get, f.storage_key)
                 size = len(raw_bytes)
-                if size <= FULL_INLINE_BYTES:
+                if native_readable:
+                    # docx/xlsx: metadata + path only — the agent reads the
+                    # original via read_file (native extraction).
+                    file_content = ""
+                elif size <= FULL_INLINE_BYTES:
                     # Small file: full inline
                     if ext in OFFICE_EXTRACTORS:
                         file_content = OFFICE_EXTRACTORS[ext](raw_bytes) or ""
@@ -715,9 +725,14 @@ def _build_attached_prompt(text: str, attached: list[dict]) -> str:
     for f in attached:
         ws_path = f.get("workspace_path")
         size = f.get("size_bytes", 0)
+        kind = f.get("kind") or ""
         if ws_path:
-            # For large text/office files, suggest chunked reading
-            if size > 30000 and (f.get("is_text") or f.get("kind") in ("docx", "xlsx", "pptx")):
+            # docx/xlsx are NOT injected as extracted text (the agent reads
+            # them natively via read_file) — always point at the file. Large
+            # text/pptx files also suggest chunked reading.
+            if kind in ("docx", "xlsx"):
+                refs.append(f"- {f['name']} ({ws_path}) — 建议使用 read_file 读取内容")
+            elif size > 30000 and (f.get("is_text") or kind in ("pptx",)):
                 refs.append(
                     f"- {f['name']} ({ws_path}) — 文件较大，建议使用 read_file 分段读取"
                 )

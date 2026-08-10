@@ -169,3 +169,141 @@ class TestRawDownloadDecodeByKind:
 
         assert kind in files_browser._TEXT_EXTS
         assert kind in PLAIN_TEXT_EXTS
+
+
+class TestNativeReadableOfficeInjection:
+    """P2: docx/xlsx are natively readable by the agent's read_file — the
+    attachment resolver must NOT inject extracted text for them (metadata +
+    workspace path only), while pptx keeps the injected extraction."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", ["docx", "xlsx"])
+    async def test_docx_xlsx_metadata_only(self, monkeypatch, kind, tmp_path):
+        from unittest.mock import MagicMock
+
+        import uuid as _uuid
+
+        from app.services import conversation_service as svc
+        from app.db.models.workspace import WorkspaceFile
+
+        raw = b"PK\x03\x04 fake-office-bytes"
+        f = WorkspaceFile(
+            id=_uuid.uuid4(),
+            conversation_id=_uuid.uuid4(),
+            name=f"report.{kind}",
+            kind=kind,
+            content=None,
+            storage_key="conversations/x/report." + kind,
+            size_bytes=len(raw),
+            processing_status="ready",
+        )
+
+        fake_storage = MagicMock()
+        fake_storage.get = MagicMock(return_value=raw)
+        # _resolve_attached_files does a function-level `from app.core import
+        # object_storage` — patch the package attribute so it picks up the fake.
+        import app.core as core_pkg
+        from app.core import object_storage as _real  # noqa: F401 — gain the attr first
+        monkeypatch.setattr(core_pkg, "object_storage", fake_storage)
+        monkeypatch.setattr(
+            svc, "settings", MagicMock(workspace_root=str(tmp_path))
+        )
+
+        class FakeResult:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def scalars(self):
+                return self
+
+            def all(self):
+                return self._rows
+
+            def first(self):
+                return self._rows[0] if self._rows else None
+
+            def scalar_one_or_none(self):
+                return self._rows[0] if self._rows else None
+
+        calls = iter([
+            FakeResult([f]),   # workspace_files batch query
+            FakeResult([]),    # __file_storage__ conversation lookup
+        ])
+
+        class FakeDB:
+            async def execute(self, stmt):
+                return next(calls)
+
+        attached = await svc._resolve_attached_files(
+            FakeDB(), [str(f.id)], conversation_id=str(f.conversation_id),
+        )
+        assert len(attached) == 1
+        entry = attached[0]
+        assert entry["content"] == "", f"{kind} must not inject extracted text"
+        assert entry["workspace_path"], f"{kind} must keep its workspace path"
+
+    @pytest.mark.asyncio
+    async def test_pptx_keeps_injected_extraction(self, monkeypatch, tmp_path):
+        from unittest.mock import MagicMock
+
+        import uuid as _uuid
+
+        from app.services import conversation_service as svc
+        from app.db.models.workspace import WorkspaceFile
+
+        # A fake OFFICE_EXTRACTOR that proves pptx still goes through it.
+        marker = "PPTX-EXTRACTED"
+        monkeypatch.setitem(
+            svc.OFFICE_EXTRACTORS, "pptx", lambda raw: f"<p>{marker}</p>"
+        )
+        raw = b"PK fake-pptx"
+        f = WorkspaceFile(
+            id=_uuid.uuid4(),
+            conversation_id=_uuid.uuid4(),
+            name="deck.pptx",
+            kind="pptx",
+            content=None,
+            storage_key="conversations/x/deck.pptx",
+            size_bytes=len(raw),
+            processing_status="ready",
+        )
+        fake_storage = MagicMock()
+        fake_storage.get = MagicMock(return_value=raw)
+        # _resolve_attached_files does a function-level `from app.core import
+        # object_storage` — patch the package attribute so it picks up the fake.
+        import app.core as core_pkg
+        from app.core import object_storage as _real  # noqa: F401 — gain the attr first
+        monkeypatch.setattr(core_pkg, "object_storage", fake_storage)
+        monkeypatch.setattr(
+            svc, "settings", MagicMock(workspace_root=str(tmp_path))
+        )
+
+        class FakeResult:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def scalars(self):
+                return self
+
+            def all(self):
+                return self._rows
+
+            def first(self):
+                return self._rows[0] if self._rows else None
+
+            def scalar_one_or_none(self):
+                return self._rows[0] if self._rows else None
+
+        calls = iter([
+            FakeResult([f]),
+            FakeResult([]),
+        ])
+
+        class FakeDB:
+            async def execute(self, stmt):
+                return next(calls)
+
+        attached = await svc._resolve_attached_files(
+            FakeDB(), [str(f.id)], conversation_id=str(f.conversation_id),
+        )
+        assert attached[0]["content"] == f"<p>{marker}</p>"
