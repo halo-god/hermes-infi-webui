@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import uuid
 from fastapi import (
@@ -69,6 +70,8 @@ from app.schemas.subagent import SubagentOut, SubagentSend, SubagentSpawn
 from app.schemas.team import ConsolidateRequest
 from app.services import conversation_service as svc
 from app.services import subagent_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -904,6 +907,32 @@ async def upload_file(
     name = re.sub(r"[^\w.\-\u4e00-\u9fff]", "_", file.filename or "upload").strip("_. ") or "upload"
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"
 
+    # Files that need extraction (office/pdf) or are big enough to offload to
+    # object storage are converted in the background: the row is created and
+    # returned immediately with processing_status="processing", so the chat is
+    # never blocked on extraction (which can take seconds for large PDFs).
+    needs_bg = (
+        ext in OFFICE_EXTRACTORS
+        or ext == "pdf"
+        or len(raw) > settings.file_offload_threshold_kb * 1024
+    )
+    if needs_bg:
+        wf = WorkspaceFile(
+            conversation_id=convo.id,
+            name=name,
+            kind=ext,
+            size_bytes=len(raw),
+            created_by_agent=None,
+            processing_status="processing",
+        )
+        db.add(wf)
+        await db.commit()
+        await db.refresh(wf)
+        asyncio.create_task(
+            _convert_upload_bg(wf.id, raw, ext, name, file.content_type, convo.id)
+        )
+        return WorkspaceFileOut.model_validate(wf)
+
     processed = await process_upload(
         raw, ext, f"conversations/{convo.id}", name, content_type=file.content_type,
         fast_mode=True,  # chat attachments: use fast extractors (pymupdf/python-docx),
@@ -924,6 +953,47 @@ async def upload_file(
     await db.commit()
     await db.refresh(wf)
     return WorkspaceFileOut.model_validate(wf)
+
+
+async def _convert_upload_bg(
+    file_id: uuid.UUID, raw: bytes, ext: str, name: str,
+    content_type: str | None, convo_id: uuid.UUID,
+) -> None:
+    """Background conversion for an accepted upload: extract content, flip
+    processing_status to ready (or error), then publish an SSE file event so
+    the workspace panel refreshes without a reload."""
+    async with async_session_maker() as db:
+        wf = await db.get(WorkspaceFile, file_id)
+        logger.info("BG convert start file=%s found=%s", file_id, wf is not None)
+        if wf is None:
+            return
+        try:
+            processed = await process_upload(
+                raw, ext, f"conversations/{convo_id}", name,
+                content_type=content_type, fast_mode=True,
+            )
+            wf.content = processed.content
+            wf.storage_key = processed.storage_key
+            wf.size_bytes = processed.size_bytes
+            wf.processing_status = "ready"
+            await db.commit()
+            await db.refresh(wf)
+            status = "ready"
+        except Exception:
+            logger.exception("background conversion failed for upload %s", file_id)
+            wf.processing_status = "error"
+            await db.commit()
+            status = "error"
+    try:
+        await redis_core.publish_event(str(convo_id), {
+            "type": "file",
+            "file_id": str(file_id),
+            "name": name,
+            "kind": ext,
+            "status": status,
+        })
+    except Exception:
+        logger.debug("failed to publish upload-conversion event", exc_info=True)
 
 
 @router.post("/{conversation_id}/extract-items")

@@ -192,6 +192,7 @@ class WorkspaceFileOut(BaseModel):
     current_version: int
     size_bytes: int
     created_by_agent: str | None
+    processing_status: str = "ready"  # ready | processing | error
     updated_at: datetime
 
 

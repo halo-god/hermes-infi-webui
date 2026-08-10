@@ -461,6 +461,9 @@ export interface FileItem {
   // from genuinely uploaded binary Office documents — only meaningful for
   // conversation workspace files; undefined for knowledge/project docs.
   created_by_agent?: string | null;
+  // ready | processing | error — uploads needing conversion are accepted
+  // immediately and converted in the background.
+  processing_status?: string;
 }
 
 export interface WsAdapter {
@@ -480,6 +483,7 @@ export interface WorkspaceFile {
   current_version: number;
   size_bytes: number;
   created_by_agent: string | null;
+  processing_status?: string;  // ready | processing | error
   updated_at: string;
 }
 

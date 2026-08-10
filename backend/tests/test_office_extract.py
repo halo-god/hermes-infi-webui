@@ -5,6 +5,7 @@ round-trips them through each extractor, and asserts the XSS guard (embedded
 literal "<script>" text must come out escaped, never as an executable tag).
 """
 import io
+import uuid
 
 import pytest
 from httpx import AsyncClient
@@ -113,9 +114,10 @@ def test_extract_pptx_html_per_slide():
 
 @pytest.mark.asyncio
 async def test_upload_docx_preview_and_raw_download_roundtrip(client: AsyncClient, auth_headers, test_user, db):
-    """Uploading a real .docx must: extract HTML into `content`, keep the
-    original bytes byte-identical via the raw-download route (the dual
-    -storage split), and tag `kind` correctly."""
+    """Uploading a real .docx must: accept immediately with
+    processing_status="processing" (conversion is async), then end with the
+    extracted HTML in `content`, keep the original bytes byte-identical via
+    the raw-download route (the dual-storage split), and tag `kind` correctly."""
     pytest.importorskip("moto")
     from moto import mock_aws
 
@@ -150,10 +152,37 @@ async def test_upload_docx_preview_and_raw_download_roundtrip(client: AsyncClien
             assert r.status_code == 201, r.text
             data = r.json()
             assert data["kind"] == "docx"
+            # Async conversion: the upload returns immediately in "processing".
+            assert data["processing_status"] == "processing"
             file_id = data["id"]
+
+            # The upload endpoint accepts instantly; the conversion runs in a
+            # background task. That task opens its own session and cannot see
+            # rows still inside this test's transaction (the db fixture wraps
+            # everything in a rolled-back transaction), so simulate its effect
+            # here: run process_upload and flip the row to ready.
+            from app.core.files import process_upload
+            from app.db.models.workspace import WorkspaceFile
+            wf = await db.get(WorkspaceFile, uuid.UUID(file_id))
+            assert wf is not None
+            processed = await process_upload(
+                raw, "docx", f"conversations/{convo.id}", "report.docx",
+                content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                fast_mode=True,
+            )
+            wf.content = processed.content
+            wf.storage_key = processed.storage_key
+            wf.processing_status = "ready"
+            await db.commit()
+            # updated_at is a server-side onupdate column — after commit it is
+            # stale-on-this-instance; refresh so the shared fixture session
+            # (identity-mapped to the same object) doesn't lazy-load it inside
+            # the sync pydantic validation of the detail endpoint.
+            await db.refresh(wf)
 
             detail = await client.get(f"/api/v1/conversations/{convo.id}/files/{file_id}", headers=auth_headers)
             assert detail.status_code == 200
+            assert detail.json()["processing_status"] == "ready"
             assert "<h1>Title</h1>" in detail.json()["content"]
 
             raw_resp = await client.get(f"/api/v1/conversations/{convo.id}/files/{file_id}/raw", headers=auth_headers)

@@ -513,6 +513,8 @@ function fmtDate(s: string) {
                         <span class="kind">{{ fileExt(leaf.file!) }}</span>
                         <span class="nm">{{ leaf.name }}</span>
                         <span v-if="newFileBadges.has(leaf.file!.id)" class="ws-new-badge">NEW</span>
+                        <span v-if="leaf.file!.processing_status === 'processing'" class="ws-proc">转换中…</span>
+                        <span v-else-if="leaf.file!.processing_status === 'error'" class="ws-proc ws-proc-err">解析失败</span>
                         <span v-if="leaf.file!.current_version !== undefined" class="ver">v{{ leaf.file!.current_version }}</span>
                       </button>
                     </div>
@@ -527,6 +529,8 @@ function fmtDate(s: string) {
                     <span class="kind">{{ fileExt(child.file!) }}</span>
                     <span class="nm">{{ child.name }}</span>
                     <span v-if="newFileBadges.has(child.file!.id)" class="ws-new-badge">NEW</span>
+                    <span v-if="child.file!.processing_status === 'processing'" class="ws-proc">转换中…</span>
+                    <span v-else-if="child.file!.processing_status === 'error'" class="ws-proc ws-proc-err">解析失败</span>
                     <span v-if="child.file!.current_version !== undefined" class="ver">v{{ child.file!.current_version }}</span>
                   </button>
                 </template>
@@ -542,6 +546,8 @@ function fmtDate(s: string) {
               <span class="kind">{{ fileExt(node.file!) }}</span>
               <span class="nm">{{ node.name }}</span>
               <span v-if="newFileBadges.has(node.file!.id)" class="ws-new-badge">NEW</span>
+              <span v-if="node.file!.processing_status === 'processing'" class="ws-proc">转换中…</span>
+              <span v-else-if="node.file!.processing_status === 'error'" class="ws-proc ws-proc-err">解析失败</span>
               <span v-if="node.file!.current_version !== undefined" class="ver">v{{ node.file!.current_version }}</span>
             </button>
           </template>
@@ -815,6 +821,13 @@ function fmtDate(s: string) {
   overflow: hidden; text-overflow: ellipsis;
 }
 .ws-file .ver { font-size: 9px; color: var(--ink-mute); font-family: var(--font-mono); }
+.ws-proc {
+  font-size: 9px; color: var(--accent-deep); background: var(--accent-tint);
+  border: 1px solid var(--accent-soft); border-radius: 3px; padding: 0 4px;
+  flex-shrink: 0; animation: ws-proc-pulse 1.4s ease-in-out infinite;
+}
+.ws-proc-err { color: #c0392b; background: rgba(192,57,43,0.08); border-color: rgba(192,57,43,0.25); animation: none; }
+@keyframes ws-proc-pulse { 50% { opacity: 0.45; } }
 .ws-new-badge {
   font-size: 8px; font-weight: 700;
   background: var(--ok); color: #fff;

@@ -38,6 +38,9 @@ class WorkspaceFile(UUIDPrimaryKey, Timestamps, Base):
     size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     created_by_agent: Mapped[str | None] = mapped_column(String(64))
     is_folder: Mapped[bool] = mapped_column(Boolean, default=False)
+    # ready | processing | error — uploads needing conversion are accepted
+    # immediately as 'processing' and flipped by the background converter.
+    processing_status: Mapped[str] = mapped_column(String(16), default="ready", nullable=False)
 
 
 class WorkspaceFileVersion(UUIDPrimaryKey, Base):
