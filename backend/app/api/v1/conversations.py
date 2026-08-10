@@ -451,8 +451,10 @@ async def get_shared_conversation(
     ip = request.client.host if request.client else "unknown"
     try:
         allowed, _ = await ratelimit.hit(f"rl:shared:{ip}", 30, 60)
-    except Exception:
-        allowed = False  # fail-closed
+    except ratelimit.REDIS_UNAVAILABLE:
+        # fail-closed: Redis down → 429 rather than leak shared-convo content.
+        logger.warning("Shared-conv rate limit degraded (fail-closed), ip=%s", ip)
+        allowed = False
     if not allowed:
         raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
 
@@ -1013,6 +1015,23 @@ async def _convert_upload_bg(
                     await asyncio.to_thread(object_storage.delete, raw_key)
                 except Exception:
                     logger.debug("failed to clean staged upload key %s", raw_key, exc_info=True)
+            # pptx: queue a background Docling upgrade — the fast python-pptx
+            # HTML stays in `content` for the preview, Docling writes richer
+            # Markdown into `content_md` for AI prompt injection. Non-blocking:
+            # the file is already usable with the fast extraction.
+            if ext == "pptx":
+                try:
+                    from app.core.docling_converter import is_supported as _docling_supported
+                    if _docling_supported(ext):
+                        await redis_core.enqueue_prompt({
+                            "type": "workspace_docling_upgrade",
+                            "file_id": str(file_id),
+                            "conversation_id": str(convo_id),
+                            "ext": ext,
+                            "name": name,
+                        })
+                except Exception:
+                    logger.debug("failed to enqueue pptx docling upgrade", exc_info=True)
         except Exception:
             logger.exception("background conversion failed for upload %s", file_id)
             wf.processing_status = "error"

@@ -659,6 +659,15 @@ class Runner:
             self._bg_tasks.add(t)
             t.add_done_callback(self._bg_tasks.discard)
             return
+        if task.get("type") == "workspace_docling_upgrade":
+            # Async Docling upgrade for a conversation workspace file (pptx):
+            # writes high-quality Markdown into content_md for AI injection
+            # without touching the preview HTML in `content`.
+            from agent_runner.runner_docling_upgrade import handle_workspace_docling_upgrade
+            t = asyncio.create_task(handle_workspace_docling_upgrade(task))
+            self._bg_tasks.add(t)
+            t.add_done_callback(self._bg_tasks.discard)
+            return
         if task.get("type") in ("subagent_spawn", "subagent_send"):
             # Fire-and-forget: a persistent subagent can run far longer than a
             # normal chat turn, so it must not hold a MAX_CONCURRENT semaphore

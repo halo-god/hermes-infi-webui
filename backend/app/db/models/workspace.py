@@ -34,6 +34,9 @@ class WorkspaceFile(UUIDPrimaryKey, Timestamps, Base):
     kind: Mapped[str] = mapped_column(String(16), default="md")  # md|docx|csv|json|txt
     current_version: Mapped[int] = mapped_column(Integer, default=1)
     content: Mapped[str | None] = mapped_column(Text)  # P2: inline; later → storage_key
+    # Background Docling upgrade result (Markdown): keeps `content` as the
+    # preview HTML while the AI injection prefers this higher-quality text.
+    content_md: Mapped[str | None] = mapped_column(Text)
     storage_key: Mapped[str | None] = mapped_column(String(512))
     size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     created_by_agent: Mapped[str | None] = mapped_column(String(64))

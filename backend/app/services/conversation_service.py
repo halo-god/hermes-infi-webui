@@ -331,7 +331,10 @@ async def _resolve_attached_files(
         # truncation, paginated reads. pptx/pdf keep the injected extraction
         # (the agent has no native reader for those).
         native_readable = ext in ("docx", "xlsx")
-        file_content = f.content or ""
+        # pptx: prefer the background Docling Markdown (content_md) when it has
+        # landed — higher-quality structure/tables than the fast HTML, and it
+        # does not disturb the preview (which keeps using `content`).
+        file_content = f.content_md or f.content or ""
         if native_readable:
             # docx/xlsx must never inject extracted text, regardless of what
             # the DB already holds: the upload pipeline backfills wf.content
@@ -340,16 +343,19 @@ async def _resolve_attached_files(
             # would get truncated HTML extraction instead of the original).
             file_content = ""
         raw_bytes: bytes | None = None
-        if f.storage_key and not file_content:
+        # Read the original bytes whenever we have a storage key — needed to
+        # write the workspace copy even when file_content is already populated
+        # (pptx: content holds preview HTML, content_md the Docling Markdown).
+        if f.storage_key:
             try:
                 from app.core import object_storage
                 raw_bytes = await asyncio.to_thread(object_storage.get, f.storage_key)
+            except Exception:
+                raw_bytes = None
+        if raw_bytes is not None and not file_content and not native_readable:
+            try:
                 size = len(raw_bytes)
-                if native_readable:
-                    # docx/xlsx: metadata + path only — the agent reads the
-                    # original via read_file (native extraction).
-                    file_content = ""
-                elif size <= FULL_INLINE_BYTES:
+                if size <= FULL_INLINE_BYTES:
                     # Small file: full inline
                     if ext in OFFICE_EXTRACTORS:
                         file_content = OFFICE_EXTRACTORS[ext](raw_bytes) or ""

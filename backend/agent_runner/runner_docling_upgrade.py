@@ -76,3 +76,64 @@ async def handle_docling_upgrade(task: dict) -> None:
                     await db.commit()
         except Exception:
             pass
+
+
+async def handle_workspace_docling_upgrade(task: dict) -> None:
+    """Background Docling upgrade for a conversation workspace file (pptx).
+
+    The upload pipeline keeps the fast python-pptx HTML extraction in
+    `content` (powers the workspace preview, images inline); this task writes
+    the higher-quality Markdown into `content_md`, which the attachment
+    resolver prefers for AI prompt injection. Preview is untouched."""
+    file_id = task.get("file_id")
+    ext = task.get("ext", "")
+    if not file_id:
+        return
+    from app.db.models.workspace import WorkspaceFile
+
+    try:
+        async with async_session_maker() as db:
+            f = await db.get(WorkspaceFile, uuid.UUID(file_id))
+            if f is None:
+                logger.warning("Docling upgrade: workspace file %s not found", file_id)
+                return
+            if not f.storage_key:
+                logger.warning("Docling upgrade: workspace file %s has no storage_key", file_id)
+                return
+
+            raw = await asyncio.to_thread(object_storage.get, f.storage_key)
+            if isinstance(raw, str):
+                raw = raw.encode("utf-8")
+
+            md = await asyncio.to_thread(convert_bytes_to_markdown_sync, raw, ext)
+            if md and md.strip():
+                f.content_md = md
+                logger.info(
+                    "Docling upgrade: workspace file %s updated (%d chars)",
+                    file_id[:8], len(md),
+                )
+            else:
+                logger.info(
+                    "Docling upgrade: workspace file %s — Docling returned nothing, "
+                    "keeping fast content", file_id[:8],
+                )
+            await db.commit()
+
+        try:
+            from app.core import redis as redis_core
+            await redis_core.publish_event(
+                task.get("conversation_id") or "",
+                {
+                    "type": "file",
+                    "conversation_id": task.get("conversation_id") or "",
+                    "file_id": str(file_id),
+                    "name": task.get("name") or "",
+                    "kind": ext,
+                    "status": "ready",
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("failed to publish docling-upgrade event", exc_info=True)
+
+    except Exception:  # noqa: BLE001
+        logger.exception("Docling upgrade failed for workspace file %s", file_id)

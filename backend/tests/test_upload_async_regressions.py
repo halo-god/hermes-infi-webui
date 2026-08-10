@@ -379,3 +379,73 @@ class TestNativeReadableOfficeInjection:
             FakeDB(), [str(f.id)], conversation_id=str(f.conversation_id),
         )
         assert attached[0]["content"] == f"<p>{marker}</p>"
+
+
+class TestPptxContentMdPreference:
+    """pptx: content holds preview HTML, content_md the Docling Markdown.
+    Injection must prefer content_md, and the workspace copy must be the
+    ORIGINAL bytes (not the HTML) even when content is populated."""
+
+    @pytest.mark.asyncio
+    async def test_pptx_injects_markdown_and_writes_raw_bytes(self, monkeypatch, tmp_path):
+        from unittest.mock import MagicMock
+
+        import uuid as _uuid
+
+        from app.services import conversation_service as svc
+        from app.db.models.workspace import WorkspaceFile
+
+        raw = b"PK\x03\x04 real-pptx-zip"
+        f = WorkspaceFile(
+            id=_uuid.uuid4(),
+            conversation_id=_uuid.uuid4(),
+            name="deck.pptx",
+            kind="pptx",
+            content='<div class="slide"><h4>Slide 1</h4></div>',
+            content_md="# Slide 1\n\nmarkdown body",
+            storage_key="conversations/x/deck.pptx",
+            size_bytes=len(raw),
+            processing_status="ready",
+        )
+        fake_storage = MagicMock()
+        fake_storage.get = MagicMock(return_value=raw)
+        import app.core as core_pkg
+        from app.core import object_storage as _real  # noqa: F401 — gain attr
+        monkeypatch.setattr(core_pkg, "object_storage", fake_storage)
+        monkeypatch.setattr(svc, "settings", MagicMock(workspace_root=str(tmp_path)))
+
+        class FakeResult:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def scalars(self):
+                return self
+
+            def all(self):
+                return self._rows
+
+            def first(self):
+                return self._rows[0] if self._rows else None
+
+            def scalar_one_or_none(self):
+                return self._rows[0] if self._rows else None
+
+        class FakeDB:
+            def __init__(self):
+                self._calls = iter([FakeResult([f]), FakeResult([])])
+
+            async def execute(self, stmt):
+                return next(self._calls)
+
+        db = FakeDB()
+        attached = await svc._resolve_attached_files(
+            db, [str(f.id)], conversation_id=str(f.conversation_id),
+        )
+        entry = attached[0]
+        assert entry["content"] == "# Slide 1\n\nmarkdown body"
+        assert entry["workspace_path"] == "attachments/deck.pptx"
+
+        # The workspace copy must be the original zip bytes, not the HTML.
+        p = tmp_path / str(f.conversation_id) / "attachments" / "deck.pptx"
+        assert p.read_bytes() == raw
+        assert not (tmp_path / str(f.conversation_id) / "attachments" / "deck.txt").exists()
