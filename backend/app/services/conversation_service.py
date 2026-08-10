@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json as _json
 
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -146,19 +146,28 @@ async def get_messages(
 
     When *limit* is given, returns only the most recent *limit* messages.
     *before_id* (cursor) fetches messages older than the given message id.
+
+    The cursor is a (created_at, id) tuple: user/agent message pairs share
+    the same server-side created_at timestamp (same transaction), so a
+    plain `created_at < ts` cursor would permanently skip the pair's other
+    half whenever the page boundary lands between them. The id tiebreak
+    keeps every message reachable exactly once.
     """
     stmt = (
         select(Message)
         .where(Message.conversation_id == conversation_id)
     )
     if before_id:
-        # Sub-select to get the cursor timestamp
-        cursor_ts = (
-            select(Message.created_at)
+        # Sub-select to get the cursor's (created_at, id) pair.
+        cursor = (
+            select(Message.created_at, Message.id)
             .where(Message.id == before_id)
-            .scalar_subquery()
+            .subquery()
         )
-        stmt = stmt.where(Message.created_at < cursor_ts)
+        stmt = stmt.where(
+            tuple_(Message.created_at, Message.id)
+            < tuple_(cursor.c.created_at, cursor.c.id)
+        )
     stmt = stmt.order_by(Message.created_at.desc(), Message.role.asc())
     if limit:
         stmt = stmt.limit(limit)

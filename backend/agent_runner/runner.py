@@ -1481,6 +1481,7 @@ class Runner:
         thinking: str | None = None, plan: list[dict] | None = None,
         files: list[dict] | None = None, clarifies: list[dict] | None = None,
         usage: dict | None = None, calls: list[dict] | None = None,
+        error: str | None = None,
     ) -> None:
         # Strip ANSI escape codes (terminal color codes) that the hermes agent
         # or its tools sometimes emit. Without this they render as invisible or
@@ -1493,6 +1494,10 @@ class Runner:
             msg = await db.get(Message, uuid.UUID(message_id))
             if msg:
                 content: dict = {"text": text}
+                if error:
+                    # Machine-readable failure detail for the UI's error branch
+                    # (previously the frontend only ever saw "生成中断").
+                    content["error"] = error
                 if steps:
                     content["tool_calls"] = steps
                 if thinking:
@@ -1650,11 +1655,12 @@ class Runner:
         files: list[dict] | None = None, clarifies: list[dict] | None = None,
     ) -> None:
         # Keep whatever the agent already streamed (thinking/plan/files) so a
-        # failed turn still shows its reasoning in the session log.
+        # failed turn still shows its reasoning in the session log. error= is
+        # written to content.error so the UI can show the actual reason.
         await self._finalize(
             message_id, f"⚠ 生成失败：{detail}", "error",
             calls=calls, thinking=thinking, plan=plan, files=files,
-            clarifies=clarifies,
+            clarifies=clarifies, error=detail,
         )
         await R.publish_event(
             conversation_id,

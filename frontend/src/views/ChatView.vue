@@ -602,12 +602,13 @@ async function onSend(opts?: SendOptions) {
   let text = draft.value.trim();
   if (!text) return;
   if (chat.isActivelyStreaming(chat.activeId || "")) return;
-  draft.value = "";
   if (opts?.stagedFiles?.length) showWorkspace.value = true;
-  await chat.send(text, landingProfile.value?.default_agent_id || "hermes", {
+  const ok = await chat.send(text, landingProfile.value?.default_agent_id || "hermes", {
     ...opts,
     taskId: discussTask.value?.id,
   });
+  if (!ok) return; // send failed — keep the draft so the user can retry
+  draft.value = "";
   clearReply();
   await scrollDown();
 }
@@ -1239,7 +1240,7 @@ onUnmounted(() => {
                     <span v-else class="typing"><span></span><span></span><span></span></span>
                   </template>
                   <div v-else-if="chat.messages[row.index].role === 'agent' && chat.messages[row.index].status === 'error'" class="msg-error-tag">
-                    ⚠ {{ chat.messages[row.index].content.error || '生成中断' }}
+                    ⚠ {{ chat.messages[row.index].content.error || String(chat.messages[row.index].content.text || '').replace(/^⚠ 生成失败：/, '') || '生成中断' }}
                     <button class="inline-retry-btn" @click="regenerate(chat.messages[row.index].id)">重新生成</button>
                   </div>
                   <div v-else-if="chat.messages[row.index].role === 'agent'" class="md-body" v-html="highlightMentions(mdSearch(chat.messages[row.index].content.text, ragRefsFor(row.index)?.length ? { citeRefs: true } : undefined))" />
@@ -1353,6 +1354,10 @@ onUnmounted(() => {
           <button class="discuss-task-clear" title="取消任务关联" @click="discussTask = null">
             <Icon name="close" :size="11" />
           </button>
+        </div>
+        <div v-if="chat.streamError" class="stream-banner">
+          <span>⚠ {{ chat.streamError }}，消息可能未送达</span>
+          <button class="stream-banner-dismiss" @click="chat.clearStreamError()">知道了</button>
         </div>
         <Composer
           v-model="draft"
@@ -1492,6 +1497,19 @@ onUnmounted(() => {
   gap: 10px;
   flex-wrap: wrap;
 }
+.stream-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin: 0 12px 8px; padding: 7px 12px;
+  font-size: 12.5px; color: #c0392b;
+  border: 1px solid rgba(192, 57, 43, 0.35);
+  background: rgba(192, 57, 43, 0.07);
+  border-radius: 8px;
+}
+.stream-banner-dismiss {
+  border: 1px solid rgba(192, 57, 43, 0.4); background: transparent; color: #c0392b;
+  border-radius: 5px; font-size: 11.5px; padding: 2px 8px; cursor: pointer; flex-shrink: 0;
+}
+.stream-banner-dismiss:hover { background: rgba(192, 57, 43, 0.12); }
 .inline-retry-btn {
   border: 1px solid currentColor;
   background: transparent;
