@@ -53,12 +53,12 @@ async def main() -> None:
     # ── 2. global overflow guard ─────────────────────────────────────────
     print("\n[2] global overflow guard rl:global:msg")
     await r.delete("rl:global:msg")
-    g_limit = int(os.environ.get("GLOBAL_CAP", "10"))
-    # set a low global cap for the test by directly toggling the key
-    await r.set("cfg:rate_limit_per_min", 30)
-    hits = 0
-    # monkey-patch the module constant path: use a distinct uid so per-user
-    # never trips; drive global with its own counter via hit()
+    # NOTE: no cfg:rate_limit_per_min write here. Each uid sends exactly one
+    # message with its per-user key deleted first, so the per-user cap never
+    # trips regardless of the configured threshold; the global cap is driven
+    # purely by the settings monkey-patch below. Writing the cfg key would
+    # only risk leaving a stale test value in production (and the save/restore
+    # dance still pollutes concurrent pytest during the run window).
     from app.core import ratelimit as rl
 
     # simulate: 30 uids each sending 1 msg => global counter climbs fast
@@ -129,14 +129,32 @@ async def main() -> None:
         seen2[15][0] is False and seen2[15][1] == "ip",
         f"16th={seen2[15]}",
     )
-    # success clears counters
+    # success clears the ACCOUNT counter only; ip counter survives (anti-NAT:
+    # a legit credential holder must not be able to reset a shared IP's
+    # brute-force counter). Burn BOTH dims past their caps on the same pair,
+    # then assert the real semantics.
+    for i in range(7):
+        await ratelimit.check_login(ip, acct)
+    for i in range(17):
+        await ratelimit.check_login(ip, f"nat@{i}.dev")
     await ratelimit.clear_login(ip, acct)
+    # dim == "ip" (not "account") proves the account counter was reset and the
+    # ip counter is still the blocker — one assertion, no luck involved.
     ok, dim = await ratelimit.check_login(ip, acct)
-    check("clear_login resets both counters", ok is True and dim is None, f"={ok}")
+    check("clear_login resets account (ip now the blocker)", ok is False and dim == "ip", f"={dim}")
+    ok2, dim2 = await ratelimit.check_login("10.9.9.200", acct)
+    check("account usable after clear_login", ok2 is True and dim2 is None, f"={ok2}")
+    ok3, dim3 = await ratelimit.check_login(ip, "nat-fresh@x.dev")
+    check("ip counter survives clear_login", ok3 is False and dim3 == "ip", f"={dim3}")
 
     # cleanup
     for i in range(17):
         await r.delete(f"rl:login:user:loadtest@{i}.dev")
+        await r.delete(f"rl:login:user:nat@{i}.dev")
+    await r.delete("rl:login:user:nat-fresh@x.dev")
+    await r.delete(f"rl:login:user:{acct}")
+    await r.delete("rl:login:ip:10.9.9.200")
+    await r.delete(f"rl:login:ip:{ip}")
     await r.delete(f"rl:login:ip:{ip2}")
     await close_redis()
 
