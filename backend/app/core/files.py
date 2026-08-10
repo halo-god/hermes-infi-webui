@@ -103,6 +103,11 @@ def extract_docx_html(raw: bytes) -> str | None:
 
         def process_paragraph(p_elem) -> None:
             """Process a single <w:p> element, extracting text runs + images."""
+            # list_buf/list_tag are closed over by flush_list() — this function
+            # also assigns list_tag below, so it must declare nonlocal too
+            # (otherwise the assignment makes list_tag local and reading it in
+            # the `if list_tag != ...` guards raises UnboundLocalError).
+            nonlocal list_buf, list_tag
             # Find the corresponding python-docx Paragraph object
             para = None
             for dp in doc.paragraphs:
@@ -264,6 +269,7 @@ def extract_pptx_html(raw: bytes) -> str | None:
 
         prs = Presentation(io.BytesIO(raw))
         parts: list[str] = []
+        inline_img_count = 0
         for i, slide in enumerate(prs.slides, start=1):
             parts.append(f'<div class="slide"><h4>Slide {i}</h4>')
             for shape in slide.shapes:
@@ -283,12 +289,17 @@ def extract_pptx_html(raw: bytes) -> str | None:
 
                 # ── Images / pictures ──
                 if shape.shape_type in (MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.GROUP):
-                    img_b64 = _pptx_shape_image_b64(shape)
-                    if img_b64:
-                        parts.append(
-                            f'<div class="slide-img"><img src="data:image/png;base64,'
-                            f'{img_b64}" alt="图片" /></div>'
-                        )
+                    # Cap inline images — a picture-heavy deck would otherwise
+                    # balloon the preview HTML into multi-MB base64 and stall
+                    # the browser.
+                    if inline_img_count < _PPTX_MAX_INLINE_IMAGES:
+                        img_b64, img_mime = _pptx_shape_image_b64(shape)
+                        if img_b64:
+                            inline_img_count += 1
+                            parts.append(
+                                f'<div class="slide-img"><img src="data:{img_mime};base64,'
+                                f'{img_b64}" alt="图片" /></div>'
+                            )
                     continue
 
                 # ── Text frames (title / body / notes) ──
@@ -315,8 +326,22 @@ def extract_pptx_html(raw: bytes) -> str | None:
         return None
 
 
-def _pptx_shape_image_b64(shape) -> str | None:
-    """Extract an inline PNG base64 from a pptx picture/group shape."""
+# Inline images bigger than this are dropped from the preview (base64 expands
+# by ~33% — a multi-MB picture would balloon the preview HTML for no benefit).
+_PPTX_IMAGE_MAX_BYTES = 2 * 1024 * 1024
+# Total inline images per deck — picture-heavy decks (hundreds of images)
+# would otherwise produce multi-MB preview HTML and stall the browser.
+_PPTX_MAX_INLINE_IMAGES = 40
+
+
+def _pptx_shape_image_b64(shape) -> tuple[str, str] | tuple[None, str]:
+    """Extract an inline base64 + content-type from a pptx picture/group shape.
+
+    Returns (b64, mime); mime is the picture's real content type (image/jpeg
+    for JPEGs — hardcoding image/png breaks those). Oversized images yield
+    (None, "") so the preview stays light. For grouped shapes only the first
+    picture is taken (preview compromise).
+    """
     try:
         import base64 as _b64
 
@@ -325,22 +350,26 @@ def _pptx_shape_image_b64(shape) -> str | None:
         def _walk(s):
             if getattr(s, "shape_type", None) == MSO_SHAPE_TYPE.PICTURE and hasattr(s, "image"):
                 try:
-                    return s.image.blob
+                    blob = s.image.blob
+                    if len(blob) > _PPTX_IMAGE_MAX_BYTES:
+                        return None
+                    return (blob, s.image.content_type or "image/png")
                 except Exception:
                     return None
             if getattr(s, "shape_type", None) == MSO_SHAPE_TYPE.GROUP:
                 for sub in getattr(s, "shapes", []):
-                    b = _walk(sub)
-                    if b:
-                        return b
+                    hit = _walk(sub)
+                    if hit:
+                        return hit
             return None
 
-        blob = _walk(shape)
-        if blob:
-            return _b64.b64encode(blob).decode("ascii")
+        hit = _walk(shape)
+        if hit:
+            blob, mime = hit
+            return (_b64.b64encode(blob).decode("ascii"), mime)
     except Exception:
-        return None
-    return None
+        return None, ""
+    return None, ""
 
 
 def extract_csv_html(raw: bytes) -> str | None:
