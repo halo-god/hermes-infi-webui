@@ -24,7 +24,7 @@ class FakeProc:
 class RiskToolClient:
     """Fake ACPClient that emits one tool_call with a configurable title."""
 
-    def __init__(self, command, cwd, *, protocol_version=1, on_update=None, on_fs_write=None, env=None):
+    def __init__(self, command, cwd, *, protocol_version=1, on_update=None, on_fs_write=None, env=None, on_permission_request=None):
         self.on_update = on_update
         self.cancelled = False
         self.tool_title = "risky-mcp-server/delete-file"

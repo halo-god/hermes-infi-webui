@@ -52,10 +52,24 @@ async def _ok() -> bool:
         return False
 
 
+async def _ensure_provider(pid: str, label: str) -> None:
+    """The test DB is recreated per session (drop schema) and providers are
+    seed-only — PATCH /admin/identity/{pid} 404s without the row. Insert it."""
+    from app.db.models.identity import IdentityProvider
+
+    async with async_session_maker() as db:
+        p = await db.get(IdentityProvider, pid)
+        if p is None:
+            db.add(IdentityProvider(id=pid, label=label, enabled=False, config={}))
+            await db.commit()
+
+
 @pytest.mark.asyncio
 async def test_ldap_login_and_mapping():
     if not await _ok():
         pytest.skip("PostgreSQL not reachable")
+
+    await _ensure_provider("ldap", "LDAP")
 
     # inject the mock LDAP connection factory
     identity_service.LDAP._factory = _mock_factory

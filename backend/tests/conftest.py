@@ -173,18 +173,32 @@ async def test_user(db: AsyncSession) -> User:
 
 @pytest_asyncio.fixture
 async def admin_user(db: AsyncSession) -> User:
-    from app.core.security import hash_password
-    user = User(
-        id=uuid.uuid4(),
-        email="admin@hermes.io",
-        name="Admin User",
-        password_hash=hash_password("Admin@1234"),
-        is_active=True,
-        role="admin",
-    )
-    db.add(user)
-    await db.flush()
-    await db.refresh(user)
+    """The session-scoped _ensure_admin_matches_settings already seeds
+    settings.first_admin_email as super_admin — reuse that row instead of
+    inserting a duplicate (unique email constraint)."""
+    from sqlalchemy import select
+
+    from app.config import settings
+    from app.db.models.user import User
+
+    user = (
+        await db.execute(
+            select(User).where(User.email == settings.first_admin_email)
+        )
+    ).scalar_one_or_none()
+    if user is None:
+        from app.core.security import hash_password
+        user = User(
+            id=uuid.uuid4(),
+            email=settings.first_admin_email,
+            name="Admin User",
+            password_hash=hash_password("Admin@1234"),
+            is_active=True,
+            role="admin",
+        )
+        db.add(user)
+        await db.flush()
+        await db.refresh(user)
     return user
 
 

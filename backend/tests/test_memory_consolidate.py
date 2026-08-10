@@ -131,9 +131,12 @@ def test_excerpt_skips_system_and_error():
 def test_excerpt_user_agent_roundtable():
     assert _message_excerpt(_msg("user", {"text": "你好"})) == "用户: 你好"
     assert _message_excerpt(_msg("agent", {"text": "答复"})) == "AI: 答复"
+    # Roundtable merges are orchestrator-synthesized (may embed tool outputs) —
+    # deliberately discarded from the consolidation transcript (see
+    # _message_excerpt docstring).
     assert _message_excerpt(
         _msg("roundtable", {"merged": {"text": "综合结论"}})
-    ) == "AI(圆桌): 综合结论"
+    ) is None
     assert _message_excerpt(_msg("agent", {"text": ""})) is None
 
 
