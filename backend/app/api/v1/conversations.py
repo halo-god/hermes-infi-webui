@@ -29,6 +29,7 @@ from app.core.files import (
     process_upload,
     is_text_extractable,
     OFFICE_EXTRACTORS,
+    PLAIN_TEXT_EXTS,
 )
 from app.core import object_storage
 from app.db.base import async_session_maker, get_db
@@ -800,11 +801,18 @@ async def get_file_raw(
         except Exception:
             raise HTTPException(status_code=503, detail="存储不可用")
     elif f.content:
-        import base64
-        try:
-            data = base64.b64decode(f.content)
-        except Exception:
+        # Inline small files: text types are stored decoded, non-text kinds
+        # base64 (process_upload). Branch by kind — a blind b64decode would
+        # silently corrupt plain text that happens to be valid base64 (e.g.
+        # "SGVsbG8=" decodes to "Hello").
+        if ext in PLAIN_TEXT_EXTS or ext == "pdf":
             data = f.content.encode("utf-8")
+        else:
+            import base64
+            try:
+                data = base64.b64decode(f.content)
+            except Exception:
+                data = f.content.encode("utf-8")
     else:
         raise HTTPException(status_code=404, detail="文件内容不存在")
 
@@ -917,11 +925,24 @@ async def upload_file(
         or len(raw) > settings.file_offload_threshold_kb * 1024
     )
     if needs_bg:
+        # Persist the raw bytes up front (a cheap PUT) so a failed background
+        # conversion can be retried later via POST .../files/{id}/retry —
+        # otherwise the bytes only exist in this request's memory.
+        raw_key = f"conversations/{convo.id}/{uuid.uuid4().hex}/{name}"
+        try:
+            await asyncio.to_thread(
+                object_storage.put, raw_key, raw, file.content_type or "application/octet-stream"
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503, detail="文件存储不可用，请检查对象存储配置"
+            ) from exc
         wf = WorkspaceFile(
             conversation_id=convo.id,
             name=name,
             kind=ext,
             size_bytes=len(raw),
+            storage_key=raw_key,
             created_by_agent=None,
             processing_status="processing",
         )
@@ -964,9 +985,9 @@ async def _convert_upload_bg(
     the workspace panel refreshes without a reload."""
     async with async_session_maker() as db:
         wf = await db.get(WorkspaceFile, file_id)
-        logger.info("BG convert start file=%s found=%s", file_id, wf is not None)
         if wf is None:
             return
+        raw_key = wf.storage_key  # uploaded raw bytes (retry source)
         try:
             processed = await process_upload(
                 raw, ext, f"conversations/{convo_id}", name,
@@ -979,6 +1000,13 @@ async def _convert_upload_bg(
             await db.commit()
             await db.refresh(wf)
             status = "ready"
+            # The raw-bytes object staged at upload time is superseded by
+            # process_upload's own key — drop it so it doesn't leak.
+            if raw_key and raw_key != processed.storage_key:
+                try:
+                    await asyncio.to_thread(object_storage.delete, raw_key)
+                except Exception:
+                    logger.debug("failed to clean staged upload key %s", raw_key, exc_info=True)
         except Exception:
             logger.exception("background conversion failed for upload %s", file_id)
             wf.processing_status = "error"
@@ -987,6 +1015,7 @@ async def _convert_upload_bg(
     try:
         await redis_core.publish_event(str(convo_id), {
             "type": "file",
+            "conversation_id": str(convo_id),
             "file_id": str(file_id),
             "name": name,
             "kind": ext,
@@ -994,6 +1023,60 @@ async def _convert_upload_bg(
         })
     except Exception:
         logger.debug("failed to publish upload-conversion event", exc_info=True)
+
+
+@router.delete("/{conversation_id}/files/{file_id}", status_code=204)
+async def delete_workspace_file(
+    conversation_id: uuid.UUID,
+    file_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a workspace file (and its object-storage bytes, if any)."""
+    await _require_convo(db, conversation_id, user)
+    f = await db.get(WorkspaceFile, file_id)
+    if f is None or f.conversation_id != conversation_id:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    if f.storage_key:
+        try:
+            await asyncio.to_thread(object_storage.delete, f.storage_key)
+        except Exception:
+            logger.debug("failed to delete storage object for %s", file_id, exc_info=True)
+    await db.delete(f)
+    await db.commit()
+
+
+@router.post("/{conversation_id}/files/{file_id}/retry", response_model=WorkspaceFileOut)
+async def retry_file_conversion(
+    conversation_id: uuid.UUID,
+    file_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Retry a failed (or stalled) upload conversion. Requires the raw bytes
+    staged at upload time (storage_key present). Flips the row back to
+    processing and re-runs the background extractor."""
+    await _require_convo(db, conversation_id, user)
+    wf = await db.get(WorkspaceFile, file_id)
+    if wf is None or wf.conversation_id != conversation_id:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    if wf.processing_status == "processing":
+        return WorkspaceFileOut.model_validate(wf)
+    if not wf.storage_key:
+        raise HTTPException(status_code=409, detail="原始文件不可用，无法重试，请重新上传")
+    try:
+        raw = await asyncio.to_thread(object_storage.get, wf.storage_key)
+    except Exception:
+        raise HTTPException(status_code=503, detail="存储不可用") from None
+    if not raw:
+        raise HTTPException(status_code=409, detail="原始文件不可用，无法重试，请重新上传")
+    wf.processing_status = "processing"
+    await db.commit()
+    ext = (wf.kind or "").lower()
+    asyncio.create_task(
+        _convert_upload_bg(wf.id, raw, ext, wf.name, None, conversation_id)
+    )
+    return WorkspaceFileOut.model_validate(wf)
 
 
 @router.post("/{conversation_id}/extract-items")

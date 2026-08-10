@@ -12,6 +12,25 @@ import type { Profile } from "@/api/agents";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api/v1";
 
+/** Poll a freshly-uploaded file until its async conversion finishes.
+ * Returns true when the file is ready to attach; false on error/timeout. */
+async function waitForFileReady(fileId: string, convoId: string, timeoutMs = 15000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const list = await conversationsApi.files(convoId);
+      const f = list.find((x) => x.id === fileId);
+      if (!f) return false; // gone
+      if (f.processing_status === "ready") return true;
+      if (f.processing_status === "error") return false;
+    } catch {
+      /* transient — keep polling until the deadline */
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  return false;
+}
+
 export const useChatStore = defineStore("chat", () => {
   const conversations = ref<Conversation[]>([]);
   const profiles = ref<Profile[]>([]);
@@ -439,8 +458,28 @@ export const useChatStore = defineStore("chat", () => {
     if (opts?.stagedFiles?.length) {
       try {
         const uploaded = await Promise.all(opts.stagedFiles.map((f) => conversationsApi.upload(id, f)));
-        fileIds = uploaded.map((r) => r.id);
         files.value = [...files.value, ...uploaded];
+        // Uploads needing conversion (office/pdf/large) return immediately in
+        // "processing" — wait for them to finish so the AI actually receives
+        // the attachment instead of an empty file (or none at all).
+        const ns = useNotificationStore();
+        const readyIds: string[] = [];
+        for (const u of uploaded) {
+          if (u.processing_status === "processing") {
+            if (await waitForFileReady(u.id, id)) {
+              readyIds.push(u.id);
+            } else {
+              ns.push({
+                title: "附件转换未完成",
+                body: `${u.name} 转换超时或失败，本轮消息未附带该文件，可稍后重试`,
+                kind: "warn",
+              });
+            }
+          } else {
+            readyIds.push(u.id);
+          }
+        }
+        fileIds = readyIds;
       } catch (e) {
         console.error("[chat] file upload failed:", e);
         // Notify the user instead of silently sending without the attachment —

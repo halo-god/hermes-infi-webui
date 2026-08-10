@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core import redis as redis_core
-from app.core.files import confine_to_dir, safe_relative_path, OFFICE_EXTRACTORS
+from app.core.files import confine_to_dir, safe_relative_path, OFFICE_EXTRACTORS, PLAIN_TEXT_EXTS
 from app.db.models.agent import Profile
 from app.db.models.conversation import Conversation, ConversationSummary, GroupMember, Message
 from app.db.models.workspace import WorkspaceFile, WorkspaceFileVersion
@@ -1869,6 +1869,23 @@ async def update_file_content(
     f.content = content
     f.size_bytes = len(content.encode("utf-8"))
     f.current_version += 1
+    # Sync object storage ONLY for plain-text kinds. Office/PDF objects hold
+    # the ORIGINAL binary upload (content is an extracted preview), images
+    # hold raw pixels — overwriting any of those with edited text would
+    # destroy the user's source file (raw download would serve text
+    # masquerading as the original). Only text kinds have content that IS
+    # the edited payload, so only they get written back.
+    if f.storage_key:
+        kind = (f.kind or "").lower()
+        if kind in PLAIN_TEXT_EXTS:
+            from app.core import object_storage
+            from agent_runner.storage import _CONTENT_TYPE  # noqa: PLC2701
+            await asyncio.to_thread(
+                object_storage.put,
+                f.storage_key,
+                content.encode("utf-8"),
+                _CONTENT_TYPE.get(kind, "text/plain"),
+            )
     await db.commit()
     await db.refresh(f)
     return f

@@ -80,7 +80,6 @@ async def allow_send(user_id: str) -> bool:
     blocked — the per-user cap is an abuse guard, not a business rule.
     """
     limit = await get_rate_limit()
-    r = get_redis()
     try:
         allowed, _ = await hit(f"rl:msg:{user_id}", limit, 60)
         if allowed:

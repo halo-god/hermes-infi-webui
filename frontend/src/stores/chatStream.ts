@@ -302,6 +302,12 @@ export function registerStreamHandlers(
   }, activeId));
 
   stream.on("file", scoped((ev) => {
+    // Upload-conversion completion events carry a status — patch the row
+    // in place so the "转换中…" badge flips without waiting for the refetch.
+    if (ev.status) {
+      const row = files.value.find((f) => f.id === ev.file_id);
+      if (row) (row as { processing_status?: string }).processing_status = ev.status;
+    }
     const m = find(ev.message_id);
     if (m) {
       if (!m.content.files) m.content = { ...m.content, files: [] };

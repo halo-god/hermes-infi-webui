@@ -12,7 +12,7 @@ const props = defineProps<{
   uploadable?: boolean;
   initialFileId?: string;
 }>();
-const emit = defineEmits<{ close: [] }>();
+const emit = defineEmits<{ close: []; changed: [] }>();
 
 // ── Folder tree support ──
 interface TreeNode {
@@ -191,6 +191,11 @@ const officeHtml = computed(() => {
   // directly, no client-side parsing needed.
   return previewVersion.value?.content ?? content.value ?? "";
 });
+// Uploaded office/csv files store pre-rendered HTML; AI-authored files with a
+// .docx label are plain markdown. Distinguish by content, not by provenance
+// (ownership transfer on user edit would otherwise flip the render mode and
+// mangle the preview).
+const isHtmlContent = computed(() => (previewVersion.value?.content ?? content.value ?? "").trimStart().startsWith("<"));
 const jsonPretty = computed(() => {
   const src = previewVersion.value?.content ?? content.value;
   try { return JSON.stringify(JSON.parse(src), null, 2); } catch { return src; }
@@ -291,11 +296,47 @@ async function loadContent(f: FileItem) {
     loading.value = false;
     return;
   }
+  if (f.processing_status === "processing") {
+    // Conversion still running — nothing to render yet; the SSE file event
+    // (or next refetch) flips the row and re-loads the content.
+    content.value = "";
+    loading.value = false;
+    return;
+  }
   loading.value = true;
   try {
     content.value = await props.adapter.getContent(f.id);
   } finally {
     loading.value = false;
+  }
+}
+
+async function removeFile(f: FileItem) {
+  if (!props.adapter.removeFile) return;
+  if (!window.confirm(`确定删除「${f.name}」吗？此操作不可恢复。`)) return;
+  try {
+    await props.adapter.removeFile(f.id);
+    const tab = openTabs.value.find((t) => t.fileId === f.id);
+    if (tab) closeTab(tab.id);
+    emit("changed");
+  } catch {
+    window.alert("删除失败，请稍后重试");
+  }
+}
+
+async function retryFile(f: FileItem) {
+  if (!props.adapter.retryFile) return;
+  try {
+    await props.adapter.retryFile(f.id);
+    // Back to processing — re-open so the "转换中…" placeholder shows.
+    const tab = openTabs.value.find((t) => t.fileId === f.id);
+    if (tab) {
+      const fresh = props.files.find((x) => x.id === f.id);
+      if (fresh) loadContent(fresh);
+    }
+    emit("changed");
+  } catch {
+    window.alert("重试失败，请重新上传该文件");
   }
 }
 
@@ -516,6 +557,10 @@ function fmtDate(s: string) {
                         <span v-if="leaf.file!.processing_status === 'processing'" class="ws-proc">转换中…</span>
                         <span v-else-if="leaf.file!.processing_status === 'error'" class="ws-proc ws-proc-err">解析失败</span>
                         <span v-if="leaf.file!.current_version !== undefined" class="ver">v{{ leaf.file!.current_version }}</span>
+                        <span class="ws-file-ops">
+                          <button v-if="leaf.file!.processing_status === 'error' && adapter.retryFile" class="ws-op" title="重试转换" @click.stop="retryFile(leaf.file!)">↻</button>
+                          <button v-if="adapter.removeFile" class="ws-op" title="删除" @click.stop="removeFile(leaf.file!)">✕</button>
+                        </span>
                       </button>
                     </div>
                   </div>
@@ -532,6 +577,10 @@ function fmtDate(s: string) {
                     <span v-if="child.file!.processing_status === 'processing'" class="ws-proc">转换中…</span>
                     <span v-else-if="child.file!.processing_status === 'error'" class="ws-proc ws-proc-err">解析失败</span>
                     <span v-if="child.file!.current_version !== undefined" class="ver">v{{ child.file!.current_version }}</span>
+                    <span class="ws-file-ops">
+                      <button v-if="child.file!.processing_status === 'error' && adapter.retryFile" class="ws-op" title="重试转换" @click.stop="retryFile(child.file!)">↻</button>
+                      <button v-if="adapter.removeFile" class="ws-op" title="删除" @click.stop="removeFile(child.file!)">✕</button>
+                    </span>
                   </button>
                 </template>
               </div>
@@ -549,6 +598,10 @@ function fmtDate(s: string) {
               <span v-if="node.file!.processing_status === 'processing'" class="ws-proc">转换中…</span>
               <span v-else-if="node.file!.processing_status === 'error'" class="ws-proc ws-proc-err">解析失败</span>
               <span v-if="node.file!.current_version !== undefined" class="ver">v{{ node.file!.current_version }}</span>
+              <span class="ws-file-ops">
+                <button v-if="node.file!.processing_status === 'error' && adapter.retryFile" class="ws-op" title="重试转换" @click.stop="retryFile(node.file!)">↻</button>
+                <button v-if="adapter.removeFile" class="ws-op" title="删除" @click.stop="removeFile(node.file!)">✕</button>
+              </span>
             </button>
           </template>
         </template>
@@ -601,6 +654,24 @@ function fmtDate(s: string) {
         <div class="ws-preview">
           <div v-if="loading" class="ws-loading">加载中…</div>
 
+          <!-- Conversion in progress -->
+          <div v-else-if="activeFile?.processing_status === 'processing'" class="ws-processing">
+            <Icon name="refresh" :size="28" style="color: var(--ink-mute); animation: ws-proc-pulse 1.4s ease-in-out infinite" />
+            <div style="margin-top: 12px; font-size: 13px; color: var(--ink-mute)">文件内容转换中…</div>
+            <div style="margin-top: 4px; font-size: 12px; color: var(--ink-faint)">后台解析完成后会自动显示预览</div>
+          </div>
+
+          <!-- Conversion failed -->
+          <div v-else-if="activeFile?.processing_status === 'error'" class="ws-processing">
+            <Icon name="doc" :size="28" style="color: #c0392b" />
+            <div style="margin-top: 12px; font-size: 13px; color: #c0392b">文件解析失败</div>
+            <div style="margin-top: 4px; font-size: 12px; color: var(--ink-faint)">可重试转换，或删除后重新上传</div>
+            <div style="margin-top: 14px; display: flex; gap: 8px; justify-content: center">
+              <button v-if="adapter.retryFile" class="btn primary" @click="retryFile(activeFile)">重试转换</button>
+              <button v-if="adapter.removeFile" class="btn" @click="removeFile(activeFile)">删除文件</button>
+            </div>
+          </div>
+
           <!-- Edit mode -->
           <template v-else-if="editMode && activeFile">
             <div class="ws-edit-bar">
@@ -632,17 +703,24 @@ function fmtDate(s: string) {
               v-else-if="fileMode(activeFile) === 'office'"
               class="md-preview office-preview"
             >
-              <div v-if="!officeHtml" class="ws-unknown">
-                <Icon name="doc" style="font-size: 40px; color: var(--ink-mute)" />
-                <div style="font-size: 13px; color: var(--ink-mute); margin-top: 12px">{{ activeFile.name }}</div>
-                <div style="font-size: 12px; color: var(--ink-faint); margin-top: 4px">该文档暂时无法在线预览，请下载查看</div>
-                <button class="btn" style="margin-top: 16px" @click="download">下载文件</button>
-              </div>
-              <div v-else v-html="officeHtml" />
+              <!-- AI-authored files carry a .docx label but hold markdown text —
+                   render as markdown unless the content is actually HTML -->
+              <div v-if="!isHtmlContent" class="md-preview" v-html="mdHtml" />
+              <template v-else>
+                <div v-if="!officeHtml" class="ws-unknown">
+                  <Icon name="doc" style="font-size: 40px; color: var(--ink-mute)" />
+                  <div style="font-size: 13px; color: var(--ink-mute); margin-top: 12px">{{ activeFile.name }}</div>
+                  <div style="font-size: 12px; color: var(--ink-faint); margin-top: 4px">该文档暂时无法在线预览，请下载查看</div>
+                  <button class="btn" style="margin-top: 16px" @click="download">下载文件</button>
+                </div>
+                <div v-else v-html="officeHtml" />
+              </template>
             </div>
             <!-- JSON -->
             <pre v-else-if="fileMode(activeFile) === 'json'" class="json-preview">{{ jsonPretty }}</pre>
-            <!-- CSV table -->
+            <!-- CSV: uploaded CSVs come pre-rendered as an HTML table; AI-authored
+                 .csv is raw text — detect and render accordingly -->
+            <div v-else-if="fileMode(activeFile) === 'csv' && isHtmlContent" class="md-preview office-preview" v-html="officeHtml" />
             <div v-else-if="fileMode(activeFile) === 'csv'" class="csv-wrap">
               <table class="csv-preview">
                 <thead><tr><th v-for="(c, i) in csvRows[0]" :key="i">{{ c }}</th></tr></thead>
@@ -828,6 +906,18 @@ function fmtDate(s: string) {
 }
 .ws-proc-err { color: #c0392b; background: rgba(192,57,43,0.08); border-color: rgba(192,57,43,0.25); animation: none; }
 @keyframes ws-proc-pulse { 50% { opacity: 0.45; } }
+.ws-file-ops { display: none; flex-shrink: 0; gap: 2px; margin-left: 4px; }
+.ws-file:hover .ws-file-ops { display: inline-flex; }
+.ws-op {
+  border: none; background: transparent; cursor: pointer; color: var(--ink-mute);
+  font-size: 11px; line-height: 1; padding: 1px 3px; border-radius: 3px;
+}
+.ws-op:hover { background: var(--accent-tint); color: var(--ink); }
+.ws-op[title="删除"]:hover { color: #c0392b; }
+.ws-processing {
+  flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  color: var(--ink-mute); min-height: 200px;
+}
 .ws-new-badge {
   font-size: 8px; font-weight: 700;
   background: var(--ok); color: #fff;

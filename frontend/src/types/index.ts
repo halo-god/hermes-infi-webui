@@ -473,6 +473,8 @@ export interface WsAdapter {
   getVersions?: (fileId: string) => Promise<WorkspaceFileVersion[]>;
   restoreVersion?: (fileId: string, versionNum: number) => Promise<string>;
   upload?: (file: File) => Promise<void>;
+  removeFile?: (fileId: string) => Promise<void>;
+  retryFile?: (fileId: string) => Promise<void>;
 }
 
 export interface WorkspaceFile {
@@ -533,7 +535,7 @@ export type StreamEvent = (
   | { type: "start"; message_id: string; agent_id?: string; profile_id?: string }
   | { type: "token"; message_id: string; delta: string }
   | { type: "tool_call"; message_id: string; title?: string; status?: string; raw_input?: unknown; tool_kind?: string }
-  | { type: "file"; message_id: string; file_id: string; name: string; kind: string; version: number; diff?: string | null }
+  | { type: "file"; message_id: string; file_id: string; name: string; kind: string; version: number; diff?: string | null; status?: string }
   | { type: "done"; message_id: string; status: string; stop_reason?: string; text?: string }
   | { type: "error"; message_id: string; detail: string }
   | { type: "rt_start"; message_id: string; agents: RtAgentMeta[] }

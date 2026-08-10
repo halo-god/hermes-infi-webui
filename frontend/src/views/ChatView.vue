@@ -705,8 +705,17 @@ const wsAdapter = computed<WsAdapter>(() => {
         chat.files.push(uploaded);
       }
     },
+    removeFile: (fid) => conversationsApi.deleteFile(cid!, fid),
+    retryFile: (fid) => conversationsApi.retryFile(cid!, fid).then(() => undefined),
   };
 });
+
+async function refreshWorkspaceFiles() {
+  if (!chat.activeId) return;
+  try {
+    chat.files = await conversationsApi.files(chat.activeId);
+  } catch { /* panel closes; store refresh happens on next open */ }
+}
 
 // ── Context window ring ──
 const ctxMax = computed(() => chat.contextSize > 0 ? chat.contextSize : 200_000);
@@ -1031,7 +1040,7 @@ onUnmounted(() => {
             <button class="thread-action text-mute-sm" v-if="chat.messages.length" @click="showSearch = !showSearch" style="flex-shrink:0;margin-top:2px" title="搜索消息 ⌘F">
               <Icon name="search" />
             </button>
-            <button class="thread-action text-mute-sm" v-if="chat.files.length" @click="showWorkspace = !showWorkspace" style="flex-shrink:0;margin-top:2px">
+            <button class="thread-action text-mute-sm" v-if="chat.activeId" @click="showWorkspace = !showWorkspace" style="flex-shrink:0;margin-top:2px" title="工作区">
               <Icon name="folder" /> 工作区 ({{ chat.files.length }})
             </button>
             <button class="thread-action text-mute-sm" v-if="isGroup" @click="showMemberPanel = !showMemberPanel" style="flex-shrink:0;margin-top:2px" title="群聊成员">
@@ -1367,11 +1376,13 @@ onUnmounted(() => {
       </div>
 
       <WorkspacePanel
-        v-if="showWorkspace && chat.activeId && chat.files.length"
+        v-if="showWorkspace && chat.activeId"
         :files="chat.files"
         :adapter="wsAdapter"
+        :uploadable="true"
         :initial-file-id="openFileId || undefined"
         @close="showWorkspace = false; openFileId = null"
+        @changed="refreshWorkspaceFiles"
       />
 
       <MemberPanel
