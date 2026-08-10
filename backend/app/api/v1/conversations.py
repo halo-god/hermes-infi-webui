@@ -840,6 +840,12 @@ async def patch_file(
     if f is None or f.conversation_id != conversation_id:
         raise HTTPException(status_code=404, detail="文件不存在")
     content = payload.get("content", "")
+    # Non-text files (images/office/pdf) hold binary in object storage and the
+    # version-snapshot would write null bytes into PostgreSQL (UTF-8 rejection,
+    # 500). The UI already hides the edit button via EDITABLE_KINDS — guard the
+    # API too so raw clients get a clean 400 instead of a crash.
+    if (f.kind or "").lower() not in PLAIN_TEXT_EXTS:
+        raise HTTPException(status_code=400, detail="仅支持编辑纯文本文件")
     f = await svc.update_file_content(db, f, content, author=str(user.id))
     return WorkspaceFileDetail(**WorkspaceFileOut.model_validate(f).model_dump(), content=f.content)
 
