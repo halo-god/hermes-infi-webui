@@ -14,7 +14,7 @@ const API_BASE = import.meta.env.VITE_API_BASE || "/api/v1";
 
 /** Poll a freshly-uploaded file until its async conversion finishes.
  * Returns true when the file is ready to attach; false on error/timeout. */
-async function waitForFileReady(fileId: string, convoId: string, timeoutMs = 15000): Promise<boolean> {
+async function waitForFileReady(fileId: string, convoId: string, timeoutMs = 30000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -461,25 +461,24 @@ export const useChatStore = defineStore("chat", () => {
         files.value = [...files.value, ...uploaded];
         // Uploads needing conversion (office/pdf/large) return immediately in
         // "processing" — wait for them to finish so the AI actually receives
-        // the attachment instead of an empty file (or none at all).
+        // the attachment instead of an empty file (or none at all). Poll all
+        // in parallel: N attachments cost max(30s), not N × 30s.
         const ns = useNotificationStore();
-        const readyIds: string[] = [];
-        for (const u of uploaded) {
-          if (u.processing_status === "processing") {
-            if (await waitForFileReady(u.id, id)) {
-              readyIds.push(u.id);
-            } else {
+        const results = await Promise.all(
+          uploaded.map(async (u) => {
+            if (u.processing_status !== "processing") return u.id;
+            const ok = await waitForFileReady(u.id, id);
+            if (!ok) {
               ns.push({
                 title: "附件转换未完成",
                 body: `${u.name} 转换超时或失败，本轮消息未附带该文件，可稍后重试`,
                 kind: "warn",
               });
             }
-          } else {
-            readyIds.push(u.id);
-          }
-        }
-        fileIds = readyIds;
+            return ok ? u.id : null;
+          }),
+        );
+        fileIds = results.filter((x): x is string => x !== null);
       } catch (e) {
         console.error("[chat] file upload failed:", e);
         // Notify the user instead of silently sending without the attachment —

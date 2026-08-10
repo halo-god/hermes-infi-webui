@@ -103,9 +103,13 @@ async def _sync_workspace_files(cwd: str, conv_id: uuid.UUID, agent_id: str) -> 
             full = os.path.join(dirpath, fn)
             rel = safe_relative_path(os.path.relpath(full, cwd))
             try:
-                with open(full, "r", encoding="utf-8", errors="ignore") as fh:
+                # Strict decode: binary artifacts (images/pdf) are not text —
+                # reading them with errors="ignore" would corrupt the bytes
+                # into garbage text and overwrite/save a broken copy.
+                with open(full, "r", encoding="utf-8", errors="strict") as fh:
                     content = fh.read()
-            except Exception:
+            except (UnicodeDecodeError, OSError):
+                logger.info("Skipping non-text scheduled artifact: %s", rel)
                 continue
             try:
                 await storage.save_file(conv_id, rel, content, agent_id, None)
@@ -116,6 +120,22 @@ async def _sync_workspace_files(cwd: str, conv_id: uuid.UUID, agent_id: str) -> 
 
 _MEDIA_RE = re.compile(r"MEDIA:(\S+)")
 _MEDIA_MAX_BYTES = 5 * 1024 * 1024
+# Absolute MEDIA paths are model-output-driven reads of host files — confine
+# them to the user's home (scheduled tasks belong to a real user, not root)
+# and exclude credential/sensitive dotfiles that prompt injection could steer
+# the agent toward (main chain _extract_and_save_files confines to the
+# workspace entirely; here we need ~/Downloads etc. for the AIHOT-style flows).
+_MEDIA_SENSITIVE_FRAGMENTS = (
+    os.sep + ".ssh" + os.sep,
+    os.sep + ".aws" + os.sep,
+    os.sep + ".gnupg" + os.sep,
+    os.sep + ".config" + os.sep,
+    os.sep + ".git" + os.sep,
+    os.sep + ".env",
+    os.sep + ".pem",
+    os.sep + "id_rsa",
+    os.sep + "id_ed25519",
+)
 
 
 async def _sync_media_files(response: str, cwd: str, conv_id: uuid.UUID, agent_id: str) -> None:
@@ -123,12 +143,23 @@ async def _sync_media_files(response: str, cwd: str, conv_id: uuid.UUID, agent_i
     conversation workspace. Scheduled agents often run external scripts whose
     output lands outside cwd (e.g. ~/Downloads), so those files never show up
     in the workspace panel without this. Text-like files only; anything bigger
-    than _MEDIA_MAX_BYTES or not decodable as UTF-8 is skipped."""
+    than _MEDIA_MAX_BYTES or not decodable as UTF-8 is skipped. Absolute paths
+    outside the user's home (or matching sensitive dotfile fragments) are
+    refused."""
+    home = os.path.expanduser("~")
     for m in _MEDIA_RE.finditer(response or ""):
         raw = m.group(1).strip().strip("`'\"")
         if not raw or raw.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".zip")):
             continue
         path = raw if os.path.isabs(raw) else os.path.join(cwd, raw)
+        if os.path.isabs(path):
+            real = os.path.realpath(path)
+            if not real.startswith(home + os.sep):
+                logger.warning("Refusing MEDIA path outside home: %s", path)
+                continue
+            if any(frag in real for frag in _MEDIA_SENSITIVE_FRAGMENTS):
+                logger.warning("Refusing sensitive MEDIA path: %s", path)
+                continue
         if not await asyncio.to_thread(os.path.isfile, path):
             continue
         if await asyncio.to_thread(os.path.getsize, path) > _MEDIA_MAX_BYTES:
