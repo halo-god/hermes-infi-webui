@@ -695,7 +695,16 @@ const wsAdapter = computed<WsAdapter>(() => {
     patchContent: async (fid, cnt) => (await conversationsApi.patchFile(cid!, fid, cnt)).content || "",
     getVersions: (fid) => conversationsApi.fileVersions(cid!, fid),
     restoreVersion: async (fid, v) => (await conversationsApi.restoreVersion(cid!, fid, v)).content || "",
-    upload: (file) => conversationsApi.upload(cid!, file).then(() => undefined),
+    upload: async (file) => {
+      const uploaded = await conversationsApi.upload(cid!, file);
+      // Upload now returns immediately with processing_status="processing"
+      // (conversion runs in the background). Push it into the store right away
+      // so the workspace panel shows the "转换中…" badge; the SSE file event
+      // replaces it with the ready/error row when conversion finishes.
+      if (!chat.files.some((f) => f.id === uploaded.id)) {
+        chat.files.push(uploaded);
+      }
+    },
   };
 });
 

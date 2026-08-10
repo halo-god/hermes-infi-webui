@@ -293,9 +293,10 @@ async def _resolve_attached_files(
         f = files_by_id.get(fid)
         if f is None:
             continue
-        if getattr(f, "processing_status", "ready") == "processing":
-            # Upload conversion still running — injecting an empty file would
-            # make the AI believe the attachment is blank. Skip it this turn.
+        if getattr(f, "processing_status", "ready") in ("processing", "error"):
+            # Upload conversion still running or failed — injecting an empty
+            # file would make the AI believe the attachment is blank (or worse,
+            # trust a failed extraction). Skip it this turn.
             continue
         f_conv_id = f.conversation_id
         if str(f_conv_id) != str(conversation_id):
