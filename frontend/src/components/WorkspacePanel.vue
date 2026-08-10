@@ -945,6 +945,28 @@ function fmtDate(s: string) {
   letter-spacing: 0.06em;
   color: var(--ink-mute);
 }
+.office-preview :deep(.slide h3) {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.office-preview :deep(.slide p) { margin: 0 0 6px; }
+.office-preview :deep(.slide table) { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 12px; }
+.office-preview :deep(.slide th) {
+  text-align: left; padding: 6px 9px; border-bottom: 2px solid var(--ink);
+  font-size: 11px; text-transform: uppercase; color: var(--ink-mute);
+}
+.office-preview :deep(.slide td) {
+  padding: 6px 9px; border-bottom: 1px solid var(--rule-soft); color: var(--ink-soft);
+}
+.office-preview :deep(.slide-img) {
+  margin: 8px 0; text-align: center;
+}
+.office-preview :deep(.slide-img img) {
+  max-width: 100%; max-height: 420px; border-radius: var(--r-sm);
+  box-shadow: 0 2px 10px rgba(0,0,0,0.12);
+}
 
 /* Code highlight */
 .code-preview {

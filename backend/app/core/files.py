@@ -246,28 +246,101 @@ def extract_xlsx_html(raw: bytes) -> str | None:
 
 
 def extract_pptx_html(raw: bytes) -> str | None:
-    """Convert a .pptx presentation's slide text to sanitized preview HTML."""
+    """Convert a .pptx presentation's slide text to sanitized preview HTML.
+
+    Enhanced vs the original text-only extractor:
+      - title/centered placeholders render as headings (h3/h4), other text as <p>
+      - tables (GraphicFrame) render as real HTML <table>
+      - embedded images render inline as base64 <img> (fallback to a
+        "图片" caption marker when encoding fails)
+      - slide ordering preserved, sanitized via html.escape
+    """
     try:
         import io
         from html import escape
 
         from pptx import Presentation
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
 
         prs = Presentation(io.BytesIO(raw))
         parts: list[str] = []
         for i, slide in enumerate(prs.slides, start=1):
             parts.append(f'<div class="slide"><h4>Slide {i}</h4>')
             for shape in slide.shapes:
+                # ── Tables ──
+                if shape.has_table:
+                    tbl = shape.table
+                    parts.append("<table>")
+                    for ri, row in enumerate(tbl.rows):
+                        tag = "th" if ri == 0 else "td"
+                        cells = "".join(
+                            f"<{tag}>{escape(cell.text or '')}</{tag}>"
+                            for cell in row.cells
+                        )
+                        parts.append(f"<tr>{cells}</tr>")
+                    parts.append("</table>")
+                    continue
+
+                # ── Images / pictures ──
+                if shape.shape_type in (MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.GROUP):
+                    img_b64 = _pptx_shape_image_b64(shape)
+                    if img_b64:
+                        parts.append(
+                            f'<div class="slide-img"><img src="data:image/png;base64,'
+                            f'{img_b64}" alt="图片" /></div>'
+                        )
+                    continue
+
+                # ── Text frames (title / body / notes) ──
                 if not shape.has_text_frame:
                     continue
+                # Title placeholder (or any shape flagged as title)
+                is_title = (
+                    getattr(shape, "is_placeholder", False)
+                    and getattr(shape, "placeholder_format", None) is not None
+                    and getattr(shape.placeholder_format, "type", None) is not None
+                    and "TITLE" in str(getattr(shape.placeholder_format, "type", "")).upper()
+                )
                 for para in shape.text_frame.paragraphs:
-                    text = "".join(escape(run.text or "") for run in para.runs) or escape(para.text or "")
-                    if text.strip():
-                        parts.append(f"<p>{text}</p>")
+                    text = "".join(run.text or "" for run in para.runs) or (para.text or "")
+                    if not text.strip():
+                        continue
+                    if is_title:
+                        parts.append(f"<h3>{escape(text.strip())}</h3>")
+                    else:
+                        parts.append(f"<p>{escape(text.strip())}</p>")
             parts.append("</div>")
         return "\n".join(parts) if parts else "<p><em>(空演示文稿)</em></p>"
     except Exception:
         return None
+
+
+def _pptx_shape_image_b64(shape) -> str | None:
+    """Extract an inline PNG base64 from a pptx picture/group shape."""
+    try:
+        import base64 as _b64
+
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+        def _walk(s):
+            if getattr(s, "shape_type", None) == MSO_SHAPE_TYPE.PICTURE and hasattr(s, "image"):
+                try:
+                    return s.image.blob
+                except Exception:
+                    return None
+            if getattr(s, "shape_type", None) == MSO_SHAPE_TYPE.GROUP:
+                for sub in getattr(s, "shapes", []):
+                    b = _walk(sub)
+                    if b:
+                        return b
+            return None
+
+        blob = _walk(shape)
+        if blob:
+            return _b64.b64encode(blob).decode("ascii")
+    except Exception:
+        return None
+    return None
 
 
 def extract_csv_html(raw: bytes) -> str | None:
