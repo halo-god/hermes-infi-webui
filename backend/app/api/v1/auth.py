@@ -39,18 +39,18 @@ async def login(
     ip = request.client.host if request.client else None
     who = str(req.username or "")
 
-    # Per-IP brute-force guard — fixed window, fail-closed if Redis is down
-    # (safer to deny logins than to allow unbounded brute-force when Redis is unavailable).
-    if ip:
-        try:
-            allowed, _ = await ratelimit.hit(
-                f"rl:login:{ip}", settings.login_rate_limit_per_min, 60
-            )
-        except Exception:  # noqa: BLE001
-            allowed = False
-        if not allowed:
-            metrics.LOGINS.labels("fail").inc()
-            raise HTTPException(status_code=429, detail="登录尝试过于频繁，请稍后再试")
+    # Dual-dimension brute-force guard (per-IP + per-account), fail-closed:
+    # if Redis is down, deny logins rather than allow unbounded brute-force.
+    allowed, denied_dim = await ratelimit.check_login(ip, who)
+    if not allowed:
+        metrics.LOGINS.labels("fail").inc()
+        headers = {"Retry-After": str(settings.login_window_seconds)}
+        detail = (
+            "该 IP 登录尝试过于频繁，请稍后再试"
+            if denied_dim == "ip"
+            else "该账号登录尝试过于频繁，请稍后再试"
+        )
+        raise HTTPException(status_code=429, detail=detail, headers=headers)
 
     try:
         user = await auth_service.authenticate(db, req)
@@ -73,6 +73,9 @@ async def login(
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.message)
     metrics.LOGINS.labels("ok").inc()
+    # Successful auth resets both counters — legit users are never penalized by
+    # their own earlier failed attempts.
+    await ratelimit.clear_login(ip, who)
     tokens = auth_service.issue_tokens(user)
     await audit_service.record(
         action="auth.login", actor_id=user.id, actor_name=user.name,

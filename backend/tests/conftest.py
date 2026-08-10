@@ -104,15 +104,22 @@ async def _ensure_admin_matches_settings(_create_tables):
 
 
 @pytest_asyncio.fixture(autouse=True)
-def _reset_redis_client():
-    """Drop the cached async Redis client around every test.
+async def _reset_redis_client():
+    """Drop the cached async Redis client around every test + clear rate-limit keys.
 
     asyncio_mode=auto gives each test its own event loop; a client created in a
     prior loop raises "attached to a different loop" when reused. Resetting the
     module global forces a fresh, correctly-bound client per test.
+    Rate-limit counters (rl:*) live in the shared Redis db0 and now use 15-min
+    windows — without clearing, login attempts from earlier tests bleed into the
+    current one and spuriously trip the 429 guard.
     """
     import app.core.redis as _redis_mod
     _redis_mod._client = None
+    r = _redis_mod.get_redis()
+    async for k in r.scan_iter("rl:*", count=500):
+        await r.delete(k)
+    await r.delete("cfg:rate_limit_per_min")
     yield
     _redis_mod._client = None
 
