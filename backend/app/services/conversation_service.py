@@ -1835,7 +1835,6 @@ async def update_file_content(
     old_content = f.content
     if old_content is None and f.storage_key:
         from app.core import object_storage
-        import asyncio
         try:
             raw = await asyncio.to_thread(object_storage.get, f.storage_key)
             old_content = raw.decode("utf-8", "ignore") if isinstance(raw, bytes) else raw
