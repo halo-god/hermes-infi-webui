@@ -93,9 +93,12 @@ class TimeoutMiddleware(BaseHTTPMiddleware):
         self.timeout_seconds = timeout_seconds
 
     async def dispatch(self, request: Request, call_next):
-        # Skip timeout for SSE/WebSocket/streaming endpoints
+        # Skip timeout for SSE/WebSocket/streaming endpoints + large uploads
         path = request.url.path
-        if "/stream" in path or "/ws" in path or "/events" in path:
+        if (
+            "/stream" in path or "/ws" in path or "/events" in path
+            or path.endswith("/upload")
+        ):
             return await call_next(request)
 
         try:
