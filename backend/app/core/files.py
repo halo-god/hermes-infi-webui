@@ -58,139 +58,38 @@ def _extract_images_from_drawing(
 
 
 def extract_docx_html(raw: bytes) -> str | None:
-    """Convert a .docx file to sanitized preview HTML.
+    """Convert a .docx file to sanitized preview HTML (mammoth engine).
 
-    Iterates the document body in true document order (paragraphs AND tables
-    interleaved via XML iteration, not separate loops). Extracts embedded
-    images as base64 data URIs. Every text node is escaped before being
-    wrapped in a tag - document content can never inject raw HTML/scripts.
+    Mammoth produces semantic HTML (headings, lists, tables, footnotes) from
+    the OOXML — far better structure than the hand-rolled parser for complex
+    documents. Images are inlined as base64 data URIs (sized-capped, like the
+    pptx extractor). Mammoth escapes all text content itself; the surrounding
+    try/except keeps malformed files falling through to None.
     """
     try:
-        import io
         import base64
-        from html import escape
+        import io
 
-        from docx import Document
-        from docx.oxml.ns import qn
+        import mammoth
 
-        doc = Document(io.BytesIO(raw))
-        body = doc.element.body
+        _MAMMOTH_IMAGE_MAX = 2 * 1024 * 1024
 
-        # Collect image relationship IDs -> base64 data URIs
-        image_map: dict[str, str] = {}
-        for rel_id, rel in doc.part.rels.items():
-            if "image" in rel.reltype:
-                try:
-                    image_data = rel.target_part.blob
-                    content_type = rel.target_part.content_type
-                    b64 = base64.b64encode(image_data).decode("ascii")
-                    image_map[rel_id] = f"data:{content_type};base64,{b64}"
-                except Exception:
-                    pass
+        def _convert_image(image):
+            with image.open() as image_bytes:
+                data = image_bytes.read()
+            if len(data) > _MAMMOTH_IMAGE_MAX:
+                return {}  # drop oversized images from the preview
+            ctype = image.content_type or "image/png"
+            return {"src": f"data:{ctype};base64," + base64.b64encode(data).decode("ascii")}
 
-        parts: list[str] = []
-        list_buf: list[str] = []
-        list_tag: str | None = None
-
-        def flush_list() -> None:
-            nonlocal list_buf, list_tag
-            if list_buf:
-                parts.append(f"<{list_tag}>" + "".join(list_buf) + f"</{list_tag}>")
-                list_buf = []
-                list_tag = None
-
-        heading_map = {f"Heading {i}": f"h{min(i, 6)}" for i in range(1, 7)}
-
-        def process_paragraph(p_elem) -> None:
-            """Process a single <w:p> element, extracting text runs + images."""
-            # list_buf/list_tag are closed over by flush_list() — this function
-            # also assigns list_tag below, so it must declare nonlocal too
-            # (otherwise the assignment makes list_tag local and reading it in
-            # the `if list_tag != ...` guards raises UnboundLocalError).
-            nonlocal list_buf, list_tag
-            # Find the corresponding python-docx Paragraph object
-            para = None
-            for dp in doc.paragraphs:
-                if dp._element is p_elem:
-                    para = dp
-                    break
-            if para is None:
-                return
-
-            style_name = (para.style.name if para.style else "") or ""
-            text_runs = []
-
-            # Walk all runs, extracting both text and inline images
-            for run in para.runs:
-                # Check for inline images in this run's XML
-                for drawing in run._element.findall(qn("w:drawing")):
-                    _extract_images_from_drawing(drawing, image_map, text_runs)
-                t = escape(run.text or "")
-                if t:
-                    if run.bold:
-                        t = f"<strong>{t}</strong>"
-                    if run.italic:
-                        t = f"<em>{t}</em>"
-                    if run.underline:
-                        t = f"<u>{t}</u>"
-                    text_runs.append(t)
-
-            text = "".join(text_runs) or escape(para.text or "")
-            if not text.strip():
-                return
-
-            if style_name in heading_map:
-                flush_list()
-                tag = heading_map[style_name]
-                parts.append(f"<{tag}>{text}</{tag}>")
-            elif style_name.startswith("List Bullet"):
-                if list_tag != "ul":
-                    flush_list()
-                    list_tag = "ul"
-                list_buf.append(f"<li>{text}</li>")
-            elif style_name.startswith("List Number"):
-                if list_tag != "ol":
-                    flush_list()
-                    list_tag = "ol"
-                list_buf.append(f"<li>{text}</li>")
-            else:
-                flush_list()
-                parts.append(f"<p>{text}</p>")
-
-        def process_table(tbl_elem) -> None:
-            """Process a <w:tbl> element into an HTML table."""
-            flush_list()
-            rows_html = []
-            for i, row in enumerate(tbl_elem.findall(qn("w:tr"))):
-                cell_tag = "th" if i == 0 else "td"
-                cells_xml = row.findall(qn("w:tc"))
-                cell_parts = []
-                for tc in cells_xml:
-                    cell_text_parts = []
-                    # Extract text from all paragraphs in the cell
-                    for p in tc.findall(qn("w:p")):
-                        p_texts = []
-                        for r in p.findall(qn("w:r")):
-                            for t in r.findall(qn("w:t")):
-                                if t.text:
-                                    p_texts.append(escape(t.text))
-                        if p_texts:
-                            cell_text_parts.append(" ".join(p_texts))
-                    cell_parts.append(f"<{cell_tag}>{'<br/>'.join(cell_text_parts) or ''}</{cell_tag}>")
-                rows_html.append(f"<tr>{''.join(cell_parts)}</tr>")
-            if rows_html:
-                parts.append("<table>" + "".join(rows_html) + "</table>")
-
-        # Iterate body children in document order (paragraphs + tables interleaved)
-        for child in body:
-            tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
-            if tag == "p":
-                process_paragraph(child)
-            elif tag == "tbl":
-                process_table(child)
-        flush_list()
-
-        return "\n".join(parts) if parts else "<p><em>(空文档)</em></p>"
+        result = mammoth.convert_to_html(
+            io.BytesIO(raw),
+            convert_image=_convert_image,
+        )
+        html = (result.value or "").strip()
+        if not html:
+            return "<p><em>(空文档)</em></p>"
+        return html
     except Exception:
         return None
 
@@ -424,7 +323,19 @@ OFFICE_EXTRACTORS = {
     "pptx": extract_pptx_html,
     "csv": extract_csv_html,
     "rtf": extract_rtf_html,
+    # Legacy OLE2 formats — require LibreOffice (soffice) at runtime; absent
+    # soffice yields a clear "convert to docx/xlsx" hint instead of an
+    # unreadable file. Imported lazily below to avoid a cycle at module load.
+    "doc": None,
+    "xls": None,
+    "ppt": None,
 }
+
+from app.core.office_legacy import extract_legacy_doc_html  # noqa: E402
+
+for _ext in ("doc", "xls", "ppt"):
+    OFFICE_EXTRACTORS[_ext] = extract_legacy_doc_html
+
 
 
 PLAIN_TEXT_EXTS = frozenset({

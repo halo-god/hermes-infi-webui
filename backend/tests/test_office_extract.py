@@ -49,7 +49,10 @@ def test_extract_docx_html_structure_and_escaping():
     assert "<strong>bold text</strong>" in html
     assert "<ul>" in html and "<li>Bullet one</li>" in html and "<li>Bullet two</li>" in html
     assert "<ol>" in html and "<li>Numbered one</li>" in html
-    assert "<table>" in html and "<th>Header A</th>" in html and "<td>cell 1</td>" in html
+    # Mammoth emits semantic HTML: cells are <td> wrapping a <p> (no th
+    # distinction), text still present and escaped.
+    assert "<table>" in html
+    assert "Header A" in html and "cell 1" in html
     # XSS guard: literal script text must be escaped, never an executable tag.
     assert "<script>" not in html
     assert "&lt;script&gt;" in html
@@ -192,3 +195,32 @@ async def test_upload_docx_preview_and_raw_download_roundtrip(client: AsyncClien
         settings.minio_endpoint = prev_endpoint
         settings.minio_bucket = prev_bucket
         object_storage.reset_client()
+
+
+# ── Legacy formats (soffice optional) ──
+
+
+def test_legacy_doc_hint_when_soffice_absent(monkeypatch):
+    """Without LibreOffice, legacy formats yield a clear hint (not silent)."""
+    from app.core.office_legacy import extract_legacy_doc_html
+
+    monkeypatch.setattr("app.core.office_legacy.soffice_available", lambda: False)
+    hint = extract_legacy_doc_html(b"not a real doc", "doc")
+    assert hint is not None
+    assert "暂不支持" in hint and "docx" in hint
+
+
+def test_legacy_csv_table_wrapping():
+    from app.core.office_legacy import _csv_to_table
+
+    tbl = _csv_to_table('a,b\n1,2\n')
+    assert "<table>" in tbl
+    assert "<th>a</th>" in tbl and "<td>1</td>" in tbl
+    assert "<script>" not in tbl  # cells escaped
+
+
+def test_legacy_formats_registered_in_extractors():
+    from app.core.files import OFFICE_EXTRACTORS
+
+    for ext in ("doc", "xls", "ppt"):
+        assert ext in OFFICE_EXTRACTORS, f"{ext} must be registered"
