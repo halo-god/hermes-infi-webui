@@ -73,8 +73,9 @@ async def login(
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.message)
     metrics.LOGINS.labels("ok").inc()
-    # Successful auth resets both counters — legit users are never penalized by
-    # their own earlier failed attempts.
+    # Successful auth resets the account-dimension counter — legit users are
+    # never penalized by their own earlier failed attempts. IP counter is left
+    # to expire naturally (see ratelimit.clear_login).
     await ratelimit.clear_login(ip, who)
     tokens = auth_service.issue_tokens(user)
     await audit_service.record(

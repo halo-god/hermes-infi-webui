@@ -79,18 +79,23 @@ async def allow_send(user_id: str) -> bool:
     Fail-open on Redis errors: if Redis is down, the messaging path must not be
     blocked — the per-user cap is an abuse guard, not a business rule.
     """
-    limit = await get_rate_limit()
     try:
+        limit = await get_rate_limit()  # must be INSIDE try: first await that
+        # can raise; if it sat outside, a Redis outage would bubble the
+        # exception past this try and the fail-open return below would be dead
+        # code (observed: send path 500s instead of passing).
         allowed, _ = await hit(f"rl:msg:{user_id}", limit, 60)
         if allowed:
             # Global overflow guard: caps total platform send rate so one user
             # (or a burst across many users) cannot saturate the queue even when
             # each individual stays under their per-user cap.
             allowed, _ = await hit("rl:global:msg", settings.rate_limit_global_per_min, 60)
-        if allowed:
-            await incr_monthly_messages(user_id)
+            if not allowed:
+                logger.warning("Global rate limit hit: platform exceeds %d msg/min", settings.rate_limit_global_per_min)
         else:
             logger.warning("Rate limit hit: user %s exceeded %d msg/min", user_id[:12], limit)
+        if allowed:
+            await incr_monthly_messages(user_id)
         return allowed
     except Exception:  # noqa: BLE001
         logger.exception("Rate limit check failed, failing open (allow send)")
@@ -119,7 +124,9 @@ async def check_login(ip: str | None, username: str) -> tuple[bool, str | None]:
     if username:
         try:
             ok_user, _ = await hit(
-                f"rl:login:user:{username}", settings.login_user_limit, settings.login_window_seconds
+                f"rl:login:user:{username.strip().lower()}",
+                settings.login_user_limit,
+                settings.login_window_seconds,
             )
         except Exception:  # noqa: BLE001
             logger.exception("Login rate-limit check failed (account), failing closed")
@@ -131,12 +138,16 @@ async def check_login(ip: str | None, username: str) -> tuple[bool, str | None]:
 
 async def clear_login(ip: str | None, username: str) -> None:
     """Reset login counters on successful auth so a legit user is never penalized
-    by their own prior failed attempts."""
+    by their own prior failed attempts.
+
+    Account dimension only (ip param kept for call-site compatibility but not
+    cleared): under shared IP/NAT, deleting the IP key lets any legit credential
+    holder reset the whole IP's brute-force counter, defeating the per-IP guard.
+    The IP key expires on its own after the 15-min window.
+    """
     r = get_redis()
     try:
-        if ip:
-            await r.delete(f"rl:login:ip:{ip}")
         if username:
-            await r.delete(f"rl:login:user:{username}")
+            await r.delete(f"rl:login:user:{username.strip().lower()}")
     except Exception:  # noqa: BLE001
         logger.exception("Failed to clear login counters (non-fatal)")
