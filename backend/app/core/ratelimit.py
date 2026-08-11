@@ -9,10 +9,29 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
+from redis.exceptions import (
+    ConnectionError as RedisConnectionError,
+    OutOfMemoryError,
+    ReadOnlyError,
+    TimeoutError as RedisTimeoutError,
+)
+
 from app.config import settings
 from app.core.redis import get_redis
 
 logger = logging.getLogger(__name__)
+
+# Only "Redis temporarily unavailable" errors should trigger the degrade path.
+# ResponseError (WRONGTYPE, Lua script errors, wrong key type) is a CODE BUG and
+# must bubble up so it's visible — swallowing it silently disables rate limiting
+# (fail-open) or locks everyone out (fail-closed) with no trace. See skill
+# redis-rate-limiting checklist #7/#9.
+REDIS_UNAVAILABLE = (
+    RedisConnectionError,
+    RedisTimeoutError,
+    ReadOnlyError,
+    OutOfMemoryError,
+)
 
 _RATE_CFG_KEY = "cfg:rate_limit_per_min"
 
@@ -97,7 +116,7 @@ async def allow_send(user_id: str) -> bool:
         if allowed:
             await incr_monthly_messages(user_id)
         return allowed
-    except Exception:  # noqa: BLE001
+    except REDIS_UNAVAILABLE:  # noqa: BLE001
         logger.exception("Rate limit check failed, failing open (allow send)")
         return True
 
@@ -116,7 +135,7 @@ async def check_login(ip: str | None, username: str) -> tuple[bool, str | None]:
             ok_ip, _ = await hit(
                 f"rl:login:ip:{ip}", settings.login_ip_limit, settings.login_window_seconds
             )
-        except Exception:  # noqa: BLE001
+        except REDIS_UNAVAILABLE:  # noqa: BLE001
             logger.exception("Login rate-limit check failed (ip), failing closed")
             ok_ip = False
         if not ok_ip:
@@ -128,7 +147,7 @@ async def check_login(ip: str | None, username: str) -> tuple[bool, str | None]:
                 settings.login_user_limit,
                 settings.login_window_seconds,
             )
-        except Exception:  # noqa: BLE001
+        except REDIS_UNAVAILABLE:  # noqa: BLE001
             logger.exception("Login rate-limit check failed (account), failing closed")
             ok_user = False
         if not ok_user:

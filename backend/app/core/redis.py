@@ -16,6 +16,9 @@ def get_redis() -> aioredis.Redis:
             encoding="utf-8",
             decode_responses=True,
             protocol=2,            # RESP2: fixes xreadgroup block-timeout under RESP3
+            socket_connect_timeout=3,  # fail fast on half-open connections (network
+            # partition / firewall drop): without it, TCP connect blocks on the
+            # kernel default (60s+) and fail-open rate limiting becomes fail-SLOW.
             socket_timeout=10,      # generous socket timeout for blocking reads
         )
     return _client
