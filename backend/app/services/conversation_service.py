@@ -10,12 +10,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json as _json
 
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core import redis as redis_core
-from app.core.files import confine_to_dir, safe_relative_path, OFFICE_EXTRACTORS
+from app.core.files import confine_to_dir, safe_relative_path, OFFICE_EXTRACTORS, PLAIN_TEXT_EXTS
 from app.db.models.agent import Profile
 from app.db.models.conversation import Conversation, ConversationSummary, GroupMember, Message
 from app.db.models.workspace import WorkspaceFile, WorkspaceFileVersion
@@ -146,19 +146,28 @@ async def get_messages(
 
     When *limit* is given, returns only the most recent *limit* messages.
     *before_id* (cursor) fetches messages older than the given message id.
+
+    The cursor is a (created_at, id) tuple: user/agent message pairs share
+    the same server-side created_at timestamp (same transaction), so a
+    plain `created_at < ts` cursor would permanently skip the pair's other
+    half whenever the page boundary lands between them. The id tiebreak
+    keeps every message reachable exactly once.
     """
     stmt = (
         select(Message)
         .where(Message.conversation_id == conversation_id)
     )
     if before_id:
-        # Sub-select to get the cursor timestamp
-        cursor_ts = (
-            select(Message.created_at)
+        # Sub-select to get the cursor's (created_at, id) pair.
+        cursor = (
+            select(Message.created_at, Message.id)
             .where(Message.id == before_id)
-            .scalar_subquery()
+            .subquery()
         )
-        stmt = stmt.where(Message.created_at < cursor_ts)
+        stmt = stmt.where(
+            tuple_(Message.created_at, Message.id)
+            < tuple_(cursor.c.created_at, cursor.c.id)
+        )
     stmt = stmt.order_by(Message.created_at.desc(), Message.role.asc())
     if limit:
         stmt = stmt.limit(limit)
@@ -293,6 +302,11 @@ async def _resolve_attached_files(
         f = files_by_id.get(fid)
         if f is None:
             continue
+        if getattr(f, "processing_status", "ready") in ("processing", "error"):
+            # Upload conversion still running or failed — injecting an empty
+            # file would make the AI believe the attachment is blank (or worse,
+            # trust a failed extraction). Skip it this turn.
+            continue
         f_conv_id = f.conversation_id
         if str(f_conv_id) != str(conversation_id):
             if file_storage_convo_id is None or f_conv_id != file_storage_convo_id:
@@ -311,12 +325,35 @@ async def _resolve_attached_files(
         FULL_INLINE_BYTES = 30_000
         MAX_INLINE_BYTES = 100_000
         _TRUNCATE_HINT = "\n\n... [truncated, use read_file tool to read in chunks]"
-        file_content = f.content or ""
+        # docx/xlsx are natively extractable by the agent's read_file
+        # (python-docx/openpyxl) — skip injecting converted text and let the
+        # agent read the original bytes directly: no conversion loss, no
+        # truncation, paginated reads. pptx/pdf keep the injected extraction
+        # (the agent has no native reader for those).
+        native_readable = ext in ("docx", "xlsx")
+        # pptx: prefer the background Docling Markdown (content_md) when it has
+        # landed — higher-quality structure/tables than the fast HTML, and it
+        # does not disturb the preview (which keeps using `content`).
+        file_content = f.content_md or f.content or ""
+        if native_readable:
+            # docx/xlsx must never inject extracted text, regardless of what
+            # the DB already holds: the upload pipeline backfills wf.content
+            # after background conversion, so gating on `not file_content`
+            # below would make this branch dead code in production (the agent
+            # would get truncated HTML extraction instead of the original).
+            file_content = ""
         raw_bytes: bytes | None = None
-        if f.storage_key and not file_content:
+        # Read the original bytes whenever we have a storage key — needed to
+        # write the workspace copy even when file_content is already populated
+        # (pptx: content holds preview HTML, content_md the Docling Markdown).
+        if f.storage_key:
             try:
                 from app.core import object_storage
                 raw_bytes = await asyncio.to_thread(object_storage.get, f.storage_key)
+            except Exception:
+                raw_bytes = None
+        if raw_bytes is not None and not file_content and not native_readable:
+            try:
                 size = len(raw_bytes)
                 if size <= FULL_INLINE_BYTES:
                     # Small file: full inline
@@ -550,14 +587,13 @@ def _mcp_server_entry(server: dict) -> dict | None:
     url = server.get("url")
     if not url:
         return None
-    env = server.get("env") or {}
+    headers_cfg = server.get("headers") or server.get("env") or {}
     headers = (
-        [{"name": str(k), "value": str(v)} for k, v in env.items()]
-        if isinstance(env, dict)
+        [{"name": str(k), "value": str(v)} for k, v in headers_cfg.items()]
+        if isinstance(headers_cfg, dict)
         else []
     )
     return {"name": name, "url": url, "headers": headers}
-
 
 # P1-3: ordered stage keys. A staged conversation flows clarify → implement →
 # review, but users can jump manually via the stage API/indicator.
@@ -702,9 +738,14 @@ def _build_attached_prompt(text: str, attached: list[dict]) -> str:
     for f in attached:
         ws_path = f.get("workspace_path")
         size = f.get("size_bytes", 0)
+        kind = f.get("kind") or ""
         if ws_path:
-            # For large text/office files, suggest chunked reading
-            if size > 30000 and (f.get("is_text") or f.get("kind") in ("docx", "xlsx", "pptx")):
+            # docx/xlsx are NOT injected as extracted text (the agent reads
+            # them natively via read_file) — always point at the file. Large
+            # text/pptx files also suggest chunked reading.
+            if kind in ("docx", "xlsx"):
+                refs.append(f"- {f['name']} ({ws_path}) — 建议使用 read_file 读取内容")
+            elif size > 30000 and (f.get("is_text") or kind in ("pptx",)):
                 refs.append(
                     f"- {f['name']} ({ws_path}) — 文件较大，建议使用 read_file 分段读取"
                 )
@@ -1830,7 +1871,6 @@ async def update_file_content(
     old_content = f.content
     if old_content is None and f.storage_key:
         from app.core import object_storage
-        import asyncio
         try:
             raw = await asyncio.to_thread(object_storage.get, f.storage_key)
             old_content = raw.decode("utf-8", "ignore") if isinstance(raw, bytes) else raw
@@ -1864,6 +1904,23 @@ async def update_file_content(
     f.content = content
     f.size_bytes = len(content.encode("utf-8"))
     f.current_version += 1
+    # Sync object storage ONLY for plain-text kinds. Office/PDF objects hold
+    # the ORIGINAL binary upload (content is an extracted preview), images
+    # hold raw pixels — overwriting any of those with edited text would
+    # destroy the user's source file (raw download would serve text
+    # masquerading as the original). Only text kinds have content that IS
+    # the edited payload, so only they get written back.
+    if f.storage_key:
+        kind = (f.kind or "").lower()
+        if kind in PLAIN_TEXT_EXTS:
+            from app.core import object_storage
+            from agent_runner.storage import _CONTENT_TYPE  # noqa: PLC2701
+            await asyncio.to_thread(
+                object_storage.put,
+                f.storage_key,
+                content.encode("utf-8"),
+                _CONTENT_TYPE.get(kind, "text/plain"),
+            )
     await db.commit()
     await db.refresh(f)
     return f

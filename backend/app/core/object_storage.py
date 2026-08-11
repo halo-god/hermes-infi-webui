@@ -75,7 +75,9 @@ def presigned_url(key: str, expires: int = 3600) -> str:
     return _get_client().generate_presigned_url(
         "get_object",
         Params={"Bucket": settings.minio_bucket, "Key": key},
-        Expires=expires,
+        # boto3's generate_presigned_url takes ExpiresIn (seconds); `Expires`
+        # is a botocore-internal param and raises TypeError on this SDK line.
+        ExpiresIn=expires,
     )
 
 

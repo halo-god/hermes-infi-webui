@@ -449,9 +449,20 @@ async def get_file_raw(
         if content:
             content_type = runner_storage.content_type_for(wf.kind or "")
     elif wf.content:
-        content = wf.content.encode("utf-8") if isinstance(wf.content, str) else wf.content
-        if wf.kind in _TEXT_EXTS:
-            content_type = "text/plain; charset=utf-8"
+        # Inline small files: process_upload stores text types decoded
+        # (_decode_text) and only base64-encodes non-text bytes — pick by
+        # kind. Blind-decoding text that happens to be valid base64 (e.g.
+        # "SGVsbG8=") would silently corrupt it.
+        if wf.kind in _TEXT_EXTS or wf.kind == "pdf":
+            content = wf.content.encode("utf-8")
+            if wf.kind in _TEXT_EXTS:
+                content_type = "text/plain; charset=utf-8"
+        else:
+            import base64
+            try:
+                content = base64.b64decode(wf.content)
+            except Exception:
+                content = wf.content.encode("utf-8")
     else:
         raise HTTPException(404, "File has no content")
 

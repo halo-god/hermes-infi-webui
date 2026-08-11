@@ -23,7 +23,7 @@ ps:
 	docker compose -f docker/compose.yaml ps
 
 build:
-	docker compose -f docker/compose.yaml build
+	docker compose -f docker/compose.yaml --env-file .env build
 
 # Run migrations / seed against a running api container
 migrate:

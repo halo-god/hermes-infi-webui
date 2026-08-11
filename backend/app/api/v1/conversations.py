@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import uuid
 from fastapi import (
@@ -28,6 +29,7 @@ from app.core.files import (
     process_upload,
     is_text_extractable,
     OFFICE_EXTRACTORS,
+    PLAIN_TEXT_EXTS,
 )
 from app.core import object_storage
 from app.db.base import async_session_maker, get_db
@@ -69,6 +71,8 @@ from app.schemas.subagent import SubagentOut, SubagentSend, SubagentSpawn
 from app.schemas.team import ConsolidateRequest
 from app.services import conversation_service as svc
 from app.services import subagent_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -447,8 +451,10 @@ async def get_shared_conversation(
     ip = request.client.host if request.client else "unknown"
     try:
         allowed, _ = await ratelimit.hit(f"rl:shared:{ip}", 30, 60)
-    except Exception:
-        allowed = False  # fail-closed
+    except ratelimit.REDIS_UNAVAILABLE:
+        # fail-closed: Redis down → 429 rather than leak shared-convo content.
+        logger.warning("Shared-conv rate limit degraded (fail-closed), ip=%s", ip)
+        allowed = False
     if not allowed:
         raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
 
@@ -797,11 +803,18 @@ async def get_file_raw(
         except Exception:
             raise HTTPException(status_code=503, detail="存储不可用")
     elif f.content:
-        import base64
-        try:
-            data = base64.b64decode(f.content)
-        except Exception:
+        # Inline small files: text types are stored decoded, non-text kinds
+        # base64 (process_upload). Branch by kind — a blind b64decode would
+        # silently corrupt plain text that happens to be valid base64 (e.g.
+        # "SGVsbG8=" decodes to "Hello").
+        if ext in PLAIN_TEXT_EXTS or ext == "pdf":
             data = f.content.encode("utf-8")
+        else:
+            import base64
+            try:
+                data = base64.b64decode(f.content)
+            except Exception:
+                data = f.content.encode("utf-8")
     else:
         raise HTTPException(status_code=404, detail="文件内容不存在")
 
@@ -829,6 +842,12 @@ async def patch_file(
     if f is None or f.conversation_id != conversation_id:
         raise HTTPException(status_code=404, detail="文件不存在")
     content = payload.get("content", "")
+    # Non-text files (images/office/pdf) hold binary in object storage and the
+    # version-snapshot would write null bytes into PostgreSQL (UTF-8 rejection,
+    # 500). The UI already hides the edit button via EDITABLE_KINDS — guard the
+    # API too so raw clients get a clean 400 instead of a crash.
+    if (f.kind or "").lower() not in PLAIN_TEXT_EXTS:
+        raise HTTPException(status_code=400, detail="仅支持编辑纯文本文件")
     f = await svc.update_file_content(db, f, content, author=str(user.id))
     return WorkspaceFileDetail(**WorkspaceFileOut.model_validate(f).model_dump(), content=f.content)
 
@@ -904,6 +923,45 @@ async def upload_file(
     name = re.sub(r"[^\w.\-\u4e00-\u9fff]", "_", file.filename or "upload").strip("_. ") or "upload"
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"
 
+    # Files that need extraction (office/pdf) or are big enough to offload to
+    # object storage are converted in the background: the row is created and
+    # returned immediately with processing_status="processing", so the chat is
+    # never blocked on extraction (which can take seconds for large PDFs).
+    needs_bg = (
+        ext in OFFICE_EXTRACTORS
+        or ext == "pdf"
+        or len(raw) > settings.file_offload_threshold_kb * 1024
+    )
+    if needs_bg:
+        # Persist the raw bytes up front (a cheap PUT) so a failed background
+        # conversion can be retried later via POST .../files/{id}/retry —
+        # otherwise the bytes only exist in this request's memory.
+        raw_key = f"conversations/{convo.id}/{uuid.uuid4().hex}/{name}"
+        try:
+            await asyncio.to_thread(
+                object_storage.put, raw_key, raw, file.content_type or "application/octet-stream"
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503, detail="文件存储不可用，请检查对象存储配置"
+            ) from exc
+        wf = WorkspaceFile(
+            conversation_id=convo.id,
+            name=name,
+            kind=ext,
+            size_bytes=len(raw),
+            storage_key=raw_key,
+            created_by_agent=None,
+            processing_status="processing",
+        )
+        db.add(wf)
+        await db.commit()
+        await db.refresh(wf)
+        asyncio.create_task(
+            _convert_upload_bg(wf.id, raw, ext, name, file.content_type, convo.id)
+        )
+        return WorkspaceFileOut.model_validate(wf)
+
     processed = await process_upload(
         raw, ext, f"conversations/{convo.id}", name, content_type=file.content_type,
         fast_mode=True,  # chat attachments: use fast extractors (pymupdf/python-docx),
@@ -923,6 +981,126 @@ async def upload_file(
     db.add(wf)
     await db.commit()
     await db.refresh(wf)
+    return WorkspaceFileOut.model_validate(wf)
+
+
+async def _convert_upload_bg(
+    file_id: uuid.UUID, raw: bytes, ext: str, name: str,
+    content_type: str | None, convo_id: uuid.UUID,
+) -> None:
+    """Background conversion for an accepted upload: extract content, flip
+    processing_status to ready (or error), then publish an SSE file event so
+    the workspace panel refreshes without a reload."""
+    async with async_session_maker() as db:
+        wf = await db.get(WorkspaceFile, file_id)
+        if wf is None:
+            return
+        raw_key = wf.storage_key  # uploaded raw bytes (retry source)
+        try:
+            processed = await process_upload(
+                raw, ext, f"conversations/{convo_id}", name,
+                content_type=content_type, fast_mode=True,
+            )
+            wf.content = processed.content
+            wf.storage_key = processed.storage_key
+            wf.size_bytes = processed.size_bytes
+            wf.processing_status = "ready"
+            await db.commit()
+            await db.refresh(wf)
+            status = "ready"
+            # The raw-bytes object staged at upload time is superseded by
+            # process_upload's own key — drop it so it doesn't leak.
+            if raw_key and raw_key != processed.storage_key:
+                try:
+                    await asyncio.to_thread(object_storage.delete, raw_key)
+                except Exception:
+                    logger.debug("failed to clean staged upload key %s", raw_key, exc_info=True)
+            # pptx: queue a background Docling upgrade — the fast python-pptx
+            # HTML stays in `content` for the preview, Docling writes richer
+            # Markdown into `content_md` for AI prompt injection. Non-blocking:
+            # the file is already usable with the fast extraction.
+            if ext == "pptx":
+                try:
+                    from app.core.docling_converter import is_supported as _docling_supported
+                    if _docling_supported(ext):
+                        await redis_core.enqueue_prompt({
+                            "type": "workspace_docling_upgrade",
+                            "file_id": str(file_id),
+                            "conversation_id": str(convo_id),
+                            "ext": ext,
+                            "name": name,
+                        })
+                except Exception:
+                    logger.debug("failed to enqueue pptx docling upgrade", exc_info=True)
+        except Exception:
+            logger.exception("background conversion failed for upload %s", file_id)
+            wf.processing_status = "error"
+            await db.commit()
+            status = "error"
+    try:
+        await redis_core.publish_event(str(convo_id), {
+            "type": "file",
+            "conversation_id": str(convo_id),
+            "file_id": str(file_id),
+            "name": name,
+            "kind": ext,
+            "status": status,
+        })
+    except Exception:
+        logger.debug("failed to publish upload-conversion event", exc_info=True)
+
+
+@router.delete("/{conversation_id}/files/{file_id}", status_code=204)
+async def delete_workspace_file(
+    conversation_id: uuid.UUID,
+    file_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a workspace file (and its object-storage bytes, if any)."""
+    await _require_convo(db, conversation_id, user)
+    f = await db.get(WorkspaceFile, file_id)
+    if f is None or f.conversation_id != conversation_id:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    if f.storage_key:
+        try:
+            await asyncio.to_thread(object_storage.delete, f.storage_key)
+        except Exception:
+            logger.debug("failed to delete storage object for %s", file_id, exc_info=True)
+    await db.delete(f)
+    await db.commit()
+
+
+@router.post("/{conversation_id}/files/{file_id}/retry", response_model=WorkspaceFileOut)
+async def retry_file_conversion(
+    conversation_id: uuid.UUID,
+    file_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Retry a failed (or stalled) upload conversion. Requires the raw bytes
+    staged at upload time (storage_key present). Flips the row back to
+    processing and re-runs the background extractor."""
+    await _require_convo(db, conversation_id, user)
+    wf = await db.get(WorkspaceFile, file_id)
+    if wf is None or wf.conversation_id != conversation_id:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    if wf.processing_status == "processing":
+        return WorkspaceFileOut.model_validate(wf)
+    if not wf.storage_key:
+        raise HTTPException(status_code=409, detail="原始文件不可用，无法重试，请重新上传")
+    try:
+        raw = await asyncio.to_thread(object_storage.get, wf.storage_key)
+    except Exception:
+        raise HTTPException(status_code=503, detail="存储不可用") from None
+    if not raw:
+        raise HTTPException(status_code=409, detail="原始文件不可用，无法重试，请重新上传")
+    wf.processing_status = "processing"
+    await db.commit()
+    ext = (wf.kind or "").lower()
+    asyncio.create_task(
+        _convert_upload_bg(wf.id, raw, ext, wf.name, None, conversation_id)
+    )
     return WorkspaceFileOut.model_validate(wf)
 
 

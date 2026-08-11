@@ -108,7 +108,7 @@ async def test_user_cannot_delete_other_user_conversation(
         json={"primary_agent_id": "hermes"},
         headers=auth_headers,
     )
-    assert create_resp.status_code == 200
+    assert create_resp.status_code in (200, 201)  # POST /conversations returns 201 Created
     convo_id = create_resp.json()["id"]
 
     # Create another user and try to delete
@@ -134,12 +134,12 @@ async def test_send_message_empty_text(client: AsyncClient, auth_headers, test_u
         json={"primary_agent_id": "hermes"},
         headers=auth_headers,
     )
-    assert create_resp.status_code == 200
+    assert create_resp.status_code in (200, 201)  # POST /conversations returns 201 Created
     convo_id = create_resp.json()["id"]
 
     # Try to send empty message
     resp = await client.post(
-        f"/api/v1/conversations/{convo_id}/send",
+        f"/api/v1/conversations/{convo_id}/messages",
         json={"text": ""},
         headers=auth_headers,
     )

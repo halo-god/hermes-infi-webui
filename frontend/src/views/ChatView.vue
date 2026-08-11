@@ -602,12 +602,13 @@ async function onSend(opts?: SendOptions) {
   let text = draft.value.trim();
   if (!text) return;
   if (chat.isActivelyStreaming(chat.activeId || "")) return;
-  draft.value = "";
   if (opts?.stagedFiles?.length) showWorkspace.value = true;
-  await chat.send(text, landingProfile.value?.default_agent_id || "hermes", {
+  const ok = await chat.send(text, landingProfile.value?.default_agent_id || "hermes", {
     ...opts,
     taskId: discussTask.value?.id,
   });
+  if (!ok) return; // send failed — keep the draft so the user can retry
+  draft.value = "";
   clearReply();
   await scrollDown();
 }
@@ -695,9 +696,27 @@ const wsAdapter = computed<WsAdapter>(() => {
     patchContent: async (fid, cnt) => (await conversationsApi.patchFile(cid!, fid, cnt)).content || "",
     getVersions: (fid) => conversationsApi.fileVersions(cid!, fid),
     restoreVersion: async (fid, v) => (await conversationsApi.restoreVersion(cid!, fid, v)).content || "",
-    upload: (file) => conversationsApi.upload(cid!, file).then(() => undefined),
+    upload: async (file) => {
+      const uploaded = await conversationsApi.upload(cid!, file);
+      // Upload now returns immediately with processing_status="processing"
+      // (conversion runs in the background). Push it into the store right away
+      // so the workspace panel shows the "转换中…" badge; the SSE file event
+      // replaces it with the ready/error row when conversion finishes.
+      if (!chat.files.some((f) => f.id === uploaded.id)) {
+        chat.files.push(uploaded);
+      }
+    },
+    removeFile: (fid) => conversationsApi.deleteFile(cid!, fid),
+    retryFile: (fid) => conversationsApi.retryFile(cid!, fid).then(() => undefined),
   };
 });
+
+async function refreshWorkspaceFiles() {
+  if (!chat.activeId) return;
+  try {
+    chat.files = await conversationsApi.files(chat.activeId);
+  } catch { /* panel closes; store refresh happens on next open */ }
+}
 
 // ── Context window ring ──
 const ctxMax = computed(() => chat.contextSize > 0 ? chat.contextSize : 200_000);
@@ -1022,7 +1041,7 @@ onUnmounted(() => {
             <button class="thread-action text-mute-sm" v-if="chat.messages.length" @click="showSearch = !showSearch" style="flex-shrink:0;margin-top:2px" title="搜索消息 ⌘F">
               <Icon name="search" />
             </button>
-            <button class="thread-action text-mute-sm" v-if="chat.files.length" @click="showWorkspace = !showWorkspace" style="flex-shrink:0;margin-top:2px">
+            <button class="thread-action text-mute-sm" v-if="chat.activeId" @click="showWorkspace = !showWorkspace" style="flex-shrink:0;margin-top:2px" title="工作区">
               <Icon name="folder" /> 工作区 ({{ chat.files.length }})
             </button>
             <button class="thread-action text-mute-sm" v-if="isGroup" @click="showMemberPanel = !showMemberPanel" style="flex-shrink:0;margin-top:2px" title="群聊成员">
@@ -1221,7 +1240,7 @@ onUnmounted(() => {
                     <span v-else class="typing"><span></span><span></span><span></span></span>
                   </template>
                   <div v-else-if="chat.messages[row.index].role === 'agent' && chat.messages[row.index].status === 'error'" class="msg-error-tag">
-                    ⚠ {{ chat.messages[row.index].content.error || '生成中断' }}
+                    ⚠ {{ chat.messages[row.index].content.error || String(chat.messages[row.index].content.text || '').replace(/^⚠ 生成失败：/, '') || '生成中断' }}
                     <button class="inline-retry-btn" @click="regenerate(chat.messages[row.index].id)">重新生成</button>
                   </div>
                   <div v-else-if="chat.messages[row.index].role === 'agent'" class="md-body" v-html="highlightMentions(mdSearch(chat.messages[row.index].content.text, ragRefsFor(row.index)?.length ? { citeRefs: true } : undefined))" />
@@ -1336,6 +1355,10 @@ onUnmounted(() => {
             <Icon name="close" :size="11" />
           </button>
         </div>
+        <div v-if="chat.streamError" class="stream-banner">
+          <span>⚠ {{ chat.streamError }}，消息可能未送达</span>
+          <button class="stream-banner-dismiss" @click="chat.clearStreamError()">知道了</button>
+        </div>
         <Composer
           v-model="draft"
           placeholder="继续对话…"
@@ -1358,11 +1381,13 @@ onUnmounted(() => {
       </div>
 
       <WorkspacePanel
-        v-if="showWorkspace && chat.activeId && chat.files.length"
+        v-if="showWorkspace && chat.activeId"
         :files="chat.files"
         :adapter="wsAdapter"
+        :uploadable="true"
         :initial-file-id="openFileId || undefined"
         @close="showWorkspace = false; openFileId = null"
+        @changed="refreshWorkspaceFiles"
       />
 
       <MemberPanel
@@ -1472,6 +1497,19 @@ onUnmounted(() => {
   gap: 10px;
   flex-wrap: wrap;
 }
+.stream-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin: 0 12px 8px; padding: 7px 12px;
+  font-size: 12.5px; color: #c0392b;
+  border: 1px solid rgba(192, 57, 43, 0.35);
+  background: rgba(192, 57, 43, 0.07);
+  border-radius: 8px;
+}
+.stream-banner-dismiss {
+  border: 1px solid rgba(192, 57, 43, 0.4); background: transparent; color: #c0392b;
+  border-radius: 5px; font-size: 11.5px; padding: 2px 8px; cursor: pointer; flex-shrink: 0;
+}
+.stream-banner-dismiss:hover { background: rgba(192, 57, 43, 0.12); }
 .inline-retry-btn {
   border: 1px solid currentColor;
   background: transparent;

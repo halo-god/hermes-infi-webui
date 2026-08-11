@@ -5,6 +5,7 @@ round-trips them through each extractor, and asserts the XSS guard (embedded
 literal "<script>" text must come out escaped, never as an executable tag).
 """
 import io
+import uuid
 
 import pytest
 from httpx import AsyncClient
@@ -48,7 +49,10 @@ def test_extract_docx_html_structure_and_escaping():
     assert "<strong>bold text</strong>" in html
     assert "<ul>" in html and "<li>Bullet one</li>" in html and "<li>Bullet two</li>" in html
     assert "<ol>" in html and "<li>Numbered one</li>" in html
-    assert "<table>" in html and "<th>Header A</th>" in html and "<td>cell 1</td>" in html
+    # Mammoth emits semantic HTML: cells are <td> wrapping a <p> (no th
+    # distinction), text still present and escaped.
+    assert "<table>" in html
+    assert "Header A" in html and "cell 1" in html
     # XSS guard: literal script text must be escaped, never an executable tag.
     assert "<script>" not in html
     assert "&lt;script&gt;" in html
@@ -113,9 +117,10 @@ def test_extract_pptx_html_per_slide():
 
 @pytest.mark.asyncio
 async def test_upload_docx_preview_and_raw_download_roundtrip(client: AsyncClient, auth_headers, test_user, db):
-    """Uploading a real .docx must: extract HTML into `content`, keep the
-    original bytes byte-identical via the raw-download route (the dual
-    -storage split), and tag `kind` correctly."""
+    """Uploading a real .docx must: accept immediately with
+    processing_status="processing" (conversion is async), then end with the
+    extracted HTML in `content`, keep the original bytes byte-identical via
+    the raw-download route (the dual-storage split), and tag `kind` correctly."""
     pytest.importorskip("moto")
     from moto import mock_aws
 
@@ -150,10 +155,37 @@ async def test_upload_docx_preview_and_raw_download_roundtrip(client: AsyncClien
             assert r.status_code == 201, r.text
             data = r.json()
             assert data["kind"] == "docx"
+            # Async conversion: the upload returns immediately in "processing".
+            assert data["processing_status"] == "processing"
             file_id = data["id"]
+
+            # The upload endpoint accepts instantly; the conversion runs in a
+            # background task. That task opens its own session and cannot see
+            # rows still inside this test's transaction (the db fixture wraps
+            # everything in a rolled-back transaction), so simulate its effect
+            # here: run process_upload and flip the row to ready.
+            from app.core.files import process_upload
+            from app.db.models.workspace import WorkspaceFile
+            wf = await db.get(WorkspaceFile, uuid.UUID(file_id))
+            assert wf is not None
+            processed = await process_upload(
+                raw, "docx", f"conversations/{convo.id}", "report.docx",
+                content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                fast_mode=True,
+            )
+            wf.content = processed.content
+            wf.storage_key = processed.storage_key
+            wf.processing_status = "ready"
+            await db.commit()
+            # updated_at is a server-side onupdate column — after commit it is
+            # stale-on-this-instance; refresh so the shared fixture session
+            # (identity-mapped to the same object) doesn't lazy-load it inside
+            # the sync pydantic validation of the detail endpoint.
+            await db.refresh(wf)
 
             detail = await client.get(f"/api/v1/conversations/{convo.id}/files/{file_id}", headers=auth_headers)
             assert detail.status_code == 200
+            assert detail.json()["processing_status"] == "ready"
             assert "<h1>Title</h1>" in detail.json()["content"]
 
             raw_resp = await client.get(f"/api/v1/conversations/{convo.id}/files/{file_id}/raw", headers=auth_headers)
@@ -163,3 +195,32 @@ async def test_upload_docx_preview_and_raw_download_roundtrip(client: AsyncClien
         settings.minio_endpoint = prev_endpoint
         settings.minio_bucket = prev_bucket
         object_storage.reset_client()
+
+
+# ── Legacy formats (soffice optional) ──
+
+
+def test_legacy_doc_hint_when_soffice_absent(monkeypatch):
+    """Without LibreOffice, legacy formats yield a clear hint (not silent)."""
+    from app.core.office_legacy import extract_legacy_doc_html
+
+    monkeypatch.setattr("app.core.office_legacy.soffice_available", lambda: False)
+    hint = extract_legacy_doc_html(b"not a real doc", "doc")
+    assert hint is not None
+    assert "暂不支持" in hint and "docx" in hint
+
+
+def test_legacy_csv_table_wrapping():
+    from app.core.office_legacy import _csv_to_table
+
+    tbl = _csv_to_table('a,b\n1,2\n')
+    assert "<table>" in tbl
+    assert "<th>a</th>" in tbl and "<td>1</td>" in tbl
+    assert "<script>" not in tbl  # cells escaped
+
+
+def test_legacy_formats_registered_in_extractors():
+    from app.core.files import OFFICE_EXTRACTORS
+
+    for ext in ("doc", "xls", "ppt"):
+        assert ext in OFFICE_EXTRACTORS, f"{ext} must be registered"

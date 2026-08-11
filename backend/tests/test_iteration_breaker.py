@@ -26,7 +26,7 @@ class ToolSpamClient:
     """Fake ACPClient that emits `count` tool_call events then a final message.
     Records whether cancel() was called so we can assert the breaker fired."""
 
-    def __init__(self, command, cwd, *, protocol_version=1, on_update=None, on_fs_write=None, env=None):
+    def __init__(self, command, cwd, *, protocol_version=1, on_update=None, on_fs_write=None, env=None, on_permission_request=None):
         self.on_update = on_update
         self.cancelled = False
         self._proc = FakeProc()

@@ -221,7 +221,15 @@ function askDelete(id: string, title: string) {
 }
 async function doDelete() {
   if (!deleteTarget.value) return;
-  await conversationsApi.remove(deleteTarget.value.id);
+  try {
+    // Store-level delete also clears the active conversation's messages /
+    // stream when the deleted convo is the one being viewed (a raw API delete
+    // would leave a ghost conversation: activeId still points at the removed
+    // row and the next send 404s).
+    await chat.deleteConversation(deleteTarget.value.id);
+  } catch {
+    ns.toast("删除失败，请稍后重试", "error");
+  }
   deleteTarget.value = null;
   await chat.loadConversations();
 }

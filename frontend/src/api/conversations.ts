@@ -106,6 +106,12 @@ export const conversationsApi = {
   async extractItems(id: string): Promise<{ project_name: string; tasks: string[]; conversation_id: string; team_id: string | null }> {
     return (await http.post(`/conversations/${id}/extract-items`)).data;
   },
+  async deleteFile(id: string, fileId: string): Promise<void> {
+    await http.delete(`/conversations/${id}/files/${fileId}`);
+  },
+  async retryFile(id: string, fileId: string): Promise<WorkspaceFile> {
+    return (await http.post(`/conversations/${id}/files/${fileId}/retry`)).data;
+  },
   async consolidateMessage(
     conversationId: string,
     messageId: string,

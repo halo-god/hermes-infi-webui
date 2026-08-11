@@ -33,7 +33,7 @@ class FakeProc:
 class FakeACPClient:
     default_reply = "已经处理好了"
 
-    def __init__(self, command, cwd, *, protocol_version=1, on_update=None, on_fs_write=None, env=None):
+    def __init__(self, command, cwd, *, protocol_version=1, on_update=None, on_fs_write=None, env=None, on_permission_request=None):
         self.on_update = on_update
         self.on_fs_write = on_fs_write
         self._closed = False

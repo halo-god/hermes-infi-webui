@@ -73,8 +73,8 @@ async def test_full_auth_flow():
         me = await c.get(f"{PREFIX}/auth/me", headers={"Authorization": f"Bearer {access}"})
         assert me.status_code == 200 and me.json()["email"] == ADMIN_EMAIL
 
-        # admin-only listing (RBAC)
-        ulist = await c.get(f"{PREFIX}/users", headers={"Authorization": f"Bearer {access}"})
+        # admin-only listing (RBAC) — user management lives under /admin
+        ulist = await c.get(f"{PREFIX}/admin/users", headers={"Authorization": f"Bearer {access}"})
         assert ulist.status_code == 200
 
         # refresh rotation + reuse blacklist

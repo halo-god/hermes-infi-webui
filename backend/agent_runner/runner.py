@@ -659,6 +659,15 @@ class Runner:
             self._bg_tasks.add(t)
             t.add_done_callback(self._bg_tasks.discard)
             return
+        if task.get("type") == "workspace_docling_upgrade":
+            # Async Docling upgrade for a conversation workspace file (pptx):
+            # writes high-quality Markdown into content_md for AI injection
+            # without touching the preview HTML in `content`.
+            from agent_runner.runner_docling_upgrade import handle_workspace_docling_upgrade
+            t = asyncio.create_task(handle_workspace_docling_upgrade(task))
+            self._bg_tasks.add(t)
+            t.add_done_callback(self._bg_tasks.discard)
+            return
         if task.get("type") in ("subagent_spawn", "subagent_send"):
             # Fire-and-forget: a persistent subagent can run far longer than a
             # normal chat turn, so it must not hold a MAX_CONCURRENT semaphore
@@ -1481,6 +1490,7 @@ class Runner:
         thinking: str | None = None, plan: list[dict] | None = None,
         files: list[dict] | None = None, clarifies: list[dict] | None = None,
         usage: dict | None = None, calls: list[dict] | None = None,
+        error: str | None = None,
     ) -> None:
         # Strip ANSI escape codes (terminal color codes) that the hermes agent
         # or its tools sometimes emit. Without this they render as invisible or
@@ -1493,6 +1503,10 @@ class Runner:
             msg = await db.get(Message, uuid.UUID(message_id))
             if msg:
                 content: dict = {"text": text}
+                if error:
+                    # Machine-readable failure detail for the UI's error branch
+                    # (previously the frontend only ever saw "生成中断").
+                    content["error"] = error
                 if steps:
                     content["tool_calls"] = steps
                 if thinking:
@@ -1650,11 +1664,12 @@ class Runner:
         files: list[dict] | None = None, clarifies: list[dict] | None = None,
     ) -> None:
         # Keep whatever the agent already streamed (thinking/plan/files) so a
-        # failed turn still shows its reasoning in the session log.
+        # failed turn still shows its reasoning in the session log. error= is
+        # written to content.error so the UI can show the actual reason.
         await self._finalize(
             message_id, f"⚠ 生成失败：{detail}", "error",
             calls=calls, thinking=thinking, plan=plan, files=files,
-            clarifies=clarifies,
+            clarifies=clarifies, error=detail,
         )
         await R.publish_event(
             conversation_id,

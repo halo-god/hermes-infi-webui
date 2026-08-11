@@ -56,9 +56,26 @@ async def test_profile_filters_catalog_by_enabled_names(db):
     names = {e["name"] for e in resolved}
     assert names == {"fs", "web"}
     fs_entry = next(e for e in resolved if e["name"] == "fs")
-    assert fs_entry == {"name": "fs", "command": "npx", "args": ["-y", "fs-server"], "env": {"A": "1"}}
+    # env is emitted in ACP v1 list-of-{name,value} form (spec-compliant
+    # subprocess env), not a plain dict.
+    assert fs_entry == {"name": "fs", "command": "npx", "args": ["-y", "fs-server"], "env": [{"name": "A", "value": "1"}]}
     web_entry = next(e for e in resolved if e["name"] == "web")
-    assert web_entry == {"name": "web", "type": "sse", "url": "https://example.com/mcp", "headers": {}}
+    # ACP v1 shape: McpServerHttp/Sse = {name, url, headers: list[{name,value}]}
+    assert web_entry == {"name": "web", "url": "https://example.com/mcp", "headers": []}
+
+
+async def test_http_env_auth_falls_back_to_headers(db):
+    # Regression (P0): reader was switched from env to a nonexistent
+    # "headers" field, silently dropping Authorization for HTTP/SSE MCP
+    # servers — write side (AdminView.vue + McpServerIn) only persists env.
+    await _register_servers(db, [
+        {"name": "web", "transport": "http", "url": "https://example.com/mcp",
+         "env": {"Authorization": "Bearer tok123"}},
+    ])
+    profile = await _mk_profile(db, ["web"])
+    resolved = await svc._resolve_mcp_servers(db, profile)
+    web_entry = next(e for e in resolved if e["name"] == "web")
+    assert web_entry["headers"] == [{"name": "Authorization", "value": "Bearer tok123"}]
 
 
 async def test_stdio_entry_without_command_is_skipped(db):

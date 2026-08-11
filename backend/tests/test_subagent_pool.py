@@ -100,7 +100,7 @@ class ScriptedACPClient:
     """Fake persona client: replies with a fixed chunk of text on prompt()."""
     instances: list["ScriptedACPClient"] = []
 
-    def __init__(self, command, cwd, *, protocol_version=1, on_update=None, on_fs_write=None, env=None):
+    def __init__(self, command, cwd, *, protocol_version=1, on_update=None, on_fs_write=None, env=None, on_permission_request=None):
         self.command = command
         self.cwd = cwd
         self.on_update = on_update

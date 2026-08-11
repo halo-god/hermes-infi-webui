@@ -138,7 +138,11 @@ class Settings(BaseSettings):
 
     # ── Rate limiting ──
     rate_limit_per_min: int = 30  # per-user message sends / minute (default)
-    login_rate_limit_per_min: int = 10  # per-IP login attempts / minute (brute-force guard)
+    rate_limit_global_per_min: int = 1000  # global send cap / minute (overflow guard)
+    # Login: dual-dimension (per-IP + per-account), both on the same 15-min window.
+    login_ip_limit: int = 15  # per-IP login attempts / window
+    login_user_limit: int = 5  # per-account login attempts / window (credential-stuffing guard)
+    login_window_seconds: int = 900  # 15 minutes
 
     # ── Agent memory (做梦整理记忆) ──
     memory_total_chars: int = 2200  # combined budget for user_profile + soul + notes

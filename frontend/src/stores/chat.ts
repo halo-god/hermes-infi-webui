@@ -12,6 +12,25 @@ import type { Profile } from "@/api/agents";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api/v1";
 
+/** Poll a freshly-uploaded file until its async conversion finishes.
+ * Returns true when the file is ready to attach; false on error/timeout. */
+async function waitForFileReady(fileId: string, convoId: string, timeoutMs = 30000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const list = await conversationsApi.files(convoId);
+      const f = list.find((x) => x.id === fileId);
+      if (!f) return false; // gone
+      if (f.processing_status === "ready") return true;
+      if (f.processing_status === "error") return false;
+    } catch {
+      /* transient — keep polling until the deadline */
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  return false;
+}
+
 export const useChatStore = defineStore("chat", () => {
   const conversations = ref<Conversation[]>([]);
   const profiles = ref<Profile[]>([]);
@@ -439,8 +458,27 @@ export const useChatStore = defineStore("chat", () => {
     if (opts?.stagedFiles?.length) {
       try {
         const uploaded = await Promise.all(opts.stagedFiles.map((f) => conversationsApi.upload(id, f)));
-        fileIds = uploaded.map((r) => r.id);
         files.value = [...files.value, ...uploaded];
+        // Uploads needing conversion (office/pdf/large) return immediately in
+        // "processing" — wait for them to finish so the AI actually receives
+        // the attachment instead of an empty file (or none at all). Poll all
+        // in parallel: N attachments cost max(30s), not N × 30s.
+        const ns = useNotificationStore();
+        const results = await Promise.all(
+          uploaded.map(async (u) => {
+            if (u.processing_status !== "processing") return u.id;
+            const ok = await waitForFileReady(u.id, id);
+            if (!ok) {
+              ns.push({
+                title: "附件转换未完成",
+                body: `${u.name} 转换超时或失败，本轮消息未附带该文件，可稍后重试`,
+                kind: "warn",
+              });
+            }
+            return ok ? u.id : null;
+          }),
+        );
+        fileIds = results.filter((x): x is string => x !== null);
       } catch (e) {
         console.error("[chat] file upload failed:", e);
         // Notify the user instead of silently sending without the attachment —
@@ -503,17 +541,20 @@ export const useChatStore = defineStore("chat", () => {
       // WS transport as a real multi-agent roundtable — the SSE transport
       // only understands single-agent stream events.
       const selectedProfile = opts?.profileId ? profiles.value.find((p) => p.id === opts.profileId) : null;
-      if (activeAgents.value.length > 1 || selectedProfile?.is_moa) await sendRoundtable(id, text, passOpts);
-      else await sendSingle(id, text, passOpts);
+      if (activeAgents.value.length > 1 || selectedProfile?.is_moa) return await sendRoundtable(id, text, passOpts);
+      return await sendSingle(id, text, passOpts);
     }
+    return true;
   }
 
   function isActivelyStreaming(id: string) {
     return streamingConvoId.value === id;
   }
 
-  /** Single agent: open SSE, register handlers, then POST. */
-  async function sendSingle(id: string, text: string, opts?: { profileId?: string; fileIds?: string[]; knowledgeIds?: string[]; taskId?: string }) {
+  /** Single agent: open SSE, register handlers, then POST. Returns false
+   * when the message could not be delivered (so the caller can restore the
+   * draft instead of silently eating the user's text). */
+  async function sendSingle(id: string, text: string, opts?: { profileId?: string; fileIds?: string[]; knowledgeIds?: string[]; taskId?: string }): Promise<boolean> {
     closeStream();
     streamingConvoId.value = id;
     setupStreamHandlers();
@@ -524,7 +565,7 @@ export const useChatStore = defineStore("chat", () => {
       if (!restored) {
         console.error("[chat] Cannot send message: no access token");
         streamingConvoId.value = null;
-        return;
+        return false;
       }
     }
 
@@ -558,12 +599,32 @@ export const useChatStore = defineStore("chat", () => {
     });
     console.debug(`[chat] sendSingle: SSE ${stream.connected.value ? "connected" : "pending"}, POSTing message`);
 
-    const res = await conversationsApi.send(id, text, opts);
+    let res;
+    try {
+      res = await conversationsApi.send(id, text, opts);
+    } catch (e) {
+      // POST failed (network / 5xx / timeout): clean up the streaming state
+      // and mark the optimistic bubble so the thread doesn't look alive.
+      console.error("[chat] send failed:", e);
+      streamingConvoId.value = null;
+      closeStream();
+      const optIdx = messages.value.findIndex((m) => m.id === optimisticUser.id);
+      if (optIdx !== -1) {
+        const m = messages.value[optIdx];
+        spliceMessage(optIdx, 1, {
+          ...m,
+          status: "error" as const,
+          content: { ...m.content, error: "消息发送失败，请检查网络后重试" },
+        });
+      }
+      return false;
+    }
     // Replace the optimistic user message with the real one (server-assigned id)
     const optIdx = messages.value.findIndex((m) => m.id === optimisticUser.id);
     if (optIdx !== -1) spliceMessage(optIdx, 1, res.user_message);
     // The SSE "start" event may have already created the agent bubble
     if (!find(res.agent_message.id)) pushMessage(res.agent_message);
+    return true;
   }
 
   /** Roundtable: bidirectional WebSocket — send + stream over one socket. */
@@ -581,22 +642,41 @@ export const useChatStore = defineStore("chat", () => {
     });
 
     // Optimistic user bubble
-    pushMessage({
+    const optimisticUser = {
       id: `tmp-${crypto.randomUUID?.() ?? Math.random().toString(36).slice(2) + Date.now().toString(36)}`,
       conversation_id: id,
       owner_id: null,
-      role: "user",
+      role: "user" as const,
       agent_id: null,
       content: { text },
-      status: "complete",
+      status: "complete" as const,
       created_at: new Date().toISOString(),
-    });
+    };
+    pushMessage(optimisticUser);
 
     const { fileIds, knowledgeIds, taskId, ...restOpts } = opts || {};
-    stream.send({
+    const sent = stream.send({
       action: "send", text, ...restOpts, task_id: taskId,
       attached_file_ids: fileIds || [], knowledge_ids: knowledgeIds || [],
     });
+    if (!sent) {
+      // Socket not open (openWS resolves optimistically before the socket is
+      // truly ready) — the message went nowhere. Roll the optimistic bubble
+      // back and surface the failure instead of leaving a ghost message.
+      streamingConvoId.value = null;
+      const optIdx = messages.value.findIndex((m) => m.id === optimisticUser.id);
+      if (optIdx !== -1) {
+        const m = messages.value[optIdx];
+        spliceMessage(optIdx, 1, {
+          ...m,
+          status: "error" as const,
+          content: { ...m.content, error: "连接未就绪，消息未发送，请重试" },
+        });
+      }
+      useNotificationStore().toast("连接未就绪，消息未发送", "warn");
+      return false;
+    }
+    return true;
   }
 
   async function cancel() {
@@ -683,6 +763,7 @@ export const useChatStore = defineStore("chat", () => {
     // Stream state (read-only exposure)
     streamConnected: stream.connected,
     streamError: stream.error,
+    clearStreamError: () => { stream.error.value = null; },
     loadTeams,
     loadProfiles,
     loadConversations,

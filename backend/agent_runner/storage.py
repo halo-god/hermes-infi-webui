@@ -126,21 +126,28 @@ async def save_file(
             )
             stem, dot, suffix = name.rpartition(".")
             edited_name = f"{stem}_edited{dot}{suffix}" if dot else f"{name}_edited"
+            # The copy gets its OWN object key — reusing the original name's
+            # key would overwrite the user's file in MinIO (both rows would
+            # point at the same object, and the original would serve the
+            # edited bytes on raw download).
+            edited_key = storage_key
+            if settings.storage_backend == "minio":
+                edited_key = f"{conversation_id}/{edited_name}"
             edited = WorkspaceFile(
                 conversation_id=conversation_id,
                 message_id=message_id,
                 name=edited_name,
                 kind=_kind_of(edited_name),
                 content=inline,
-                storage_key=storage_key,
+                storage_key=edited_key,
                 size_bytes=size,
                 created_by_agent=agent_id,
                 current_version=1,
             )
             db.add(edited)
-            if settings.storage_backend == "minio" and storage_key:
+            if settings.storage_backend == "minio" and edited_key:
                 await asyncio.to_thread(
-                    object_storage.put, storage_key, data, _CONTENT_TYPE.get(kind, "text/plain")
+                    object_storage.put, edited_key, data, _CONTENT_TYPE.get(kind, "text/plain")
                 )
             await db.commit()
             await db.refresh(edited)

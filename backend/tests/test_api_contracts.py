@@ -45,7 +45,10 @@ async def profile_id(ac: AsyncClient, admin_headers: dict) -> str:
     res = await ac.get("/api/v1/profiles", headers=admin_headers)
     assert res.status_code == 200
     profiles = res.json()
-    if profiles:
+    # list_profiles falls back to a HARDCODED profile (handle "hermes-main",
+    # freshly generated uuid) when the DB is empty — that id is not a real
+    # row, so PK lookups (clone/export) 404. Treat it as "none exist".
+    if profiles and profiles[0].get("handle") != "hermes-main":
         return profiles[0]["id"]
     # Create one if none exist
     res = await ac.post("/api/v1/profiles", json={
