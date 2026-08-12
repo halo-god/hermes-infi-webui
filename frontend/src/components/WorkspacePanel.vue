@@ -77,8 +77,12 @@ function toggleDir(path: string) {
   }
 }
 
-// Auto-expand all dirs on first load
+// Auto-expand all dirs on first load, but never re-collapse dirs the user
+// folded (files-array replacement happens on every refetch/SSE event).
+let treeSeen = false;
 watch(fileTree, (tree) => {
+  if (treeSeen) return;  // preserve the user's fold state on later refreshes
+  treeSeen = true;
   const expandAll = (nodes: TreeNode[]) => {
     for (const n of nodes) {
       if (n.isDir && n.children) {
@@ -136,9 +140,19 @@ function fileMode(f: FileItem | null): string {
   // AI-written files are markdown text saved with a .docx label (a UX
   // workaround, not a real binary document) - keep rendering those as
   // markdown. A genuinely uploaded .docx has no created_by_agent and gets
-  // the formatted office preview instead.
-  if (e === "docx") return f.created_by_agent ? "md" : "office";
-  if (e === "xlsx" || e === "pptx" || e === "rtf") return "office";
+  // the PDF preview (or the HTML fallback) instead.
+  if (e === "docx") {
+    if (f.created_by_agent) return "md";
+    return f.preview_pdf_key ? "pdf" : "office";
+  }
+  // Office family (docx/xlsx/pptx + legacy OLE2 + OpenDocument): unified PDF
+  // preview when LibreOffice produced one (preview_pdf_key); HTML fallback
+  // for pre-0086 rows or when soffice is unavailable.
+  if (e === "xlsx" || e === "pptx" || e === "rtf"
+    || e === "doc" || e === "xls" || e === "ppt"
+    || e === "odt" || e === "ods" || e === "odp") {
+    return f.preview_pdf_key ? "pdf" : "office";
+  }
   if (e === "csv") return "csv";
   if (e === "json") return "json";
   if (e === "html" || e === "htm") return "html";
@@ -219,6 +233,11 @@ const codeHighlighted = computed(() => {
 const rawUrl = computed(() =>
   activeFile.value ? props.adapter.getRawUrl(activeFile.value.id) : ""
 );
+// Unified Office preview: LibreOffice-converted PDF served by /pdf (native
+// PDFs fall back to the raw bytes server-side, so this is safe for both).
+const pdfUrl = computed(() =>
+  activeFile.value ? props.adapter.getPdfUrl(activeFile.value.id) : ""
+);
 
 function highlightCode(code: string, language: string): string {
   const escaped = code
@@ -263,7 +282,14 @@ function openFile(f: FileItem) {
   if (existing) {
     activeTabId.value = existing.id;
   } else {
-    if (openTabs.value.length >= MAX_TABS) openTabs.value.shift();
+    if (openTabs.value.length >= MAX_TABS) {
+      const evicted = openTabs.value.shift();
+      // If the evicted tab was active, point at the new front tab instead of
+      // leaving activeTabId dangling on a tab that no longer exists.
+      if (evicted && activeTabId.value === evicted.id && openTabs.value.length) {
+        activeTabId.value = openTabs.value[0].id;
+      }
+    }
     const tab: Tab = { id: `tab-${f.id}`, fileId: f.id };
     openTabs.value.push(tab);
     activeTabId.value = tab.id;
@@ -287,8 +313,13 @@ function closeTab(tabId: string) {
   }
 }
 
+let contentLoadSeq = 0;
 async function loadContent(f: FileItem) {
   const mode = fileMode(f);
+  // Guard against out-of-order responses: a slow load for file A must not
+  // overwrite the preview after the user switched to file B.
+  const seq = ++contentLoadSeq;
+  const fid = f.id;
   editMode.value = false;
   previewVersion.value = null;
   if (mode === "image" || mode === "pdf") {
@@ -305,9 +336,12 @@ async function loadContent(f: FileItem) {
   }
   loading.value = true;
   try {
-    content.value = await props.adapter.getContent(f.id);
+    const src = await props.adapter.getContent(f.id);
+    if (seq === contentLoadSeq && activeFile.value?.id === fid) {
+      content.value = src;
+    }
   } finally {
-    loading.value = false;
+    if (seq === contentLoadSeq) loading.value = false;
   }
 }
 
@@ -340,15 +374,25 @@ async function retryFile(f: FileItem) {
   }
 }
 
-// Auto-open file when panel opens.
+// Auto-open file when panel opens. Reloads on files-array replacement are
+// guarded: never clobber an in-progress edit, and only re-fetch when a row's
+// processing status actually flipped (processing → ready/error) — a plain
+// refetch (e.g. agent wrote a file elsewhere) must not drop the user's
+// unsaved edits or reset the view.
 watch(
   () => props.files,
-  (files) => {
+  (files, prev) => {
+    const prevById = new Map((prev ?? []).map((f) => [f.id, f]));
     files.forEach((f) => {
       const inTab = openTabs.value.find((t) => t.fileId === f.id);
       if (!inTab) return;
       if (activeTab.value?.fileId === f.id) {
-        loadContent(f);
+        const was = prevById.get(f.id);
+        const statusFlipped = was && was.processing_status !== f.processing_status
+          && f.processing_status !== "processing";
+        if (!editMode.value && (statusFlipped || !was)) {
+          loadContent(f);
+        }
       } else {
         newFileBadges.value.add(f.id);
         setTimeout(() => { newFileBadges.value.delete(f.id); }, 3000);
@@ -558,7 +602,7 @@ function fmtDate(s: string) {
                         <span v-else-if="leaf.file!.processing_status === 'error'" class="ws-proc ws-proc-err">解析失败</span>
                         <span v-if="leaf.file!.current_version !== undefined" class="ver">v{{ leaf.file!.current_version }}</span>
                         <span class="ws-file-ops">
-                          <button v-if="leaf.file!.processing_status === 'error' && adapter.retryFile" class="ws-op" title="重试转换" @click.stop="retryFile(leaf.file!)">↻</button>
+                          <button v-if="(leaf.file!.processing_status === 'error' || leaf.file!.processing_status === 'processing') && adapter.retryFile" class="ws-op" title="重试转换" @click.stop="retryFile(leaf.file!)">↻</button>
                           <button v-if="adapter.removeFile" class="ws-op" title="删除" @click.stop="removeFile(leaf.file!)">✕</button>
                         </span>
                       </button>
@@ -578,7 +622,7 @@ function fmtDate(s: string) {
                     <span v-else-if="child.file!.processing_status === 'error'" class="ws-proc ws-proc-err">解析失败</span>
                     <span v-if="child.file!.current_version !== undefined" class="ver">v{{ child.file!.current_version }}</span>
                     <span class="ws-file-ops">
-                      <button v-if="child.file!.processing_status === 'error' && adapter.retryFile" class="ws-op" title="重试转换" @click.stop="retryFile(child.file!)">↻</button>
+                      <button v-if="(child.file!.processing_status === 'error' || child.file!.processing_status === 'processing') && adapter.retryFile" class="ws-op" title="重试转换" @click.stop="retryFile(child.file!)">↻</button>
                       <button v-if="adapter.removeFile" class="ws-op" title="删除" @click.stop="removeFile(child.file!)">✕</button>
                     </span>
                   </button>
@@ -713,14 +757,22 @@ function fmtDate(s: string) {
                   <div style="font-size: 12px; color: var(--ink-faint); margin-top: 4px">该文档暂时无法在线预览，请下载查看</div>
                   <button class="btn" style="margin-top: 16px" @click="download">下载文件</button>
                 </div>
-                <div v-else v-html="officeHtml" />
+                <!-- Uploaded office HTML is UNTRUSTED (a malicious .doc/.docx can
+                     embed scripts / javascript: links). Render in a sandboxed
+                     iframe with ALL capabilities disabled (empty sandbox attr =
+                     no scripts, no same-origin, no forms) — v-html here would be
+                     stored XSS. -->
+                <iframe v-else :srcdoc="officeHtml" sandbox="" class="office-sandbox" />
               </template>
             </div>
             <!-- JSON -->
             <pre v-else-if="fileMode(activeFile) === 'json'" class="json-preview">{{ jsonPretty }}</pre>
             <!-- CSV: uploaded CSVs come pre-rendered as an HTML table; AI-authored
-                 .csv is raw text — detect and render accordingly -->
-            <div v-else-if="fileMode(activeFile) === 'csv' && isHtmlContent" class="md-preview office-preview" v-html="officeHtml" />
+                 .csv is raw text — detect and render accordingly. Uploaded CSV
+                 HTML is untrusted — sandboxed iframe, same as office docs. -->
+            <div v-else-if="fileMode(activeFile) === 'csv' && isHtmlContent" class="md-preview office-preview">
+              <iframe :srcdoc="officeHtml" sandbox="" class="office-sandbox" />
+            </div>
             <div v-else-if="fileMode(activeFile) === 'csv'" class="csv-wrap">
               <table class="csv-preview">
                 <thead><tr><th v-for="(c, i) in csvRows[0]" :key="i">{{ c }}</th></tr></thead>
@@ -742,11 +794,11 @@ function fmtDate(s: string) {
             <div v-else-if="fileMode(activeFile) === 'image'" class="img-preview">
               <img :src="rawUrl" :alt="activeFile.name" />
             </div>
-            <!-- PDF -->
+            <!-- PDF (native + LibreOffice-converted Office previews) -->
             <div v-else-if="fileMode(activeFile) === 'pdf'" class="pdf-preview">
-              <iframe :src="rawUrl" frameborder="0" style="width:100%;height:calc(100% - 36px);border:none" />
+              <iframe :src="pdfUrl" frameborder="0" style="width:100%;height:calc(100% - 36px);border:none" />
               <div style="height:36px;display:flex;align-items:center;justify-content:center;border-top:1px solid var(--rule-soft);gap:8px">
-                <a :href="rawUrl" target="_blank" class="btn" style="font-size:12px;padding:4px 12px">在新标签页打开</a>
+                <a :href="pdfUrl" target="_blank" class="btn" style="font-size:12px;padding:4px 12px">在新标签页打开</a>
               </div>
             </div>
             <!-- Diff -->
@@ -1114,6 +1166,9 @@ function fmtDate(s: string) {
 
 /* HTML iframe */
 .html-preview { width: 100%; height: 100%; border: none; border-radius: var(--r-sm); background: #fff; }
+
+/* Sandboxed office/CSV HTML preview (untrusted uploaded content) */
+.office-sandbox { width: 100%; height: 100%; border: none; border-radius: var(--r-sm); background: #fff; }
 
 /* Image */
 .img-preview { display: flex; justify-content: center; align-items: flex-start; }

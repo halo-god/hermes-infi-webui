@@ -77,6 +77,7 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   document.removeEventListener("click", closeMenus);
+  clearProcessingRefresh();
 });
 
 watch(() => route.params.id, async (newId, oldId) => {
@@ -89,17 +90,34 @@ watch(() => route.params.id, async (newId, oldId) => {
 });
 // P1-3: deep-link support — ?tab=knowledge&file=<id> (from a knowledge chip
 // in chat) switches to the knowledge tab and opens the file in the panel.
-watch(() => route.query.tab, async (t) => {
+// knowledgeItems loads asynchronously after the tab flips, so a not-yet-loaded
+// target id is stashed in pendingDeepLinkFile and opened once loadKnowledge()
+// resolves.
+const pendingDeepLinkFile = ref<string | null>(null);
+// immediate: the query params are already present on mount (direct URL visit
+// or cross-route navigation remounts the component), so a non-immediate watch
+// would never fire. Watching [tab, file] (not just tab) makes switching to a
+// DIFFERENT knowledge file from chat work while already on the page.
+watch(() => [route.query.tab, route.query.file], async ([t, fidRaw]) => {
   if (t === "knowledge") {
     tab.value = "knowledge";
     await nextTick();
-    const fid = route.query.file as string | undefined;
+    const fid = fidRaw as string | undefined;
     if (fid) {
       const item = knowledgeItems.value.find((i) => i.id === fid);
-      if (item && !item.is_folder) openKnowledgeFile(item.id);
+      if (item && !item.is_folder) {
+        pendingDeepLinkFile.value = null;
+        openKnowledgeFile(item.id);
+      } else {
+        pendingDeepLinkFile.value = fid;
+      }
     }
+  } else {
+    // Leaving the knowledge tab: drop any pending target so it doesn't fire
+    // on a later loadKnowledge.
+    pendingDeepLinkFile.value = null;
   }
-});
+}, { immediate: true });
 function closeMenus() {
   menuFor.value = null;
   projMenuFor.value = null;
@@ -135,6 +153,10 @@ const knowledgeFiles = computed<FileItem[]>(() =>
       name: k.name,
       kind: k.kind,
       size_bytes: k.size_bytes,
+      preview_pdf_key: k.preview_pdf_key,
+      // Docling background upgrades flip processing_status — without this the
+      // panel would never show "转换中…"/"解析失败" + the retry button.
+      processing_status: k.processing_status,
     }))
 );
 
@@ -145,6 +167,18 @@ async function loadKnowledge() {
   } finally {
     loadingKnowledge.value = false;
   }
+  // Deep-link (knowledge chip in chat): open the target file once the list
+  // has actually loaded.
+  if (pendingDeepLinkFile.value) {
+    const fid = pendingDeepLinkFile.value;
+    pendingDeepLinkFile.value = null;
+    const item = knowledgeItems.value.find((i) => i.id === fid);
+    if (item && !item.is_folder) openKnowledgeFile(item.id);
+  }
+  // The knowledge PANEL reads detail.knowledge (not knowledgeItems) — refresh
+  // detail so an open panel's rows (processing status / new files) stay in
+  // sync after a background Docling upgrade, not just on page reload.
+  await load();
   // P1-1 RAG: fetch chunk counts in the background (non-blocking) so the list
   // renders immediately. Only file items (not folders) have chunks.
   loadKnowledgeChunks();
@@ -179,6 +213,9 @@ function scheduleProcessingRefresh() {
     }, 5000);
   }
 }
+function clearProcessingRefresh() {
+  if (processingTimer) { clearTimeout(processingTimer); processingTimer = null; }
+}
 
 async function loadKnowledgeChunks() {
   const items = knowledgeItems.value.filter((f) => !f.is_folder);
@@ -192,9 +229,12 @@ async function loadKnowledgeChunks() {
   );
   knowledgeChunks.value = Object.fromEntries(entries);
 }
+// immediate: a deep-link (?tab=knowledge) sets tab.value during setup,
+// BEFORE this watch is registered — without immediate, loadKnowledge would
+// never fire for that path.
 watch([tab, currentFolderId], ([t]) => {
   if (t === "knowledge") loadKnowledge();
-});
+}, { immediate: true });
 
 function enterFolder(f: Knowledge) {
   folderTrail.value.push({ id: f.id, name: f.name });
@@ -221,6 +261,9 @@ async function onKnowledgeMoved() {
 const kbAdapter = computed<WsAdapter>(() => ({
   getContent: (fid) => teamsApi.knowledgeContent(teamId.value, fid),
   getRawUrl: (fid) => teamsApi.knowledgeRawUrl(teamId.value, fid),
+  // LibreOffice-converted PDF preview (office files); native PDFs fall back
+  // to the raw bytes server-side.
+  getPdfUrl: (fid) => teamsApi.knowledgePdfUrl(teamId.value, fid),
   patchContent: (fid, content) => teamsApi.updateKnowledgeContent(teamId.value, fid, content),
   getVersions: (fid) => teamsApi.knowledgeVersions(teamId.value, fid),
   restoreVersion: (fid, v) => teamsApi.restoreKnowledgeVersion(teamId.value, fid, v),

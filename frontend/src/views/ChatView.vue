@@ -99,6 +99,9 @@ onMounted(async () => {
 // ── Infinite scroll: load older messages when sentinel is visible ──
 let observer: IntersectionObserver | null = null;
 function setupLoadMoreObserver() {
+  // root as a getter: at mount time (landing page) scroller is null, so a
+  // fixed root would silently observe the viewport and misfire on large
+  // screens / nested scroll containers. Re-resolve on every callback.
   observer = new IntersectionObserver(
     async (entries) => {
       for (const entry of entries) {
@@ -112,7 +115,7 @@ function setupLoadMoreObserver() {
         }
       }
     },
-    { root: scroller.value, threshold: 0.1 }
+    { root: null, threshold: 0.1 }
   );
   if (loadMoreSentinel.value) observer.observe(loadMoreSentinel.value);
 }
@@ -693,6 +696,7 @@ const wsAdapter = computed<WsAdapter>(() => {
   return {
     getContent: (fid) => conversationsApi.fileContent(cid!, fid).then((r) => r.content || ""),
     getRawUrl: (fid) => conversationsApi.fileRawUrl(cid!, fid),
+    getPdfUrl: (fid) => conversationsApi.filePdfUrl(cid!, fid),
     patchContent: async (fid, cnt) => (await conversationsApi.patchFile(cid!, fid, cnt)).content || "",
     getVersions: (fid) => conversationsApi.fileVersions(cid!, fid),
     restoreVersion: async (fid, v) => (await conversationsApi.restoreVersion(cid!, fid, v)).content || "",

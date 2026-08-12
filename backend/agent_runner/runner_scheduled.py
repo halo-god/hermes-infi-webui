@@ -37,19 +37,32 @@ async def _update_status(task_id: str, status: str) -> None:
 
 
 async def _get_or_create_conversation(db, task: ScheduledTask, user_id: str) -> uuid.UUID:
-    """Get the task's dedicated conversation, creating one on first run."""
+    """Get the task's dedicated conversation, creating one on first run.
+
+    If the dedicated conversation was DELETED (user cleaned it up from the
+    chat list), the next trigger recreates a fresh one and repoints the task —
+    reusing the dead id would make _save_result write into a nonexistent
+    conversation (FK failure) and the scheduled output would be lost.
+    """
     if task.conversation_id is not None:
         conv = await db.get(Conversation, task.conversation_id)
-        if conv is not None and task.profile_id is not None:
+        if conv is not None:
             # 存量回填：profile_id 与 active_profile_ids 一并补齐，保证前端
             # 按 profile 渲染的助手身份正确（历史会话创建时未存）。
-            if conv.profile_id is None:
-                conv.profile_id = str(task.profile_id)
-            # active_profile_ids 是 JSONB 字符串数组 —— 必须 str()，
-            # 否则 UUID 对象进 asyncpg jsonb codec 会 TypeError。
-            if str(task.profile_id) not in (conv.active_profile_ids or []):
-                conv.active_profile_ids = [*(conv.active_profile_ids or []), str(task.profile_id)]
-        return task.conversation_id
+            if task.profile_id is not None:
+                if conv.profile_id is None:
+                    conv.profile_id = str(task.profile_id)
+                # active_profile_ids 是 JSONB 字符串数组 —— 必须 str()，
+                # 否则 UUID 对象进 asyncpg jsonb codec 会 TypeError。
+                if str(task.profile_id) not in (conv.active_profile_ids or []):
+                    conv.active_profile_ids = [*(conv.active_profile_ids or []), str(task.profile_id)]
+            return task.conversation_id
+        # Conversation deleted — fall through and create a fresh one.
+        logger.info(
+            "scheduled task %s: dedicated conversation %s was deleted — recreating",
+            str(task.id)[:8], str(task.conversation_id)[:8],
+        )
+        task.conversation_id = None
     conv = Conversation(
         id=uuid.uuid4(),
         title=f"⏰ {task.name}",
@@ -97,6 +110,11 @@ async def _sync_workspace_files(cwd: str, conv_id: uuid.UUID, agent_id: str) -> 
 
     for dirpath, dirnames, filenames in os.walk(cwd):
         dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        # User-uploaded attachments (written by dispatch into cwd/attachments/)
+        # are ALREADY workspace rows — syncing them again would create
+        # duplicate files (different name prefix → new rows). Aligns with
+        # workspace_watcher._IGNORE_DIRS.
+        dirnames[:] = [d for d in dirnames if d != "attachments"]
         for fn in filenames:
             if fn.startswith(".") or fn.endswith((".tmp", ".hermes")):
                 continue
@@ -165,7 +183,18 @@ async def _sync_media_files(response: str, cwd: str, conv_id: uuid.UUID, agent_i
         if await asyncio.to_thread(os.path.getsize, path) > _MEDIA_MAX_BYTES:
             logger.info("Skipping oversized MEDIA file: %s", path)
             continue
-        rel = os.path.basename(path)
+        # cwd-relative MEDIA paths keep their relative path (no collision
+        # with same-named files elsewhere); absolute paths outside cwd fall
+        # back to the basename — safe because save_file upserts by
+        # conversation+name, so a same-name collision would silently
+        # OVERWRITE the earlier file. Prefix absolute ones with the source
+        # directory so two different dirs can't clobber each other.
+        if os.path.isabs(path):
+            src_dir = os.path.basename(os.path.dirname(os.path.realpath(path)))
+            rel = f"{src_dir}/{os.path.basename(path)}"
+        else:
+            rel = os.path.relpath(path, cwd)
+        rel = rel.replace(os.sep, "/")
         try:
             with open(path, "r", encoding="utf-8", errors="strict") as fh:
                 content = fh.read()
@@ -220,7 +249,22 @@ async def handle_scheduled(task: dict, agents: dict) -> None:
     async with async_session_maker() as db:
         t = await db.get(ScheduledTask, uuid.UUID(task_id))
         if t is None:
+            # Task was deleted after enqueue — release the lock so a future
+            # recreation isn't blocked until the TTL expires, then bail.
             logger.error("scheduled task %s not found", task_id[:8])
+            try:
+                await R.get_redis().delete(lock_key)
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        if not t.enabled:
+            # User disabled the task after the tick enqueued it — do NOT run
+            # (and don't notify). Release the lock and skip.
+            logger.info("scheduled task %s disabled — skipping queued run", task_id[:8])
+            try:
+                await R.get_redis().delete(lock_key)
+            except Exception:  # noqa: BLE001
+                pass
             return
         conv_id = await _get_or_create_conversation(db, t, user_id)
         task_name = t.name

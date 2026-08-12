@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json as _json
+import logging
 import os
 import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-import json as _json
 
 from sqlalchemy import and_, delete, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +20,8 @@ from app.core.files import confine_to_dir, safe_relative_path, OFFICE_EXTRACTORS
 from app.db.models.agent import Profile
 from app.db.models.conversation import Conversation, ConversationSummary, GroupMember, Message
 from app.db.models.workspace import WorkspaceFile, WorkspaceFileVersion
+
+logger = logging.getLogger(__name__)
 
 
 async def list_conversations(
@@ -74,12 +77,27 @@ async def list_conversations(
 async def bulk_delete(
     db: AsyncSession, owner_id: uuid.UUID, ids: list[uuid.UUID]
 ) -> int:
+    # Collect object-storage keys (original bytes + preview PDFs) BEFORE the
+    # rows cascade-delete, so conversation deletion doesn't leak objects.
+    from app.core import object_storage
+    from app.db.models.workspace import WorkspaceFile
+    rows = (
+        await db.execute(
+            select(WorkspaceFile).where(WorkspaceFile.conversation_id.in_(ids))
+        )
+    ).scalars().all()
+    keys = [k for f in rows for k in (f.storage_key, f.preview_pdf_key) if k]
     result = await db.execute(
         delete(Conversation).where(
             Conversation.owner_id == owner_id, Conversation.id.in_(ids)
         )
     )
     await db.commit()
+    for key in keys:
+        try:
+            await asyncio.to_thread(object_storage.delete, key)
+        except Exception:  # noqa: BLE001 — best-effort, never block the delete
+            logger.debug("failed to clean storage object %s (bulk_delete)", key, exc_info=True)
     return result.rowcount or 0
 
 
@@ -168,7 +186,11 @@ async def get_messages(
             tuple_(Message.created_at, Message.id)
             < tuple_(cursor.c.created_at, cursor.c.id)
         )
-    stmt = stmt.order_by(Message.created_at.desc(), Message.role.asc())
+    # Ordering must use the SAME key as the cursor: (created_at, id). Sorting
+    # by (created_at desc, role asc) with a (created_at, id) cursor made pages
+    # split inside a same-timestamp user/agent pair — one of the two messages
+    # was duplicated or permanently skipped on every other page turn.
+    stmt = stmt.order_by(Message.created_at.desc(), Message.id.desc())
     if limit:
         stmt = stmt.limit(limit)
     res = await db.execute(stmt)
@@ -266,21 +288,6 @@ async def _resolve_attached_files(
         ws_dir = os.path.join(settings.workspace_root, conversation_id, "attachments")
         os.makedirs(ws_dir, exist_ok=True)
 
-    # Cache the user's file-storage conversation id for cross-conv file refs.
-    file_storage_convo_id: uuid.UUID | None = None
-    if owner_id:
-        from app.db.models.conversation import Conversation
-        storage_convo = (
-            await db.execute(
-                select(Conversation).where(
-                    Conversation.owner_id == owner_id,
-                    Conversation.title == "__file_storage__",
-                )
-            )
-        ).scalars().first()
-        if storage_convo:
-            file_storage_convo_id = storage_convo.id
-
     # Batch-load all files in a single query instead of N individual db.get
     # calls (N+1 prevention on the message send hot path).
     valid_fids: list[uuid.UUID] = []
@@ -297,6 +304,23 @@ async def _resolve_attached_files(
     ).scalars().all()
     files_by_id: dict[uuid.UUID, WorkspaceFile] = {f.id: f for f in file_rows}
 
+    # Resolve the owner of each file's conversation in one batch query —
+    # cross-conversation refs are allowed only when the file's owning
+    # conversation belongs to the same user (personal file library and any
+    # other personal conversations), never other users' / team conversations.
+    conv_owner_map: dict[uuid.UUID, uuid.UUID] = {}
+    if files_by_id and owner_id:
+        from app.db.models.conversation import Conversation
+        conv_ids = {f.conversation_id for f in files_by_id.values()}
+        conv_rows = (
+            await db.execute(
+                select(Conversation.id, Conversation.owner_id).where(
+                    Conversation.id.in_(conv_ids)
+                )
+            )
+        ).all()
+        conv_owner_map = {c.id: c.owner_id for c in conv_rows}
+
     result = []
     for fid in valid_fids:
         f = files_by_id.get(fid)
@@ -309,7 +333,13 @@ async def _resolve_attached_files(
             continue
         f_conv_id = f.conversation_id
         if str(f_conv_id) != str(conversation_id):
-            if file_storage_convo_id is None or f_conv_id != file_storage_convo_id:
+            # Security: cross-conversation refs must stay within the same
+            # owner — this covers the user's __file_storage__ library and
+            # other personal conversations, while rejecting files from other
+            # users' or team conversations. When the owner is unknown (None),
+            # fail CLOSED: an empty conv_owner_map makes get() return None,
+            # which would compare equal to a None owner and OPEN the gate.
+            if owner_id is None or conv_owner_map.get(f_conv_id) != owner_id:
                 continue
         ext = (f.kind or "").lower()
         mime = MIME_MAP.get(ext, "application/octet-stream")
@@ -397,7 +427,13 @@ async def _resolve_attached_files(
         # For office HTML: write the HTML AND a .txt plain-text version
         # so read_file gets clean text, not raw HTML tags.
         if ws_dir and (raw_bytes or file_content) and not is_image:
-            fpath = confine_to_dir(ws_dir, rel_path)
+            try:
+                fpath = confine_to_dir(ws_dir, rel_path)
+            except ValueError:
+                # Malicious/edge folder_path escaping the workspace: skip the
+                # attachment instead of failing the whole send.
+                logger.warning("attachment path escaped workspace, skipping: %s", rel_path)
+                continue
             is_office_html = ext in OFFICE_EXTRACTORS and file_content and "<" in file_content
 
             def _write_attachment():
@@ -425,7 +461,11 @@ async def _resolve_attached_files(
             # a complete dead end (not even a path reference). Writing the
             # decoded bytes to the workspace gives every mode a path to fall
             # back on, matching how every other attachment kind behaves.
-            fpath = confine_to_dir(ws_dir, rel_path)
+            try:
+                fpath = confine_to_dir(ws_dir, rel_path)
+            except ValueError:
+                logger.warning("attachment image path escaped workspace, skipping: %s", rel_path)
+                continue
 
             def _write_image():
                 os.makedirs(os.path.dirname(fpath), exist_ok=True)
@@ -443,7 +483,10 @@ async def _resolve_attached_files(
             "folder_path": folder,
             "workspace_path": f"attachments/{rel_path}" if ws_dir and (raw_bytes or file_content) else None,
             "content": file_content,
-            "size_bytes": f.size_bytes or len(file_content),
+            # Prefer the real byte length (raw_bytes or inline content) so the
+            # ">30KB → suggest chunked reading" hint in _build_attached_prompt
+            # fires even when the DB row's size_bytes is missing/zero.
+            "size_bytes": f.size_bytes or (len(raw_bytes) if raw_bytes else len(file_content)),
             "mime_type": mime,
             "is_image": is_image,
             "is_text": is_text,
@@ -453,29 +496,22 @@ async def _resolve_attached_files(
 
 # ── Prompt directives (single source — these used to be duplicated inline) ──
 
-# Maximum inline knowledge block size (chars). Anything larger is truncated
-# with a hint so the agent can read the file via workspace tools.
-_MAX_KNOWLEDGE_INLINE = 5_000
 
+def truncate_knowledge_blocks(text: str, max_block: int = 100_000) -> str:
+    """Truncate oversized <knowledge> blocks to prevent context length explosion.
 
-def _truncate_inline_knowledge(text: str, max_chars: int = _MAX_KNOWLEDGE_INLINE) -> str:
-    """Clamp oversized <knowledge> blocks inside user text to prevent context explosion."""
-    if not text or len(text) <= max_chars:
+    Single source of truth — used by both the HTTP/WS send entry points AND
+    dispatch_group so the persisted copy and the model's prompt agree.
+    """
+    if not text or "<knowledge>" not in text:
         return text
-    import re
-    pattern = re.compile(r"<knowledge>.*?</knowledge>", re.DOTALL)
-
-    def _clamp(m: re.Match) -> str:
+    import re as _re
+    def _repl(m):
         block = m.group(0)
-        if len(block) <= max_chars:
-            return block
-        # Preserve the opening tag and title line, truncate body
-        head = block[:300]
-        tail = block[-50:] if "</knowledge>" in block else "</knowledge>"
-        return head + "\n\n... [内容已截断，文件较大，请使用 read_file 工具分段读取]\n\n" + tail
-
-
-    return pattern.sub(_clamp, text)
+        if len(block) > max_block:
+            return block[:max_block] + "\n\n... [内容已截断，文件较大，请使用 read_file 工具分段读取]\n</knowledge>"
+        return block
+    return _re.sub(r"<knowledge>.*?</knowledge>", _repl, text, flags=_re.DOTALL)
 
 
 _FILE_WRITE_PREAMBLE = (
@@ -536,11 +572,24 @@ async def send_user_only(
     task_id: uuid.UUID | None = None,
 ) -> tuple[Message, None]:
     """Save a user message without triggering agent (for channel mention mode)."""
+    user_content: dict = {"text": text}
+    # Attachments must not vanish when the agent is skipped: persist the same
+    # lightweight file metadata the normal send path stores (parity with
+    # group save_only / _persist_group_user_msg).
+    if attached_file_ids:
+        attached = await _resolve_attached_files(
+            db, attached_file_ids, conversation_id=str(convo.id), owner_id=owner_id,
+        )
+        if attached:
+            user_content["files"] = [
+                {"id": f["id"], "name": f["name"], "kind": f.get("kind")}
+                for f in attached
+            ]
     user_msg = Message(
         conversation_id=convo.id,
         owner_id=owner_id,
         role="user",
-        content={"text": text},
+        content=user_content,
         status="complete",
         task_id=task_id,
     )
@@ -665,11 +714,17 @@ async def _resolve_mcp_servers(
 
 async def _build_moa_targets(
     db: AsyncSession, target_profile_ids: list[str], memory_prompt: str | None,
-    query: str | None = None,
+    query: str | None = None, request_knowledge_prompt: str | None = None,
 ) -> list[dict]:
     """Resolve an MoA Profile's reference profiles into roundtable `targets`,
     each with its own persona/env/tools — same shape send_roundtable already
-    expects from multi-agent compare and group roundtable dispatch."""
+    expects from multi-agent compare and group roundtable dispatch.
+
+    `request_knowledge_prompt` (user-selected knowledge refs, already built
+    and team-filtered by the caller) is appended to EVERY target so request
+    knowledge reaches the model on MoA fan-out too — previously it was lost
+    because dispatch built it into system_prompt but never passed it here.
+    """
     targets: list[dict] = []
     for target_pid in target_profile_ids:
         target_profile = await db.get(Profile, target_pid)
@@ -680,6 +735,10 @@ async def _build_moa_targets(
         if t_knowledge_prompt:
             t_system_prompt = (
                 f"{t_system_prompt}\n\n{t_knowledge_prompt}" if t_system_prompt else t_knowledge_prompt
+            )
+        if request_knowledge_prompt:
+            t_system_prompt = (
+                f"{t_system_prompt}\n\n{request_knowledge_prompt}" if t_system_prompt else request_knowledge_prompt
             )
         if memory_prompt:
             t_system_prompt = f"{t_system_prompt}\n\n{memory_prompt}" if t_system_prompt else memory_prompt
@@ -695,13 +754,15 @@ async def _build_moa_targets(
 
 async def _build_chain_targets(
     db: AsyncSession, target_profile_ids: list[str], memory_prompt: str | None,
-    query: str | None = None,
+    query: str | None = None, request_knowledge_prompt: str | None = None,
 ) -> list[dict]:
     """P2-1: resolve a chain Profile's ordered reference profiles into targets.
 
     Same shape as _build_moa_targets, but the ORDER of target_profile_ids is
     preserved — it defines the relay sequence (A→B→C). No merge step: the
-    runner prepends each agent's conclusion to the next's prompt."""
+    runner prepends each agent's conclusion to the next's prompt. Request
+    knowledge is appended to every target (see _build_moa_targets docstring).
+    """
     targets: list[dict] = []
     for target_pid in target_profile_ids:
         target_profile = await db.get(Profile, target_pid)
@@ -712,6 +773,10 @@ async def _build_chain_targets(
         if t_knowledge_prompt:
             t_system_prompt = (
                 f"{t_system_prompt}\n\n{t_knowledge_prompt}" if t_system_prompt else t_knowledge_prompt
+            )
+        if request_knowledge_prompt:
+            t_system_prompt = (
+                f"{t_system_prompt}\n\n{request_knowledge_prompt}" if t_system_prompt else request_knowledge_prompt
             )
         if memory_prompt:
             t_system_prompt = f"{t_system_prompt}\n\n{memory_prompt}" if t_system_prompt else memory_prompt
@@ -836,8 +901,10 @@ async def send_message(
                 for f in attached
             ]
         if knowledge_ids:
-            _knames = await _resolve_knowledge_names(db, knowledge_ids)
-            user_content["knowledge_refs"] = [{"id": kid, **_knames.get(kid, {"name": kid[:8]})} for kid in knowledge_ids]
+            _knames = await _resolve_knowledge_names(db, knowledge_ids, owner_id=owner_id)
+            user_content["knowledge_refs"] = [
+                {"id": kid, **_knames[kid]} for kid in knowledge_ids if kid in _knames
+            ]
         # P1-3: RAG citations — numbered sources injected into the prompt this
         # turn ([1], [2], …). Rendered as badges on the agent's reply.
         if rag_refs:
@@ -927,6 +994,7 @@ async def send_roundtable(
     task_id: uuid.UUID | None = None,
     moa: bool = False,
     research_mode: bool = False,
+    rag_refs: list[dict] | None = None,
 ) -> tuple[Message, Message]:
     """Multi-agent turn: one roundtable message holding per-agent replies + a
     synthesized merge. The runner streams each reply in parallel — each with
@@ -953,8 +1021,16 @@ async def send_roundtable(
                 for f in attached
             ]
         if knowledge_ids:
-            _knames = await _resolve_knowledge_names(db, knowledge_ids)
-            user_content["knowledge_refs"] = [{"id": kid, **_knames.get(kid, {"name": kid[:8]})} for kid in knowledge_ids]
+            _knames = await _resolve_knowledge_names(db, knowledge_ids, owner_id=owner_id)
+            user_content["knowledge_refs"] = [
+                {"id": kid, **_knames[kid]} for kid in knowledge_ids if kid in _knames
+            ]
+        # P1-3 RAG citations — numbered sources injected this turn ([1], [2]…);
+        # persisted here too so the reply renders citation badges (roundtable /
+        # chain previously dropped them because dispatch only passed rag_refs
+        # to send_message).
+        if rag_refs:
+            user_content["rag_refs"] = rag_refs
         user_msg = Message(
             conversation_id=convo.id, owner_id=owner_id, role="user", content=user_content, mentions=mentions or [], status="complete", task_id=task_id
         )
@@ -1029,6 +1105,7 @@ async def send_chain(
     mentions: list[str] | None = None,
     existing_user_msg: Message | None = None,
     task_id: uuid.UUID | None = None,
+    rag_refs: list[dict] | None = None,
 ) -> tuple[Message, Message]:
     """P2-1 chain handoff: a sequential relay message holding ordered steps.
 
@@ -1046,8 +1123,16 @@ async def send_chain(
                 for f in attached
             ]
         if knowledge_ids:
-            _knames = await _resolve_knowledge_names(db, knowledge_ids)
-            user_content["knowledge_refs"] = [{"id": kid, **_knames.get(kid, {"name": kid[:8]})} for kid in knowledge_ids]
+            _knames = await _resolve_knowledge_names(db, knowledge_ids, owner_id=owner_id)
+            user_content["knowledge_refs"] = [
+                {"id": kid, **_knames[kid]} for kid in knowledge_ids if kid in _knames
+            ]
+        # P1-3 RAG citations — numbered sources injected this turn ([1], [2]…);
+        # persisted here too so the reply renders citation badges (roundtable /
+        # chain previously dropped them because dispatch only passed rag_refs
+        # to send_message).
+        if rag_refs:
+            user_content["rag_refs"] = rag_refs
         user_msg = Message(
             conversation_id=convo.id, owner_id=owner_id, role="user", content=user_content, mentions=mentions or [], status="complete", task_id=task_id
         )
@@ -1486,8 +1571,16 @@ async def _build_knowledge_prompt_rag(
     return prompt, refs
 
 
-async def _build_request_knowledge_prompt(db: AsyncSession, knowledge_ids: list[str]) -> str | None:
-    """Build knowledge prompt from request-level knowledge_ids (user-selected knowledge refs)."""
+async def _build_request_knowledge_prompt(
+    db: AsyncSession, knowledge_ids: list[str], owner_id: uuid.UUID | None = None,
+) -> str | None:
+    """Build knowledge prompt from request-level knowledge_ids (user-selected knowledge refs).
+
+    Security: when owner_id is given, entries from teams the user is NOT a
+    member of are filtered out — a forged knowledge_ids list must never leak
+    another team's knowledge content into the prompt (cross-team
+    exfiltration). Entries that fail the check are silently skipped.
+    """
     if not knowledge_ids:
         return None
 
@@ -1504,6 +1597,10 @@ async def _build_request_knowledge_prompt(db: AsyncSession, knowledge_ids: list[
     used = 0
 
     entries_by_id = await _batch_load_knowledge_entries(db, valid_ids)
+    if owner_id:
+        entries_by_id = await _filter_accessible_knowledge_entries(
+            db, entries_by_id, owner_id,
+        )
     for kid in valid_ids:
         entry = entries_by_id.get(kid)
         if entry is None or not getattr(entry, "content", None):
@@ -1526,10 +1623,68 @@ async def _build_request_knowledge_prompt(db: AsyncSession, knowledge_ids: list[
     return "\n\n".join(parts) if parts else None
 
 
-async def _resolve_knowledge_names(db, knowledge_ids: list[str]) -> dict[str, dict]:
+async def _filter_accessible_knowledge_entries(
+    db: AsyncSession, entries: dict[uuid.UUID, object], owner_id: uuid.UUID,
+) -> dict[uuid.UUID, object]:
+    """Keep only entries whose team the user is a member of (TeamKnowledge →
+    team_id; ProjectDoc → project → team_id). Batch queries, no N+1."""
+    if not entries:
+        return entries
+    from app.db.models.team import Project, ProjectDoc, TeamKnowledge, TeamMember
+
+    team_ids: set[uuid.UUID] = set()
+    project_ids: set[uuid.UUID] = set()
+    for e in entries.values():
+        if isinstance(e, TeamKnowledge) and e.team_id:
+            team_ids.add(e.team_id)
+        elif isinstance(e, ProjectDoc) and e.project_id:
+            project_ids.add(e.project_id)
+    if project_ids:
+        proj_rows = (
+            await db.execute(select(Project).where(Project.id.in_(project_ids)))
+        ).scalars().all()
+        for p in proj_rows:
+            if p.team_id:
+                team_ids.add(p.team_id)
+    if not team_ids:
+        return {}
+
+    member_rows = (
+        await db.execute(
+            select(TeamMember).where(
+                TeamMember.team_id.in_(team_ids), TeamMember.user_id == owner_id,
+            )
+        )
+    ).scalars().all()
+    allowed_teams = {m.team_id for m in member_rows}
+
+    filtered: dict[uuid.UUID, object] = {}
+    for kid, e in entries.items():
+        if isinstance(e, TeamKnowledge):
+            if e.team_id in allowed_teams:
+                filtered[kid] = e
+        elif isinstance(e, ProjectDoc):
+            proj_team = next(
+                (p.team_id for p in proj_rows if p.id == e.project_id), None
+            )
+            if proj_team in allowed_teams:
+                filtered[kid] = e
+        else:
+            filtered[kid] = e  # unknown types pass through
+    return filtered
+
+
+async def _resolve_knowledge_names(
+    db, knowledge_ids: list[str], owner_id: uuid.UUID | None = None,
+) -> dict[str, dict]:
     """Map knowledge IDs to display info for persisting in message metadata:
     {"name", "team_id"?, "project_id"?} — the team/project context lets the
-    frontend open the source location when a knowledge chip is clicked."""
+    frontend open the source location when a knowledge chip is clicked.
+
+    Security: with owner_id, entries from teams the user is NOT a member of
+    are dropped — names/team/project metadata must not leak cross-team (the
+    prompt content is already filtered by _build_request_knowledge_prompt).
+    """
     valid_ids: list[uuid.UUID] = []
     for kid_str in knowledge_ids:
         try:
@@ -1539,6 +1694,10 @@ async def _resolve_knowledge_names(db, knowledge_ids: list[str]) -> dict[str, di
     if not valid_ids:
         return {}
     entries_by_id = await _batch_load_knowledge_entries(db, valid_ids)
+    if owner_id:
+        entries_by_id = await _filter_accessible_knowledge_entries(
+            db, entries_by_id, owner_id,
+        )
     out: dict[str, dict] = {}
     for kid_str, kid in zip(knowledge_ids, valid_ids):
         entry = entries_by_id.get(kid)
@@ -1690,13 +1849,18 @@ async def dispatch(
                 f"{system_prompt}\n\n{summary_block}" if system_prompt else summary_block
             )
 
-    # Inject request-level knowledge references (dynamic per turn).
+    # Request-level knowledge references (dynamic per turn): build once —
+    # feeds the single/compare/research system_prompt below AND the MoA/chain
+    # targets (which otherwise never saw user-selected knowledge).
+    request_knowledge_prompt = None
     if knowledge_ids:
-        request_knowledge_prompt = await _build_request_knowledge_prompt(db, knowledge_ids)
-        if request_knowledge_prompt:
-            system_prompt = (
-                f"{system_prompt}\n\n{request_knowledge_prompt}" if system_prompt else request_knowledge_prompt
-            )
+        request_knowledge_prompt = await _build_request_knowledge_prompt(
+            db, knowledge_ids, owner_id=owner_id,
+        )
+    if request_knowledge_prompt:
+        system_prompt = (
+            f"{system_prompt}\n\n{request_knowledge_prompt}" if system_prompt else request_knowledge_prompt
+        )
 
     # Layered memory: pg_trgm-retrieved episodic summaries + trigger-matched
     # skills (dynamic per turn). Gated by a kill switch.
@@ -1712,24 +1876,34 @@ async def dispatch(
     # MoA ("mixture of agents"): the selected Profile fans the message out to
     # its bound reference profiles via the same roundtable executor used for
     # multi-agent compare/group roundtable, then synthesizes one reply — no
-    # new merge logic, just a different way of building `targets`.
+    # new merge logic, just a different way of building `targets`. The
+    # request-level knowledge prompt (already team-filtered) is appended to
+    # every target so user-selected knowledge reaches the model.
     if profile is not None and profile.is_moa and profile.moa_target_profile_ids:
-        moa_targets = await _build_moa_targets(db, profile.moa_target_profile_ids, memory_prompt, query=text)
+        moa_targets = await _build_moa_targets(
+            db, profile.moa_target_profile_ids, memory_prompt, query=text,
+            request_knowledge_prompt=request_knowledge_prompt,
+        )
         if moa_targets:
             return await send_roundtable(
                 db, convo, text, moa_targets,
                 attached_file_ids=attached_file_ids, knowledge_ids=knowledge_ids,
                 owner_id=owner_id, task_id=task_id, moa=True,
+                rag_refs=rag_refs if knowledge_prompt else None,
             )
 
     # P2-1 chain handoff: sequential relay A→B→C, each agent's conclusion
     # prepended to the next's prompt. Distinct from MoA (fan-out + merge).
     if profile is not None and profile.is_chain and profile.chain_target_profile_ids:
-        chain_targets = await _build_chain_targets(db, profile.chain_target_profile_ids, memory_prompt, query=text)
+        chain_targets = await _build_chain_targets(
+            db, profile.chain_target_profile_ids, memory_prompt, query=text,
+            request_knowledge_prompt=request_knowledge_prompt,
+        )
         if chain_targets:
             return await send_chain(
                 db, convo, text, chain_targets,
                 attached_file_ids=attached_file_ids, knowledge_ids=knowledge_ids, owner_id=owner_id,
+                rag_refs=rag_refs if knowledge_prompt else None,
             )
 
     # P2-2 research mode: roundtable with cascade termination — first slot to
@@ -1746,6 +1920,7 @@ async def dispatch(
             db, convo, text, targets,
             attached_file_ids=attached_file_ids, knowledge_ids=knowledge_ids,
             owner_id=owner_id, task_id=task_id, research_mode=True,
+            rag_refs=rag_refs if knowledge_prompt else None,
         )
 
     # Anti-clarify guidance only on follow-up turns — the first turn carries the
@@ -1768,6 +1943,7 @@ async def dispatch(
             db, convo, text, targets,
             attached_file_ids=attached_file_ids, knowledge_ids=knowledge_ids,
             owner_id=owner_id, task_id=task_id,
+            rag_refs=rag_refs if knowledge_prompt else None,
         )
     # P1-2: fire-and-forget a summary task when the conversation is long enough.
     # Non-blocking — uses the last summary this turn, the fresh one lands next
@@ -1806,9 +1982,24 @@ async def list_files(db: AsyncSession, conversation_id: uuid.UUID) -> list[Works
 
 
 async def delete_conversation(db: AsyncSession, convo: Conversation) -> None:
+    # Clean up object-storage keys (original bytes + preview PDFs) before the
+    # workspace_files cascade-delete — otherwise every deleted conversation
+    # leaks its uploaded files and LibreOffice previews in MinIO/S3.
+    from app.core import object_storage
+    from app.db.models.workspace import WorkspaceFile
+    files = (
+        await db.execute(
+            select(WorkspaceFile).where(WorkspaceFile.conversation_id == convo.id)
+        )
+    ).scalars().all()
+    keys = [k for f in files for k in (f.storage_key, f.preview_pdf_key) if k]
     await db.delete(convo)
     await db.commit()
-    # Invalidate conversation list cache
+    for key in keys:
+        try:
+            await asyncio.to_thread(object_storage.delete, key)
+        except Exception:  # noqa: BLE001 — best-effort, never block the delete
+            logger.debug("failed to clean storage object %s (delete_conversation)", key, exc_info=True)
 
 
 async def fork_conversation(
@@ -1821,8 +2012,38 @@ async def fork_conversation(
     source = await get_conversation(db, source_id, owner_id)
     if not source:
         raise ValueError("conversation not found")
-    all_msgs = await get_messages(db, source_id, limit=500)  # limit to prevent OOM on long conversations
-    cut = next((i for i, m in enumerate(all_msgs) if m.id == before_message_id), len(all_msgs) - 1)
+    # The cut point MUST exist in the source conversation — otherwise the
+    # default (last message of the window) silently forks the whole window
+    # with the wrong boundary.
+    cut_msg = (
+        await db.execute(
+            select(Message).where(
+                Message.id == before_message_id,
+                Message.conversation_id == source_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if cut_msg is None:
+        raise ValueError("cut message not found in conversation")
+    # Load in CONVERSATION order (created_at asc, user before agent) so the
+    # cut position is unambiguous: a user/agent pair shares one created_at and
+    # get_messages' desc order would place the pair by random id, silently
+    # dropping the user message when cutting at the agent reply.
+    from sqlalchemy import case as _case
+    _role_order = _case((Message.role == "user", 0), else_=1)
+    all_msgs = (
+        await db.execute(
+            select(Message)
+            .where(Message.conversation_id == source_id)
+            .order_by(Message.created_at.asc(), _role_order, Message.id.asc())
+            .limit(500)  # cap to prevent OOM on long conversations
+        )
+    ).scalars().all()
+    cut = next((i for i, m in enumerate(all_msgs) if m.id == before_message_id), None)
+    if cut is None:
+        # Message exists but fell outside the 500-message window — forking at
+        # that point would silently drop history. Refuse instead of corrupting.
+        raise ValueError("cut message is outside the forkable window")
     fork = Conversation(
         owner_id=owner_id,
         title=f"[分支] {source.title}",
@@ -1842,6 +2063,17 @@ async def fork_conversation(
             agent_id=m.agent_id,
             content=m.content,
             status=m.status,
+            # Propagate the message metadata so the fork is a faithful copy:
+            # mentions (group @-relations), reply threading, task linkage,
+            # tombstones (recalled messages must NOT resurrect as blank
+            # messages), profile attribution and edit/deletion timestamps.
+            mentions=m.mentions,
+            reply_to_id=m.reply_to_id,
+            task_id=m.task_id,
+            deleted_at=m.deleted_at,
+            profile_id=m.profile_id,
+            edited_at=m.edited_at,
+            created_at=m.created_at,
         )
         db.add(nm)
         copied_msgs.append(nm)
@@ -1896,7 +2128,7 @@ async def update_file_content(
             select(WorkspaceFileVersion)
             .where(WorkspaceFileVersion.file_id == f.id)
             .order_by(WorkspaceFileVersion.version_num.desc())
-            .offset(9)  # Keep 10 (0-9), delete from 10th onwards
+            .offset(10)  # Keep the latest 10 versions, delete older ones
         )
     ).scalars().all()
     for old in old_versions:
@@ -1904,6 +2136,16 @@ async def update_file_content(
     f.content = content
     f.size_bytes = len(content.encode("utf-8"))
     f.current_version += 1
+    # Editing a text file invalidates any LibreOffice PDF preview (the PDF
+    # renders the OLD content) — drop the object so the panel falls back to
+    # the text preview instead of showing a stale PDF.
+    if f.preview_pdf_key:
+        try:
+            from app.core import object_storage
+            await asyncio.to_thread(object_storage.delete, f.preview_pdf_key)
+        except Exception:  # noqa: BLE001 — best-effort
+            logger.debug("failed to clean stale preview pdf %s", f.preview_pdf_key, exc_info=True)
+        f.preview_pdf_key = None
     # Sync object storage ONLY for plain-text kinds. Office/PDF objects hold
     # the ORIGINAL binary upload (content is an extracted preview), images
     # hold raw pixels — overwriting any of those with edited text would
@@ -2387,8 +2629,10 @@ async def _persist_group_user_msg(
             for f in attached
         ]
     if knowledge_ids:
-        _knames = await _resolve_knowledge_names(db, knowledge_ids)
-        content["knowledge_refs"] = [{"id": kid, **_knames.get(kid, {"name": kid[:8]})} for kid in knowledge_ids]
+        _knames = await _resolve_knowledge_names(db, knowledge_ids, owner_id=owner_id)
+        content["knowledge_refs"] = [
+            {"id": kid, **_knames[kid]} for kid in knowledge_ids if kid in _knames
+        ]
     user_msg = Message(
         conversation_id=convo.id,
         owner_id=owner_id,
@@ -2429,6 +2673,10 @@ async def dispatch_group(
 
     无论是否触发 AI，人类消息总是先持久化并实时广播给全体成员（含发送者回显）。
     """
+    # Truncate oversized <knowledge> blocks ONCE at the entry so the persisted
+    # copy and the model's prompt agree (previously the persisted copy was
+    # truncated but the model still saw the full text).
+    text = truncate_knowledge_blocks(text)
     resolved = await resolve_mentions(db, convo.id, mentions)
     mode = getattr(convo, "channel_mode", "mention") or "mention"
 
@@ -2497,7 +2745,9 @@ async def dispatch_group(
         if memory_prompt:
             system_prompt = f"{system_prompt}\n\n{memory_prompt}" if system_prompt else memory_prompt
         if knowledge_ids:
-            request_knowledge_prompt = await _build_request_knowledge_prompt(db, knowledge_ids)
+            request_knowledge_prompt = await _build_request_knowledge_prompt(
+                db, knowledge_ids, owner_id=owner_id,
+            )
             if request_knowledge_prompt:
                 system_prompt = (
                     f"{system_prompt}\n\n{request_knowledge_prompt}" if system_prompt else request_knowledge_prompt
@@ -2527,7 +2777,8 @@ async def dispatch_group(
     # 不再用单一会话级 Profile 覆盖全部参与者（这正是此前"圆桌形同虚设"的根因）。
     memory_prompt = await _build_memory_prompt(db, owner_id)
     request_knowledge_prompt = (
-        await _build_request_knowledge_prompt(db, knowledge_ids) if knowledge_ids else None
+        await _build_request_knowledge_prompt(db, knowledge_ids, owner_id=owner_id)
+        if knowledge_ids else None
     )
     targets: list[dict] = []
 
@@ -2684,6 +2935,10 @@ async def unread_summary(
         )
         .where(
             Message.conversation_id.in_(conversation_ids),
+            # Recalled (soft-deleted) messages must not count as unread or
+            # re-mention the user — a red badge pointing at removed content
+            # is pure noise.
+            Message.deleted_at.is_(None),
             or_(Message.owner_id.is_(None), Message.owner_id != user_id),
             or_(gm.last_read_at.is_(None), Message.created_at > gm.last_read_at),
         )

@@ -130,6 +130,8 @@ class Runner:
         self._active_tasks: set[asyncio.Task] = set()
         self._bg_tasks: set[asyncio.Task] = set()
         self._watchers: dict[str, WorkspaceWatcher] = {}  # conversation_id -> watcher
+        # Per-conversation turn serialization (see _run_task docstring).
+        self._conv_locks: dict[str, asyncio.Lock] = {}
 
     # ── Singleton lock ──
     async def _acquire_lock(self) -> bool:
@@ -323,20 +325,32 @@ class Runner:
                 continue
             for _s, entries in resp:
                 for entry_id, fields in entries:
-                    try:
-                        await redis.xack(stream, group, entry_id)
-                    except Exception:
-                        pass
                     raw = fields.get(b"data", fields.get("data"))
                     if not raw:
+                        try:
+                            await redis.xack(stream, group, entry_id)
+                        except Exception:
+                            pass
                         continue
                     try:
                         data = _json.loads(raw)
                     except Exception:
+                        try:
+                            await redis.xack(stream, group, entry_id)
+                        except Exception:
+                            pass
                         continue
-                    t = asyncio.create_task(self._handle_control(data))
-                    self._bg_tasks.add(t)
-                    t.add_done_callback(self._bg_tasks.discard)
+                    # ACK only AFTER the control message is handled — acking
+                    # first would drop fork/model requests that raise (they
+                    # have no retry/DLQ; the frontend would time out forever
+                    # waiting on chan:control:{id}).
+                    try:
+                        await self._handle_control(data)
+                    finally:
+                        try:
+                            await redis.xack(stream, group, entry_id)
+                        except Exception:
+                            pass
 
     async def _handle_control(self, data: dict) -> None:
         """Handle a single control message (fork/model)."""
@@ -521,58 +535,94 @@ class Runner:
         (not ``entry_id``) because re-enqueueing via ``xadd`` creates a *new*
         stream entry with a *new* id -- keying on ``entry_id`` would reset the
         counter to zero on every retry, so the DLQ would never be reached.
+
+        Per-conversation serialization: turns on the SAME conversation are
+        queued behind an asyncio.Lock so two concurrent turns can never share
+        one ACPClient (its on_update callback is rebound per task — concurrent
+        turns would cross-wire token events and corrupt both replies). The
+        wait happens OUTSIDE the semaphore so a queued turn on a busy
+        conversation doesn't consume a global concurrency slot. The lock dict
+        grows by one entry per conversation ever seen (tens of bytes each) —
+        acceptable for a self-hosted deployment; never cleaned to avoid the
+        "waiters still present" race on delete.
         """
-        async with self._sem:
-            task_type = task_data.get("type", "unknown")
-            attempt = task_data.get("_attempt", 0)
-            start_time = time.monotonic()
-            TASKS_ENQUEUED.labels(type=task_type).inc()
-            logger.info("Starting task %s (attempt %d, active=%d/%d)",
-                        entry_id, attempt + 1, len(self._active_tasks), MAX_CONCURRENT)
+        conv_id = task_data.get("conversation_id")
+        conv_lock = self._get_conv_lock(conv_id) if conv_id else None
+        lock_acquired = False
+        retry_delay: float | None = None
+        if conv_lock:
             try:
-                await self.handle(task_data)
-                duration = time.monotonic() - start_time
-                TASK_DURATION.labels(type=task_type).observe(duration)
-                TASKS_COMPLETED.labels(type=task_type, status="success").inc()
-            except Exception as exc:
-                duration = time.monotonic() - start_time
-                TASK_DURATION.labels(type=task_type).observe(duration)
-                if attempt < MAX_RETRIES:
-                    next_attempt = attempt + 1
-                    logger.warning(
-                        "Task %s failed (retry %d/%d): %s",
-                        entry_id, next_attempt, MAX_RETRIES, exc,
-                        exc_info=True,
-                    )
-                    # Exponential backoff before re-enqueue to avoid fail-fast storms
-                    delay = min(RETRY_BACKOFF_BASE ** next_attempt, 60)
-                    await asyncio.sleep(delay)
-                    # Persist the attempt counter in the task payload so the
-                    # re-enqueued message carries it across the new entry_id.
-                    retry_data = {**task_data, "_attempt": next_attempt}
-                    try:
-                        await R.get_redis().xadd(
-                            settings.acp_stream, {"data": json.dumps(retry_data)}
+                await conv_lock.acquire()
+                lock_acquired = True
+            except asyncio.CancelledError:
+                return  # cancelled while queued behind another turn
+        try:
+            async with self._sem:
+                task_type = task_data.get("type", "unknown")
+                attempt = task_data.get("_attempt", 0)
+                start_time = time.monotonic()
+                TASKS_ENQUEUED.labels(type=task_type).inc()
+                logger.info("Starting task %s (attempt %d, active=%d/%d)",
+                            entry_id, attempt + 1, len(self._active_tasks), MAX_CONCURRENT)
+                try:
+                    await self.handle(task_data)
+                    duration = time.monotonic() - start_time
+                    TASK_DURATION.labels(type=task_type).observe(duration)
+                    TASKS_COMPLETED.labels(type=task_type, status="success").inc()
+                except Exception as exc:
+                    duration = time.monotonic() - start_time
+                    TASK_DURATION.labels(type=task_type).observe(duration)
+                    if attempt < MAX_RETRIES:
+                        next_attempt = attempt + 1
+                        logger.warning(
+                            "Task %s failed (retry %d/%d): %s",
+                            entry_id, next_attempt, MAX_RETRIES, exc,
+                            exc_info=True,
                         )
-                    except Exception:
-                        logger.exception("Failed to re-enqueue task %s", entry_id)
-                else:
-                    # Max retries reached - send to DLQ
-                    logger.error("Task %s failed permanently after %d retries, sending to DLQ",
-                                 entry_id, MAX_RETRIES)
-                    TASKS_FAILED.labels(type=task_type, error=type(exc).__name__).inc()
-                    DLQ_MESSAGES.labels(reason="max_retries").inc()
-                    try:
-                        await R.get_redis().xadd(
-                            DLQ_STREAM,
-                            {"data": json.dumps(task_data), "error": str(exc), "entry_id": entry_id},
-                        )
-                    except Exception:
-                        logger.exception("Failed to send task %s to DLQ", entry_id)
-                    # The turn is gone for good — close out the conversation
-                    # message so the UI is not stuck in "streaming" forever
-                    # (which locks the conversation against new messages).
-                    await self._mark_task_failed(task_data, exc)
+                        # Persist the attempt counter in the task payload so the
+                        # re-enqueued message carries it across the new entry_id.
+                        retry_data = {**task_data, "_attempt": next_attempt}
+                        try:
+                            await R.get_redis().xadd(
+                                settings.acp_stream, {"data": json.dumps(retry_data)}
+                            )
+                        except Exception:
+                            logger.exception("Failed to re-enqueue task %s", entry_id)
+                        # Exponential backoff BEFORE the next attempt — applied
+                        # OUTSIDE the semaphore and the per-conversation lock
+                        # (deferred to the finally below) so a sleeping retry
+                        # never occupies a concurrency slot.
+                        retry_delay = min(RETRY_BACKOFF_BASE ** next_attempt, 60)
+                    else:
+                        # Max retries reached - send to DLQ
+                        logger.error("Task %s failed permanently after %d retries, sending to DLQ",
+                                     entry_id, MAX_RETRIES)
+                        TASKS_FAILED.labels(type=task_type, error=type(exc).__name__).inc()
+                        DLQ_MESSAGES.labels(reason="max_retries").inc()
+                        try:
+                            await R.get_redis().xadd(
+                                DLQ_STREAM,
+                                {"data": json.dumps(task_data), "error": str(exc), "entry_id": entry_id},
+                            )
+                        except Exception:
+                            logger.exception("Failed to send task %s to DLQ", entry_id)
+                        # The turn is gone for good — close out the conversation
+                        # message so the UI is not stuck in "streaming" forever
+                        # (which locks the conversation against new messages).
+                        await self._mark_task_failed(task_data, exc)
+        finally:
+            if lock_acquired:
+                conv_lock.release()
+            if retry_delay:
+                await asyncio.sleep(retry_delay)
+
+    def _get_conv_lock(self, conv_id: str) -> asyncio.Lock:
+        """Per-conversation turn lock (see _run_task docstring)."""
+        lock = self._conv_locks.get(conv_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._conv_locks[conv_id] = lock
+        return lock
 
     async def _mark_task_failed(self, task_data: dict, exc: Exception) -> None:
         """Idempotently close out a conversation message left in "streaming"
@@ -1220,6 +1270,18 @@ class Runner:
                     await asyncio.wait_for(asyncio.shield(prompt_task), timeout=1.0)
                 except asyncio.TimeoutError:
                     pass
+                # Cancel propagation: the agent may be in a long silent
+                # generation (no session/update events at all), so the cancel
+                # flag set by the API would otherwise never reach the ACP
+                # client — the turn would complete and bill normally even
+                # though the user pressed "stop". Poll the flag on the same
+                # 1s cadence and fire session/cancel.
+                if not acc["cancelled"] and await R.is_cancelled(conversation_id):
+                    acc["cancelled"] = True
+                    try:
+                        await client.cancel()
+                    except Exception:  # noqa: BLE001
+                        pass
                 try:
                     data = await pop_clarify_request(clarify_session_id)
                     if data:

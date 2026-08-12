@@ -407,3 +407,74 @@ async def test_group_roundtable_attachment_gets_content_blocks(db):
     assert task["type"] == "roundtable"
     blocks = task.get("content_blocks") or []
     assert any(b.get("type") == "resource_link" and b.get("name") == "notes.md" for b in blocks)
+
+
+@pytest.mark.asyncio
+async def test_cross_conversation_same_owner_file_ref(db):
+    """Files from another personal conversation of the SAME owner may be
+    referenced (cross-conv refs), while files whose conversation belongs to a
+    different user must be rejected (no cross-user exfiltration)."""
+    from app.db.models.conversation import Conversation
+    from app.db.models.workspace import WorkspaceFile
+    from app.services.conversation_service import _resolve_attached_files
+
+    owner = await _mk_user(db, "o15@h.io")
+    other = await _mk_user(db, "o16@h.io")
+
+    conv_b = Conversation(owner_id=owner.id, title="会话B", primary_agent_id="coder")
+    conv_own = Conversation(owner_id=owner.id, title="会话A", primary_agent_id="coder")
+    conv_other = Conversation(owner_id=other.id, title="他人会话", primary_agent_id="coder")
+    db.add_all([conv_b, conv_own, conv_other])
+    await db.flush()
+
+    wf_own = WorkspaceFile(
+        conversation_id=conv_own.id, name="own.md", kind="md",
+        content="# 自己的笔记", size_bytes=10,
+    )
+    wf_other = WorkspaceFile(
+        conversation_id=conv_other.id, name="other.md", kind="md",
+        content="# 别人的笔记", size_bytes=10,
+    )
+    db.add_all([wf_own, wf_other])
+    await db.flush()
+
+    # Same owner, different conversation -> allowed.
+    attached = await _resolve_attached_files(
+        db, [str(wf_own.id)], conversation_id=str(conv_b.id), owner_id=owner.id,
+    )
+    assert [a["name"] for a in attached] == ["own.md"]
+
+    # Different user's conversation -> rejected.
+    attached = await _resolve_attached_files(
+        db, [str(wf_other.id)], conversation_id=str(conv_b.id), owner_id=owner.id,
+    )
+    assert attached == []
+
+
+@pytest.mark.asyncio
+async def test_cross_conversation_owner_none_fail_closed(db):
+    """owner_id=None (anonymous/internal callers) must NOT open the gate:
+    cross-conversation refs are rejected fail-CLOSED. Guards the empty
+    conv_owner_map edge where get() returns None == owner_id None."""
+    from app.db.models.conversation import Conversation
+    from app.db.models.workspace import WorkspaceFile
+    from app.services.conversation_service import _resolve_attached_files
+
+    owner = await _mk_user(db, "o17@h.io")
+    conv_b = Conversation(owner_id=owner.id, title="会话B", primary_agent_id="coder")
+    conv_own = Conversation(owner_id=owner.id, title="会话A", primary_agent_id="coder")
+    db.add_all([conv_b, conv_own])
+    await db.flush()
+
+    wf_own = WorkspaceFile(
+        conversation_id=conv_own.id, name="own.md", kind="md",
+        content="# 自己的笔记", size_bytes=10,
+    )
+    db.add(wf_own)
+    await db.flush()
+
+    # owner_id=None: cross-conversation ref rejected (fail closed)
+    attached = await _resolve_attached_files(
+        db, [str(wf_own.id)], conversation_id=str(conv_b.id), owner_id=None,
+    )
+    assert attached == []

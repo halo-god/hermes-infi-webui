@@ -32,9 +32,10 @@ def test_confine_to_dir_allows_inside(tmp_path):
 
 def test_confine_to_dir_rejects_escape(tmp_path):
     # A pre-normalized path can't escape, but confine_to_dir is the last guard:
-    with pytest.raises(HTTPException) as ei:
+    # it raises ValueError (the service layer translates to a skip/400) rather
+    # than returning an out-of-tree path.
+    with pytest.raises(ValueError):
         confine_to_dir(str(tmp_path), "../../../etc/passwd")
-    assert ei.value.status_code == 400
 
 
 # ── Upload size cap ──

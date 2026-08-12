@@ -14,7 +14,15 @@ from app.config import settings
 from app.core import redis as R
 from app.db.base import async_session_maker
 from app.db.models.skill_evolution import SkillProposal
-from skill_evolution.optimizer import EvolutionGateFailure, run_evolution
+
+try:
+    from skill_evolution.optimizer import EvolutionGateFailure, run_evolution
+except ImportError:  # dspy (the `skill` extra) not installed — slim Docker image
+    logging.getLogger("hermes.runner").warning(
+        "skill_evolution unavailable: dspy not installed (pip install '.[skill]')"
+    )
+    EvolutionGateFailure = None
+    run_evolution = None  # type: ignore[assignment]
 
 logger = logging.getLogger("hermes.runner")
 
@@ -27,6 +35,19 @@ async def handle_skill_evolution(task: dict, agents: dict) -> None:
     skill_id = task["skill_id"]
     r = R.get_redis()
     status_key = R.skill_evolution_status_key(skill_id)
+
+    if run_evolution is None:
+        # dspy missing (e.g. slim Docker image) — mark failed immediately
+        # instead of burning the runner's retry budget on ImportError.
+        await r.set(
+            status_key,
+            json.dumps(
+                {"status": "error", "detail": "技能进化未启用：缺少 dspy 依赖"},
+                ensure_ascii=False,
+            ),
+            ex=settings.skill_evolution_status_ttl,
+        )
+        return
 
     async def _set_status(status: str, detail: str | None = None) -> None:
         payload: dict = {

@@ -208,7 +208,7 @@ async def save_file(
                         select(WorkspaceFileVersion)
                         .where(WorkspaceFileVersion.file_id == f.id)
                         .order_by(WorkspaceFileVersion.version_num.desc())
-                        .offset(9)  # Keep 10 (0-9), delete from 10th onwards
+                        .offset(10)  # Keep the latest 10 versions, delete older ones
                     )
                 ).scalars().all()
                 for old in old_versions:

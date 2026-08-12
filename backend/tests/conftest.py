@@ -23,9 +23,44 @@ os.environ.setdefault(
 )
 # Same for Redis: pin to the loopback IP so an intermittent mDNS resolver
 # stall can't hang the suite's connections.
+# WARNING: production hermes-redis listens on 127.0.0.1:1979 (docker compose map).
+# Previously this setdefault pointed at 1979, so running pytest locally without an
+# explicit REDIS_URL hit PRODUCTION Redis: real ACP tasks were dispatched to the
+# production acp_stream (78x, verified 2026-08-11) creating shell roundtable sessions
+# and burning API, and _reset_redis_client deleted production rl:* rate-limit keys.
+# Tests MUST use a dedicated instance; start one before running:
+#   docker run -d --name hermes-test-redis -p 127.0.0.1:6380:6379 redis:7-alpine
+# CI (.github/workflows/ci.yml) sets REDIS_URL=redis://localhost:6379 explicitly, so
+# this default only affects local runs.
 os.environ.setdefault(
-    "REDIS_URL", "redis://:InfiLed%40Hermes_redis@127.0.0.1:1979/0"
+    "REDIS_URL", "redis://127.0.0.1:6380/0"
 )
+# ── Hard guard: NEVER let the suite touch the production Redis ──
+# Belt-and-suspenders on top of the default above: if anything (a caller
+# exporting REDIS_URL, a future edit, a stale env) points the suite at the
+# production instance (127.0.0.1:1979, db0), fail loudly at import instead of
+# silently enqueueing real ACP tasks / deleting production rate-limit keys.
+from urllib.parse import urlparse as _urlparse
+_ru = _urlparse(os.environ["REDIS_URL"])
+# Whitelist semantics, NOT a blocklist: any host:port that is not a
+# dedicated test instance is rejected. The old guard only blocked
+# localhost/127.0.0.1:1979, so container-name variants (redis:1979,
+# hermes-redis:1979) or in-network port 6379 wrote straight through to
+# the production instance. Approved targets:
+_ALLOWED_REDIS = (
+    ("127.0.0.1", 6380),  # local dedicated instance (hermes-test-redis)
+    ("localhost", 6380),  # same, hostname alias
+    ("localhost", 6379),  # CI (.github/workflows/ci.yml sets this explicitly)
+    ("127.0.0.1", 6379),  # CI variant
+)
+if (_ru.hostname, _ru.port) not in _ALLOWED_REDIS:
+    raise RuntimeError(
+        f"REDIS_URL points at an unapproved Redis ({_ru.hostname}:{_ru.port}). "
+        "Tests MUST use the dedicated instance (127.0.0.1:6380); CI sets "
+        "REDIS_URL=redis://localhost:6379 explicitly. Never run tests against "
+        "the production instance (127.0.0.1:1979)."
+    )
+
 
 # Tests assume the 'db' storage backend (small files inline in Postgres);
 # minio-offload tests switch to moto themselves. The repo's backend/.env sets

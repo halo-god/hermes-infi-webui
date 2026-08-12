@@ -2,7 +2,7 @@
 /* 1:1 port of the prototype project page (project/hermes-projects.js ProjectPage),
    wired to the real API. Tasks are fully functional; sections/agents/files/members
    reproduce the prototype structure with live data where the API provides it. */
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import Icon from "@/components/Icon.vue";
 import NewProjectModal from "@/components/NewProjectModal.vue";
@@ -18,7 +18,7 @@ const route = useRoute();
 const router = useRouter();
 const chat = useChatStore();
 const ns = useNotificationStore();
-const projectId = route.params.id as string;
+const projectId = computed(() => route.params.id as string);
 
 const project = ref<(Project & import("@/types").ProjectDetail) | null>(null);
 const tasks = ref<Task[]>([]);
@@ -37,7 +37,7 @@ async function openProjectGroup() {
   if (openingGroup.value) return;
   openingGroup.value = true;
   try {
-    const { channel } = await teamsApi.getProjectGroup(projectId);
+    const { channel } = await teamsApi.getProjectGroup(projectId.value);
     router.push({ path: "/", query: { c: channel.id } });
   } catch {
     /* ignore */
@@ -78,14 +78,44 @@ onMounted(() => {
 });
 onBeforeUnmount(() => document.removeEventListener("click", closeMenu));
 
+// Navigate between projects (component reuse) or deep-link from a knowledge
+// chip in chat: /projects/:id?file=<docId> opens the document panel.
+const pendingDocFile = ref<string | null>(null);
+watch(() => route.params.id, async (newId, oldId) => {
+  if (newId && newId !== oldId) {
+    showDocPanel.value = false;
+    pendingDocFile.value = null;
+    await load();
+  }
+});
+watch(
+  () => [route.params.id, route.query.file] as const,
+  async ([, fid]) => {
+    if (!fid) return;
+    const docId = String(fid);
+    pendingDocFile.value = docId;
+    if (docs.value.length) {
+      openDocFile(docId);
+    } else {
+      // docs load asynchronously — open once the list is ready.
+      await load().catch(() => {});
+      if (pendingDocFile.value && docs.value.some((d) => d.id === pendingDocFile.value)) {
+        openDocFile(pendingDocFile.value);
+      }
+      pendingDocFile.value = null;
+    }
+  },
+  { immediate: true },
+);
+
 async function load() {
-  const p = await projectsApi.get(projectId);
+  const p = await projectsApi.get(projectId.value);
   project.value = p;
   members.value = p.members || [];
   docs.value = p.docs || [];
   convos.value = p.conversations || [];
   const [ts, ags] = await Promise.all([
-    projectsApi.tasks(projectId).catch(() => []),
+    projectsApi.tasks(projectId.value).catch(() => []),
     agentsApi.list().catch(() => []),
   ]);
   tasks.value = ts;
@@ -119,7 +149,7 @@ async function onDocFileSelected(e: Event) {
   if (!file || !projectId) return;
   uploadingDoc.value = true;
   try {
-    const doc = await projectsApi.uploadDoc(projectId, file);
+    const doc = await projectsApi.uploadDoc(projectId.value, file);
     docs.value.unshift(doc);
   } catch {
     alert("上传失败");
@@ -138,12 +168,15 @@ const clickedDocId = ref<string | null>(null);
 const docAdapter = computed<WsAdapter>(() => ({
   getContent: (fid) => projectsApi.docContent(fid),
   getRawUrl: (fid) => projectsApi.docRawUrl(fid),
+  // LibreOffice-converted PDF preview (office files); native PDFs fall back
+  // to the raw bytes server-side.
+  getPdfUrl: (fid) => projectsApi.docPdfUrl(fid),
   patchContent: (fid, content) => projectsApi.updateDocContent(fid, content),
   getVersions: (fid) => projectsApi.docVersions(fid),
   restoreVersion: (fid, v) => projectsApi.restoreDocVersion(fid, v),
   upload: async (file) => {
     if (!projectId) return;
-    const doc = await projectsApi.uploadDoc(projectId, file);
+    const doc = await projectsApi.uploadDoc(projectId.value, file);
     docs.value.unshift(doc);
   },
 }));
@@ -190,7 +223,7 @@ function syncProgressLocal() {
   project.value.progress = total ? Math.round((done / total) * 100) : 0;
 }
 async function loadActivity() {
-  activity.value = await projectsApi.activity(projectId).catch(() => []);
+  activity.value = await projectsApi.activity(projectId.value).catch(() => []);
 }
 async function applyStatus(t: Task, next: string) {
   const prev = t.status;
@@ -248,7 +281,7 @@ async function saveEditTask(t: Task) {
 async function addTask() {
   const v = newTaskTitle.value.trim();
   if (!v) return;
-  const t = await projectsApi.createTask(projectId, { title: v });
+  const t = await projectsApi.createTask(projectId.value, { title: v });
   tasks.value.push(t);
   newTaskTitle.value = "";
 }
@@ -282,7 +315,7 @@ async function onKanbanDrop(e: DragEvent, col: string) {
 function taskToAI(task?: Task, agentId?: string) {
   const seed = task ? `请帮我完成以下任务：${task.title}` : undefined;
   const profile = agentId ? chat.profiles.find((p) => p.default_agent_id === agentId) : null;
-  const q: Record<string, string> = { project: projectId };
+  const q: Record<string, string> = { project: projectId.value };
   if (seed) q.seed = seed;
   if (profile) q.profile = profile.id;
   router.push({ path: "/", query: q });
@@ -290,16 +323,16 @@ function taskToAI(task?: Task, agentId?: string) {
 async function discussTask(task: Task) {
   // Open the project group chat with a persistent link to this task.
   try {
-    const { channel } = await teamsApi.getProjectGroup(projectId);
+    const { channel } = await teamsApi.getProjectGroup(projectId.value);
     router.push({ path: "/", query: { c: channel.id, task: task.id, taskTitle: task.title } });
   } catch {
-    router.push({ path: "/", query: { project: projectId, task: task.id, taskTitle: task.title } });
+    router.push({ path: "/", query: { project: projectId.value, task: task.id, taskTitle: task.title } });
   }
 }
 function docToAI(docName: string, agentId?: string) {
   const seed = `请帮我分析项目文件：${docName}`;
   const profile = agentId ? chat.profiles.find((p) => p.default_agent_id === agentId) : null;
-  const q: Record<string, string> = { project: projectId, seed };
+  const q: Record<string, string> = { project: projectId.value, seed };
   if (profile) q.profile = profile.id;
   router.push({ path: "/", query: q });
 }
@@ -309,7 +342,7 @@ function back() {
 }
 async function archiveProject() {
   if (!project.value) return;
-  await projectsApi.update(projectId, { status: project.value.status === "active" ? "paused" : "active" });
+  await projectsApi.update(projectId.value, { status: project.value.status === "active" ? "paused" : "active" });
   await load();
   menuOpen.value = false;
 }
@@ -324,7 +357,7 @@ function onProjectUpdated() {
 async function removeProject() {
   if (!project.value) return;
   if (!confirm(`删除项目「${project.value.name}」？`)) return;
-  await projectsApi.remove(projectId);
+  await projectsApi.remove(projectId.value);
   back();
 }
 </script>

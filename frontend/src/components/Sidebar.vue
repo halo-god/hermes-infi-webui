@@ -254,6 +254,16 @@ async function shareConvo(id: string) {
     ns.toast("分享失败：" + ((e as Error).message || "未知错误"), "error");
   }
 }
+async function unshareConvo(id: string) {
+  closeCtx();
+  try {
+    await conversationsApi.unshare(id);
+    ns.toast("已取消分享，分享链接已失效");
+    await chat.loadConversations();
+  } catch (e: unknown) {
+    ns.toast("取消失败：" + ((e as Error).message || "未知错误"), "error");
+  }
+}
 
 // ── folder management ──
 const showMoveMenu = ref<string | null>(null); // conversation id whose move-submenu is open
@@ -869,7 +879,10 @@ function doDeleteFolder() {
         <button class="menu-item" @click="togglePin(ctxMenu!.id, !!chat.conversations.find(c => c.id === ctxMenu!.id)?.pinned)">
           <Icon name="pin" /> <span class="m-name">{{ chat.conversations.find(c => c.id === ctxMenu!.id)?.pinned ? '取消置顶' : '置顶' }}</span>
         </button>
-        <button class="menu-item" @click="shareConvo(ctxMenu!.id)">
+        <button v-if="chat.conversations.find(c => c.id === ctxMenu!.id)?.visibility === 'shared'" class="menu-item" @click="unshareConvo(ctxMenu!.id)">
+          <Icon name="share" /> <span class="m-name">取消分享</span>
+        </button>
+        <button v-else class="menu-item" @click="shareConvo(ctxMenu!.id)">
           <Icon name="share" /> <span class="m-name">分享</span>
         </button>
         <div class="menu-item has-sub" @mouseenter="showMoveMenu = ctxMenu!.id" @mouseleave="showMoveMenu = null">

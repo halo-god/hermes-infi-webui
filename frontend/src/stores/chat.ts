@@ -13,8 +13,11 @@ import type { Profile } from "@/api/agents";
 const API_BASE = import.meta.env.VITE_API_BASE || "/api/v1";
 
 /** Poll a freshly-uploaded file until its async conversion finishes.
- * Returns true when the file is ready to attach; false on error/timeout. */
-async function waitForFileReady(fileId: string, convoId: string, timeoutMs = 30000): Promise<boolean> {
+ * Returns true when the file is ready to attach; false on error/timeout.
+ * The deadline covers 2 concurrent soffice conversions (45s cap each) plus
+ * queueing — the old 30s default silently dropped attachments that were
+ * still converting. */
+async function waitForFileReady(fileId: string, convoId: string, timeoutMs = 150_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -71,7 +74,12 @@ export const useChatStore = defineStore("chat", () => {
   const typingUsers = ref<{ user_id: string; name: string }[]>([]);
 
   // ── Stream composable ──
-  const stream = useStream();
+  // onGiveUp: SSE reconnect gave up (8 consecutive errors) — clear the
+  // streaming lock so the composer can send again; the turn is orphaned.
+  const stream = useStream(() => {
+    streamingConvoId.value = null;
+    pendingConfirmations.value = [];
+  });
 
   async function loadTeams() {
     try {
@@ -523,7 +531,7 @@ export const useChatStore = defineStore("chat", () => {
         status: "complete",
         created_at: new Date().toISOString(),
       });
-      stream.send({
+      const sent = stream.send({
         action: "send",
         text,
         mentions,
@@ -533,6 +541,24 @@ export const useChatStore = defineStore("chat", () => {
         attached_file_ids: fileIds,
         knowledge_ids: opts?.knowledgeIds,
       });
+      if (!sent) {
+        // Socket not open (e.g. WS handshake still pending / dropped): roll
+        // back the optimistic bubble and tell the user, instead of leaving a
+        // ghost message nobody received.
+        const optIdx = messages.value.findIndex(
+          (m) => m.id.startsWith("tmp-") && m.content?.text === text,
+        );
+        if (optIdx !== -1) {
+          spliceMessage(optIdx, 1, {
+            ...messages.value[optIdx],
+            status: "error" as const,
+            content: { ...messages.value[optIdx].content, error: "消息未发送（连接未就绪），请重试" },
+          });
+        }
+        if (expectAgent) streamingConvoId.value = null;
+        useNotificationStore().toast("消息未发送：连接未就绪", "error");
+        return false;
+      }
     } else {
       // Personal conversation: existing logic
       const passOpts = { profileId: opts?.profileId, fileIds, knowledgeIds: opts?.knowledgeIds, taskId: opts?.taskId };
@@ -617,9 +643,31 @@ export const useChatStore = defineStore("chat", () => {
           content: { ...m.content, error: "消息发送失败，请检查网络后重试" },
         });
       }
+      // The SSE "start" event may already have created an empty streaming
+      // agent bubble — mark it error too, otherwise a spinner stays in the
+      // thread forever (no done/error event will ever arrive).
+      for (let i = messages.value.length - 1; i >= 0; i--) {
+        const m = messages.value[i];
+        if (m.conversation_id === id && m.role === "agent"
+          && m.status === "streaming" && !(m.content?.text)) {
+          spliceMessage(i, 1, {
+            ...m,
+            status: "error" as const,
+            content: { ...m.content, error: "消息发送失败，请检查网络后重试" },
+          });
+        }
+      }
       return false;
     }
-    // Replace the optimistic user message with the real one (server-assigned id)
+    // Replace the optimistic user message with the real one (server-assigned
+    // id). If the user switched conversations while the POST was in flight,
+    // the bubble is gone (messages was replaced) — discard the result instead
+    // of pushing the old conversation's reply into the new one's thread.
+    if (activeId.value !== id) {
+      console.debug("[chat] sendSingle: conversation switched during POST, discarding result");
+      streamingConvoId.value = null;
+      return false;
+    }
     const optIdx = messages.value.findIndex((m) => m.id === optimisticUser.id);
     if (optIdx !== -1) spliceMessage(optIdx, 1, res.user_message);
     // The SSE "start" event may have already created the agent bubble
@@ -689,6 +737,10 @@ export const useChatStore = defineStore("chat", () => {
       if (m.status === "streaming") m.status = "cancelled";
     }
     streamingConvoId.value = null;
+    // The runner answers a cancelled confirmation with a confirmation_response
+    // on the SSE stream — but we closed it, so the modal would never dismiss.
+    // Drop pending modals now.
+    pendingConfirmations.value = [];
     useNotificationStore().toast("已停止生成", "info");
     // Close the SSE/WS stream immediately instead of waiting for the server to
     // notice the disconnect.

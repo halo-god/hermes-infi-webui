@@ -140,13 +140,11 @@ async def _require_convo(db, conversation_id: uuid.UUID, user: User):
 
 
 def _truncate_knowledge_blocks(text: str, max_block: int = 100_000) -> str:
-    """Truncate oversized <knowledge> blocks to prevent context length explosion."""
-    def _repl(m):
-        block = m.group(0)
-        if len(block) > max_block:
-            return block[:max_block] + "\n\n... [内容已截断，文件较大，请使用 read_file 工具分段读取]\n</knowledge>"
-        return block
-    return re.sub(r"<knowledge>.*?</knowledge>", _repl, text, flags=re.DOTALL)
+    """Truncate oversized <knowledge> blocks to prevent context length explosion.
+
+    Delegates to the service-layer single source of truth (dispatch_group also
+    applies it at its entry, so persisted and model-visible text agree)."""
+    return svc.truncate_knowledge_blocks(text, max_block=max_block)
 
 @router.get("", response_model=list[ConversationOut])
 async def list_conversations(
@@ -404,6 +402,14 @@ async def delete_conversation(
     db: AsyncSession = Depends(get_db),
 ):
     convo = await _require_convo(db, conversation_id, user)
+    # A team/group conversation is shared state: any member deleting it would
+    # wipe the whole team's history (the group is silently recreated empty).
+    # Only the conversation owner or a team owner/admin may delete it.
+    if convo.type == "group" and convo.owner_id != user.id:
+        if convo.team_id and await _is_team_owner_admin(db, convo.team_id, user.id):
+            pass
+        else:
+            raise HTTPException(status_code=403, detail="仅会话创建者或团队管理员可删除群聊")
     await svc.delete_conversation(db, convo)
 
 
@@ -431,10 +437,51 @@ async def share_conversation(
     db: AsyncSession = Depends(get_db),
 ):
     convo = await _require_convo(db, conversation_id, user)
+    # Team/group conversations may only be shared by the conversation owner or
+    # a team owner/admin — a plain member must not be able to publish the whole
+    # team channel (with every future message) to anonymous viewers.
+    if convo.type == "group" and convo.owner_id != user.id:
+        if convo.team_id and await _is_team_owner_admin(db, convo.team_id, user.id):
+            pass
+        else:
+            raise HTTPException(status_code=403, detail="仅会话创建者或团队管理员可分享群聊")
     convo.visibility = "shared"
     await db.commit()
     await db.refresh(convo)
     return {"share_url": f"/shared/{convo.id}", "conversation_id": str(convo.id)}
+
+
+@router.delete("/{conversation_id}/share", status_code=204)
+async def unshare_conversation(
+    conversation_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Revoke sharing — the shared URL immediately stops serving content."""
+    convo = await _require_convo(db, conversation_id, user)
+    if convo.owner_id != user.id and not (
+        convo.type == "group" and convo.team_id
+        and await _is_team_owner_admin(db, convo.team_id, user.id)
+    ):
+        raise HTTPException(status_code=403, detail="无权取消分享")
+    convo.visibility = "private"
+    await db.commit()
+    return None
+
+
+async def _is_team_owner_admin(db: AsyncSession, team_id: uuid.UUID, user_id: uuid.UUID) -> bool:
+    """Team owner/admin check used by share/unshare/group-delete guards."""
+    from app.db.models.team import TeamMember
+    tm = (
+        await db.execute(
+            select(TeamMember).where(
+                TeamMember.team_id == team_id,
+                TeamMember.user_id == user_id,
+                TeamMember.role.in_(["owner", "admin"]),
+            )
+        )
+    ).scalars().first()
+    return tm is not None
 
 
 @router.get("/shared/{conversation_id}", response_model=ConversationDetail)
@@ -469,9 +516,26 @@ async def get_shared_conversation(
         raise HTTPException(status_code=404, detail="分享链接不存在或已失效")
     # Cap at 50 messages for unauthenticated viewers.
     msgs = await svc.get_messages(db, convo.id, limit=50)
+    # Anonymous viewers get a SANITIZED view: only the message text + attached
+    # file metadata. knowledge_refs / rag_refs (team knowledge names), mentions
+    # and reactions (user UUIDs), reply_to and owner ids are internal metadata
+    # that must not leak to a link holder.
+    safe_msgs = []
+    for m in msgs:
+        raw = MessageOut.model_validate(m).model_dump()
+        c = dict(m.content or {})
+        safe_content: dict = {}
+        if c.get("text"):
+            safe_content["text"] = c["text"]
+        if c.get("files"):
+            safe_content["files"] = c["files"]
+        raw["content"] = safe_content
+        for drop in ("owner_id", "reply_to_id", "task_id"):
+            raw.pop(drop, None)
+        safe_msgs.append(raw)
     return ConversationDetail(
         **ConversationOut.model_validate(convo).model_dump(),
-        messages=[MessageOut.model_validate(m) for m in msgs],
+        messages=safe_msgs,
     )
 
 
@@ -620,6 +684,50 @@ async def stream(
     )
 
 
+async def _ws_dispatch(
+    websocket: WebSocket, conversation_id: uuid.UUID, user_id: uuid.UUID,
+    text: str, payload: dict, msg_db_provider,
+) -> None:
+    """Route a WebSocket "send" action through the same dispatch paths as the
+    HTTP endpoint (fresh session per message to avoid detached instances)."""
+    file_ids = payload.get("attached_file_ids") or []
+    knowledge_ids = payload.get("knowledge_ids") or []
+    p_id = payload.get("profileId") or payload.get("profile_id") or None
+    mentions = payload.get("mentions") or []
+    reply_raw = payload.get("reply_to_id")
+    reply_to_id = None
+    if reply_raw:
+        try:
+            reply_to_id = uuid.UUID(str(reply_raw))
+        except (ValueError, TypeError):
+            reply_to_id = None
+    task_raw = payload.get("task_id")
+    task_id = None
+    if task_raw:
+        try:
+            task_id = uuid.UUID(str(task_raw))
+        except (ValueError, TypeError):
+            task_id = None
+    async with msg_db_provider() as msg_db:
+        c = await svc.get_conversation(msg_db, conversation_id, user_id)
+        if c and c.type == "group":
+            # Group: route via @mentions (human↔human / human↔AI / roundtable).
+            # profileId is a personal-chat concept (the Composer's default
+            # assistant) and must never override who a group @-mention
+            # resolved to — deliberately not forwarded here.
+            await svc.dispatch_group(
+                msg_db, c, text, mentions,
+                attached_file_ids=file_ids, knowledge_ids=knowledge_ids,
+                owner_id=user_id, reply_to_id=reply_to_id, task_id=task_id,
+            )
+        elif c:
+            await svc.dispatch(
+                msg_db, c, text, attached_file_ids=file_ids,
+                knowledge_ids=knowledge_ids, owner_id=user_id,
+                profile_id_override=p_id, task_id=task_id,
+            )
+
+
 @router.websocket("/{conversation_id}/ws")
 async def conversation_ws(
     websocket: WebSocket,
@@ -688,46 +796,31 @@ async def conversation_ws(
                             json.dumps({"type": "error", "message_id": "", "detail": "发送过于频繁"})
                         )
                         continue
-                    file_ids = payload.get("attached_file_ids") or []
-                    knowledge_ids = payload.get("knowledge_ids") or []
-                    p_id = payload.get("profileId") or payload.get("profile_id") or None
-                    mentions = payload.get("mentions") or []
-                    reply_raw = payload.get("reply_to_id")
-                    reply_to_id = None
-                    if reply_raw:
+                    # Parity with the HTTP send path: truncate oversized
+                    # <knowledge> blocks and take the per-conversation turn
+                    # lock (the runner serializes per conversation as the
+                    # backstop, but a fast rejection avoids queueing here).
+                    text = _truncate_knowledge_blocks(text)
+                    turn_lock_key = f"acp:turn:{conversation_id}"
+                    lock_held = await redis_core.get_redis().set(
+                        turn_lock_key, "1", nx=True,
+                        ex=settings.acp_prompt_timeout + 60,
+                    )
+                    if not lock_held:
+                        await websocket.send_text(
+                            json.dumps({"type": "error", "message_id": "", "detail": "该会话正在生成中，请等待当前回复完成"})
+                        )
+                        continue
+                    try:
+                        await _ws_dispatch(
+                            websocket, conversation_id, user_id,
+                            text, payload, msg_db_provider=async_session_maker,
+                        )
+                    finally:
                         try:
-                            reply_to_id = uuid.UUID(str(reply_raw))
-                        except (ValueError, TypeError):
-                            reply_to_id = None
-                    task_raw = payload.get("task_id")
-                    task_id = None
-                    if task_raw:
-                        try:
-                            task_id = uuid.UUID(str(task_raw))
-                        except (ValueError, TypeError):
-                            task_id = None
-                    # Use a fresh DB session for each message to avoid detached instances.
-                    # The initial `db` session is invalid after the first await in the loop.
-                    async with async_session_maker() as msg_db:
-                        c = await svc.get_conversation(msg_db, conversation_id, user_id)
-                        if c and c.type == "group":
-                            # Group: route via @mentions (human↔human / human↔AI / roundtable).
-                            # profileId is a personal-chat concept (the Composer's default
-                            # assistant) and must never override who a group @-mention
-                            # resolved to — deliberately not forwarded here.
-                            await svc.dispatch_group(
-                                msg_db, c, text, mentions,
-                                attached_file_ids=file_ids, knowledge_ids=knowledge_ids,
-                                owner_id=user_id,
-                                reply_to_id=reply_to_id,
-                                task_id=task_id,
-                            )
-                        elif c:
-                            await svc.dispatch(
-                                msg_db, c, text, attached_file_ids=file_ids,
-                                knowledge_ids=knowledge_ids, owner_id=user_id,
-                                profile_id_override=p_id, task_id=task_id,
-                            )
+                            await redis_core.get_redis().delete(turn_lock_key)
+                        except Exception:
+                            pass
             elif action == "cancel":
                 await redis_core.request_cancel(cid)
     except WebSocketDisconnect:
@@ -818,14 +911,55 @@ async def get_file_raw(
     else:
         raise HTTPException(status_code=404, detail="文件内容不存在")
 
-    from urllib.parse import quote
-    ascii_name = f.name.encode("ascii", "ignore").decode() or "file"
+    from app.core.files import safe_download_headers
     return Response(
         content=data,
         media_type=mime,
-        headers={
-            "Content-Disposition": f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(f.name)}"
-        },
+        headers=safe_download_headers(f.name, mime),
+    )
+
+
+@router.get("/{conversation_id}/files/{file_id}/pdf")
+async def get_file_pdf_preview(
+    conversation_id: uuid.UUID,
+    file_id: uuid.UUID,
+    request: Request,
+    ticket: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Serve the LibreOffice-converted PDF preview for an Office upload.
+
+    The unified PDF preview replaces the per-format HTML previews: docx/xlsx/
+    pptx/doc/xls/ppt/odt/ods/odp all render through the same pdf iframe in the
+    workspace panel. Falls back to the raw bytes when the file IS a PDF (or
+    the preview key is missing), so the frontend can always point here.
+    """
+    from fastapi.responses import Response
+
+    user = await user_from_ticket_or_header(ticket, request, db)
+    await _require_convo(db, conversation_id, user)
+    f = await db.get(WorkspaceFile, file_id)
+    if f is None or f.conversation_id != conversation_id:
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    key = f.preview_pdf_key
+    if not key and (f.kind or "").lower() == "pdf":
+        key = f.storage_key  # native PDFs are their own preview
+    if not key:
+        raise HTTPException(status_code=404, detail="该文件暂无 PDF 预览")
+
+    try:
+        data = await asyncio.to_thread(object_storage.get, key)
+    except Exception:
+        raise HTTPException(status_code=503, detail="存储不可用")
+    if not data:
+        raise HTTPException(status_code=404, detail="预览内容不存在")
+
+    from app.core.files import safe_download_headers
+    return Response(
+        content=data,
+        media_type="application/pdf",
+        headers=safe_download_headers(f.name, "application/pdf"),
     )
 
 
@@ -996,25 +1130,45 @@ async def _convert_upload_bg(
         if wf is None:
             return
         raw_key = wf.storage_key  # uploaded raw bytes (retry source)
+        old_pdf_key = wf.preview_pdf_key
         try:
             processed = await process_upload(
                 raw, ext, f"conversations/{convo_id}", name,
                 content_type=content_type, fast_mode=True,
             )
             wf.content = processed.content
-            wf.storage_key = processed.storage_key
+            # Small files (≤ threshold, db backend) keep the original bytes
+            # under the staged key with storage_key=None from process_upload —
+            # fall back to the staged key so /pdf, download and AI raw reads
+            # still find the original bytes.
+            wf.storage_key = processed.storage_key or raw_key
+            wf.preview_pdf_key = processed.preview_pdf_key
             wf.size_bytes = processed.size_bytes
             wf.processing_status = "ready"
             await db.commit()
             await db.refresh(wf)
             status = "ready"
             # The raw-bytes object staged at upload time is superseded by
-            # process_upload's own key — drop it so it doesn't leak.
-            if raw_key and raw_key != processed.storage_key:
+            # process_upload's own key — drop it so it doesn't leak. BUT only
+            # when process_upload actually produced a storage key: small
+            # files (≤ threshold, db backend) keep the ORIGINAL bytes inline
+            # with storage_key=None — deleting the staged key there would
+            # destroy the original bytes (PDF preview + download both break).
+            if (
+                raw_key and processed.storage_key
+                and raw_key != processed.storage_key
+            ):
                 try:
                     await asyncio.to_thread(object_storage.delete, raw_key)
                 except Exception:
                     logger.debug("failed to clean staged upload key %s", raw_key, exc_info=True)
+            # A retry may have regenerated the preview PDF — remove the stale
+            # one so the bucket doesn't accumulate orphaned objects.
+            if old_pdf_key and old_pdf_key != processed.preview_pdf_key:
+                try:
+                    await asyncio.to_thread(object_storage.delete, old_pdf_key)
+                except Exception:
+                    logger.debug("failed to clean stale preview pdf %s", old_pdf_key, exc_info=True)
             # pptx: queue a background Docling upgrade — the fast python-pptx
             # HTML stays in `content` for the preview, Docling writes richer
             # Markdown into `content_md` for AI prompt injection. Non-blocking:
@@ -1062,11 +1216,13 @@ async def delete_workspace_file(
     f = await db.get(WorkspaceFile, file_id)
     if f is None or f.conversation_id != conversation_id:
         raise HTTPException(status_code=404, detail="文件不存在")
-    if f.storage_key:
+    for key in (f.storage_key, f.preview_pdf_key):
+        if not key:
+            continue
         try:
-            await asyncio.to_thread(object_storage.delete, f.storage_key)
+            await asyncio.to_thread(object_storage.delete, key)
         except Exception:
-            logger.debug("failed to delete storage object for %s", file_id, exc_info=True)
+            logger.debug("failed to delete storage object %s for %s", key, file_id, exc_info=True)
     await db.delete(f)
     await db.commit()
 
@@ -1080,13 +1236,17 @@ async def retry_file_conversion(
 ):
     """Retry a failed (or stalled) upload conversion. Requires the raw bytes
     staged at upload time (storage_key present). Flips the row back to
-    processing and re-runs the background extractor."""
+    processing and re-runs the background extractor.
+
+    A row stuck in "processing" (e.g. the API process died mid-conversion,
+    or the background task was lost on restart) is re-run idempotently —
+    every conversion overwrites the same columns, so a duplicate task is
+    harmless.
+    """
     await _require_convo(db, conversation_id, user)
     wf = await db.get(WorkspaceFile, file_id)
     if wf is None or wf.conversation_id != conversation_id:
         raise HTTPException(status_code=404, detail="文件不存在")
-    if wf.processing_status == "processing":
-        return WorkspaceFileOut.model_validate(wf)
     if not wf.storage_key:
         raise HTTPException(status_code=409, detail="原始文件不可用，无法重试，请重新上传")
     try:
