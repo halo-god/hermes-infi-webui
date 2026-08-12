@@ -224,12 +224,19 @@ async def update_skill(db: AsyncSession, skill: AgentSkill, **fields: object) ->
     """Apply caller-provided fields as-is — pass only explicitly-set fields
     (e.g. via payload.model_dump(exclude_unset=True)) so an intentional
     `None` (like clearing profile_id) isn't silently dropped."""
+    old_name = skill.name
     for key, value in fields.items():
         setattr(skill, key, value)
     await db.commit()
     await db.refresh(skill)
-    # Sync to hermes filesystem (Direction A).
-    from app.services.skill_sync_service import sync_skill_to_hermes
+    # Sync to hermes filesystem (Direction A). On rename, remove the old
+    # directory first (by id marker + legacy name) so no stale dir survives
+    # to be re-ingested as a "new" skill by Direction B.
+    from app.services.skill_sync_service import (
+        remove_skill_from_hermes, sync_skill_to_hermes,
+    )
+    if "name" in fields and fields["name"] != old_name:
+        await remove_skill_from_hermes(old_name, skill_id=skill.id)
     await sync_skill_to_hermes(
         skill.id, skill.name, skill.description, skill.content,
         skill.enabled, skill.trigger_conditions,
@@ -239,11 +246,14 @@ async def update_skill(db: AsyncSession, skill: AgentSkill, **fields: object) ->
 
 async def delete_skill(db: AsyncSession, skill: AgentSkill) -> None:
     skill_name = skill.name
+    skill_id = skill.id
     await db.delete(skill)
     await db.commit()
-    # Remove from hermes filesystem (Direction A).
+    # Remove from hermes filesystem (Direction A) — id marker catches
+    # hash-suffixed collision dirs and renamed leftovers, name cleans up
+    # legacy dirs that predate the marker.
     from app.services.skill_sync_service import remove_skill_from_hermes
-    await remove_skill_from_hermes(skill_name)
+    await remove_skill_from_hermes(skill_name, skill_id=skill_id)
     await db.commit()
 
 

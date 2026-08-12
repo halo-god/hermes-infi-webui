@@ -84,9 +84,25 @@ make up && make migrate && make seed  # 启动全栈
 - `backend/app/core/governance.py` — 团队级权限矩阵
 - `frontend/src/types/index.ts` — 所有 TS 接口定义
 
+## hermes-agent 集成（HERMES_HOME 打通）
+
+平台通过 HERMES_HOME 目录驱动外部 hermes-agent（`~/.hermes/hermes-agent`，ACP 协议）。集成代码与约定：
+
+- **目录布局**：全局 `~/.hermes/`（hermes-default）+ 每助手 `~/.hermes/profiles/<handle>/`（config.yaml / SOUL.md / skills/ / memories/ / state.db / memory_store.db）。DB `Profile.path` = `<home>/config.yaml`，DB handle 带 `hermes-` 前缀（如 `hermes-emotion-master` ↔ 目录 `emotion-master`）
+- **技能双向同步**（`services/skill_sync_service.py`）：
+  - Direction A（DB→FS）：SKILL.md frontmatter 保留**原始 name** + `metadata.platform_skill_id`（DB 技能 UUID）；slug 冲突（中文名退化为 `unnamed-skill`、"API 测试"/"API 开发"→`api`）自动加 `-{id8}` 后缀防覆盖；改名/删除按 id 标记反查清理（含 hash 目录）
+  - Direction B（FS→DB）：runner 启动 + 每日自动 ingest（`runner.py:_maybe_ingest_hermes_skills`，Redis 24h 冷却）；agent 来源技能（`AgentSkill.origin='agent'`）FS 消失自动 tombstone；平台技能（`origin='platform'`）永不受扫描影响
+- **配置同步**（`services/hermes_config_sync.py`）：平台设置 deep-merge 进全局 + 各 profile 的 config.yaml；`reasoning_effort` 必须写 `agent.reasoning_effort`（顶层键 hermes 不读）；只同步 DB 中存在的 profile 目录
+- **人设投影**：`Profile.system_prompt` 变更（含提示词演化自动应用）→ 写 `{profile_home}/SOUL.md`
+- **记忆**：平台 Postgres（AgentMemory user+profile 两级 + MemoryEpisode）与 hermes 侧 `memories/MEMORY.md` 完全隔离；记忆合并子进程用隔离 HERMES_HOME（scratch），consolidation 按 profile 分组落库（`runner_memory.py`）
+- **ACP 子进程 env**（`agent_runner/acp_client.py:profile_env`）：只注入 `HERMES_HOME` + `REDIS_URL`（HERMES_* 高级配置走 config.yaml，不注入 env）
+
 ## 已知陷阱
 
 - `backend/.env` 中的 `DATABASE_URL` 指向 `localhost:5432`（裸机），Docker 用 `postgres:5439`
 - Redis 在 Docker 中使用密码 + 端口 1979（非默认 6379）
 - 群聊 `get_conversation` 必须校验 GroupMember 成员资格，不能用宽泛 OR 条件
 - Office HTML 给前端预览，注入 AI prompt 前必须用 `_html_to_plain_text()` 转纯文本
+- **清理 `~/.hermes` 下任何目录前，必须先核对运行中进程（`ps aux | grep hermes`）**：hermes 侧 profile 与平台 DB 完全解耦——`gateway run --profile X` 直接使用 `profiles/X/`，DB 无 Profile 行 ≠ 未使用（曾因只看 DB 误删运行中的 beta gateway home）
+- 中文/近似名技能 slug 退化后，`platform_skill_id` 是改名/删除反查目录的唯一可靠键（不要按 slug 匹配删除）
+- profile 目录改名（handle 变更）在 `agents.py:update_profile` 中自动迁移 FS home；不要手动移动 `profiles/<handle>/`

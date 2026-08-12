@@ -59,11 +59,15 @@ class ACPTimeout(ACPError):
 def profile_env(profile_dir: str | None) -> dict[str, str]:
     """Env overrides scoping the hermes CLI to a profile directory.
 
-    Always returns a dict (never None) because hermes-agent advanced config
-    (prompt_caching, terminal_backend, etc.) is injected unconditionally
-    via HERMES_* env vars. When profile_dir is missing/invalid, only the
-    HERMES_* config vars are returned (no HERMES_HOME override), so the
+    Always returns a dict (never None). When profile_dir is missing/invalid,
+    only the shared vars below are returned (no HERMES_HOME override), so the
     subprocess uses the default ~/.hermes home.
+
+    NOTE: advanced config (prompt_caching, reasoning_effort, terminal, …) is
+    NOT injected via HERMES_* env vars anymore — the current hermes-agent
+    version has no consumer for those (verified by full-repo grep), so they
+    were dead code creating a false "configured" impression. The config.yaml
+    channel (hermes_config_sync) is the single source of truth.
     """
     env: dict[str, str] = {}
     if profile_dir:
@@ -74,14 +78,6 @@ def profile_env(profile_dir: str | None) -> dict[str, str]:
                 "Profile dir %s not found on this host — falling back to default HERMES_HOME",
                 profile_dir,
             )
-    # Inject hermes-agent advanced configuration (3d).
-    env["HERMES_PROMPT_CACHING__CACHE_TTL"] = settings.hermes_prompt_cache_ttl
-    env["HERMES_TERMINAL__BACKEND"] = settings.hermes_terminal_backend
-    env["HERMES_TERMINAL__PERSISTENT_SHELL"] = str(settings.hermes_persistent_shell).lower()
-    env["HERMES_REASONING_EFFORT"] = settings.hermes_reasoning_effort
-    env["HERMES_COMPRESSION__ENABLED"] = str(settings.hermes_compression_enabled).lower()
-    env["HERMES_TOOL_OUTPUT__MAX_BYTES"] = str(settings.hermes_tool_output_max_bytes)
-    env["HERMES_PRIVACY__REDACT_PII"] = str(settings.hermes_redact_pii).lower()
     # The agent's clarify callback bridges agent ↔ runner over Redis
     # (RPUSH hermes:clarify:req:{sid} / BLPOP hermes:clarify:resp:...).
     # Without an explicit REDIS_URL it falls back to localhost:6379, which

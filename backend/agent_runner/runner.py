@@ -182,6 +182,55 @@ class Runner:
             logger.warning("Failed to release runner lock (non-fatal)")
 
     # ── startup ──
+    async def _maybe_ingest_hermes_skills(self) -> None:
+        """Direction B auto-sync: ingest agent-created skills from the hermes
+        filesystem, at most once per day (cooldown tracked in Redis).
+
+        The loop otherwise only closes when an admin manually hits
+        /memory/skills/scan. Runs on runner startup and daily thereafter;
+        failures are logged, never fatal. Skills are attributed to the first
+        super_admin (no interactive user exists inside the runner).
+        """
+        if not settings.hermes_skills_sync_enabled:
+            return
+        r = R.get_redis()
+        cooldown_key = "hermes:skills:last-ingest"
+        try:
+            last_raw = await r.get(cooldown_key)
+            if last_raw and time.time() - float(last_raw) < 24 * 3600:
+                return
+        except Exception:  # noqa: BLE001 — Redis hiccup: proceed with the scan
+            logger.debug("Could not read skill-ingest cooldown", exc_info=True)
+
+        from app.db.models.user import User
+        async with async_session_maker() as db:
+            admin = (await db.execute(
+                select(User).where(User.role == "super_admin").limit(1)
+            )).scalar_one_or_none()
+            if admin is None:
+                logger.warning("No super_admin user — skipping auto skill ingest")
+                return
+            from app.services.skill_sync_service import ingest_hermes_skills
+            result = await ingest_hermes_skills(db, admin.id)
+        logger.info("Auto skill ingest (Direction B): %s", result)
+        try:
+            await r.set(cooldown_key, str(time.time()))
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _daily_skills_scan_loop(self) -> None:
+        """Hourly wake-up for Direction B; the 24h Redis cooldown inside
+        _maybe_ingest_hermes_skills gates the actual scan."""
+        while not self._shutdown:
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                return
+            try:
+                await self._maybe_ingest_hermes_skills()
+            except Exception:
+                logger.exception("Failed to auto-ingest hermes skills (daily)")
+
     async def register_agents(self) -> None:
         found = await discovery.scan()
         self.agents = {a.id: a for a in found}
@@ -454,6 +503,13 @@ class Runner:
 
         await self.register_agents()
         await self.ensure_group()
+        # Direction B auto-sync: ingest agent-created skills from the hermes
+        # filesystem once per day (cooldown tracked in Redis). Without this
+        # the loop only closes when an admin manually hits /memory/skills/scan.
+        try:
+            await self._maybe_ingest_hermes_skills()
+        except Exception:
+            logger.exception("Failed to auto-ingest hermes skills at startup")
         try:
             from agent_runner.runner_subagent import reconcile_background_subagents
             await reconcile_background_subagents()
@@ -471,6 +527,7 @@ class Runner:
 
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         control_task = asyncio.create_task(self._control_loop())
+        skills_scan_task = asyncio.create_task(self._daily_skills_scan_loop())
 
         _xread_backoff = 2.0
         try:
@@ -512,8 +569,13 @@ class Runner:
         finally:
             control_task.cancel()
             heartbeat_task.cancel()
+            skills_scan_task.cancel()
             try:
                 await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            try:
+                await skills_scan_task
             except asyncio.CancelledError:
                 pass
             if self._active_tasks:

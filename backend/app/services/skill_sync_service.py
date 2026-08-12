@@ -35,6 +35,54 @@ def _slugify(name: str) -> str:
     return slug or "unnamed-skill"
 
 
+# Frontmatter key carrying the DB skill UUID. Written on every platform sync
+# so rename/delete can locate the exact directory (slug is NOT unique: CJK
+# names degrade to "unnamed-skill", "API 测试"/"API 开发" both slug to "api").
+_PLATFORM_ID_KEY = "platform_skill_id"
+
+
+def _read_skill_dir_meta(skill_dir: str) -> dict:
+    """Read {skill_dir}/SKILL.md frontmatter → {id, name} (empty when absent)."""
+    skill_path = os.path.join(skill_dir, "SKILL.md")
+    if not os.path.isfile(skill_path):
+        return {}
+    try:
+        raw = Path(skill_path).read_text(encoding="utf-8")
+        m = _FRONTMATTER_RE.match(raw)
+        if not m:
+            return {}
+        meta = yaml.safe_load(m.group(1)) or {}
+        nested = meta.get("metadata") or {}
+        nested = nested if isinstance(nested, dict) else {}
+        return {
+            "id": nested.get(_PLATFORM_ID_KEY),
+            "name": meta.get("name"),
+        }
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _resolve_skill_dir(home: str, slug: str, skill_id: str, name: str) -> str:
+    """Resolve the skills/ dir for one skill, guarding against slug collisions.
+
+    - No existing dir → use the plain slug dir.
+    - Dir already carries THIS skill's platform id → reuse it (update).
+    - Dir is a legacy platform write (no id marker, same name) → reuse and
+      repair in place by overwriting with the id marker added.
+    - Otherwise the slug is taken by a DIFFERENT skill → fall back to a
+      `{slug}-{id8}` dir so CJK/similar names never overwrite each other.
+    """
+    base_dir = os.path.join(home, "skills", slug)
+    if not os.path.isdir(base_dir):
+        return base_dir
+    meta = _read_skill_dir_meta(base_dir)
+    if meta.get("id") == skill_id:
+        return base_dir
+    if meta.get("id") is None and meta.get("name") == name:
+        return base_dir  # legacy platform write — repair in place
+    return os.path.join(home, "skills", f"{slug}-{skill_id[:8]}")
+
+
 def _get_hermes_home() -> str | None:
     """Get HERMES_HOME from settings, expanding ~."""
     raw = getattr(settings, "hermes_home", None) or os.path.expanduser("~/.hermes")
@@ -92,30 +140,73 @@ async def _profile_home(profile_id: uuid.UUID) -> str | None:
         return None
 
 
-def _render_skill_md(name: str, description: str, content: str, tags: list[str] | None = None) -> str:
-    """Render an agentskills.io-standard SKILL.md from AgentSkill fields."""
-    meta: dict = {"name": _slugify(name), "description": description[:1024]}
+def _render_skill_md(name: str, description: str, content: str, tags: list[str] | None = None,
+                     skill_id: str | None = None) -> str:
+    """Render an agentskills.io-standard SKILL.md from AgentSkill fields.
+
+    frontmatter `name` keeps the ORIGINAL name (hermes displays it via
+    frontmatter, the slug is only the directory name); the DB uuid travels in
+    metadata.platform_skill_id for rename/delete lookup.
+    """
+    meta: dict = {"name": name, "description": description[:1024]}
     if tags:
         meta["metadata"] = {"tags": tags}
+    if skill_id:
+        meta.setdefault("metadata", {})[_PLATFORM_ID_KEY] = skill_id
     frontmatter = yaml.dump(meta, allow_unicode=True, default_flow_style=False, sort_keys=False)
     return f"---\n{frontmatter}---\n\n{content}\n"
 
 
 # ── Direction A: DB AgentSkill → hermes filesystem ──
 
-def _write_skill_to_home(home: str, slug: str, md: str, *, enabled: bool, name: str) -> None:
+def _remove_skill_dir_by_id(home: str, skill_id: str) -> None:
+    """Remove every skills/ dir in `home` carrying this platform skill id."""
+    skills_dir = os.path.join(home, "skills")
+    if not os.path.isdir(skills_dir):
+        return
+    for entry in os.listdir(skills_dir):
+        meta = _read_skill_dir_meta(os.path.join(skills_dir, entry))
+        if meta.get("id") == skill_id:
+            _remove_skill_dir(os.path.join(skills_dir, entry))
+
+
+def _remove_skill_dir_by_name(home: str, name: str) -> None:
+    """Remove legacy dirs (no platform id) belonging to THIS skill.
+
+    Slug-based matching is deliberately avoided: CJK / similar names degrade
+    to the same slug, so `entry == slug` would delete an UNRELATED skill's
+    dir in a collision (its contents are then gone for good). The frontmatter
+    `name` (original text, written since the id-marker era) is precise; a
+    name-less legacy dir only matches via slug as a last resort.
+    """
+    skills_dir = os.path.join(home, "skills")
+    if not os.path.isdir(skills_dir):
+        return
+    slug = _slugify(name)
+    for entry in os.listdir(skills_dir):
+        meta = _read_skill_dir_meta(os.path.join(skills_dir, entry))
+        if meta.get("id") is not None:
+            continue  # id-marked dirs are handled by _remove_skill_dir_by_id
+        if meta.get("name") == name:
+            _remove_skill_dir(os.path.join(skills_dir, entry))
+        elif meta.get("name") in (None, "") and entry == slug:
+            _remove_skill_dir(os.path.join(skills_dir, entry))
+
+
+def _write_skill_to_home(home: str, slug: str, md: str, *, enabled: bool, name: str,
+                         skill_id: str | None = None) -> None:
     """Write (or remove) one skill in one HERMES_HOME's skills/ dir."""
-    skill_dir = os.path.join(home, "skills", slug)
     if not enabled:
-        try:
-            import shutil
-            if os.path.isdir(skill_dir):
-                shutil.rmtree(skill_dir)
-                logger.info("Removed skill dir %s", skill_dir)
-        except Exception:  # noqa: BLE001
-            logger.debug("Failed to remove skill dir %s", skill_dir, exc_info=True)
+        # Disabled: remove this skill's dir(s) by id marker first, then by
+        # legacy name/slug so renamed skills are not left behind.
+        if skill_id:
+            _remove_skill_dir_by_id(home, skill_id)
+        _remove_skill_dir_by_name(home, name)
         return
     try:
+        skill_dir = _resolve_skill_dir(home, slug, skill_id, name) if skill_id else (
+            os.path.join(home, "skills", slug)
+        )
         os.makedirs(skill_dir, exist_ok=True)
         skill_path = os.path.join(skill_dir, "SKILL.md")
         with open(skill_path, "w", encoding="utf-8") as f:
@@ -150,28 +241,36 @@ async def sync_skill_to_hermes(skill_id, name: str, description: str, content: s
     if not homes:
         return
 
+    sid = str(skill_id)
     slug = _slugify(name)
     tags = []
     if trigger_conditions and isinstance(trigger_conditions, dict):
         tags = trigger_conditions.get("keywords") or []
-    md = _render_skill_md(name, description, content, tags)
+    md = _render_skill_md(name, description, content, tags, skill_id=sid)
 
     for home in homes:
-        _write_skill_to_home(home, slug, md, enabled=enabled, name=name)
+        _write_skill_to_home(home, slug, md, enabled=enabled, name=name, skill_id=sid)
 
 
-async def remove_skill_from_hermes(name: str) -> None:
-    """Remove a skill from every home (global + all profile homes)."""
+async def remove_skill_from_hermes(name: str, skill_id=None) -> None:
+    """Remove a skill from every home (global + all profile homes).
+
+    `skill_id` is the authoritative key (id-marked dirs, incl. hash-suffixed
+    collision dirs and renamed leftovers); `name` cleans up legacy dirs that
+    predate the id marker.
+    """
     if not settings.hermes_skills_sync_enabled:
         return
     homes = ([_get_hermes_home()] if _get_hermes_home() else []) + _profile_homes()
-    slug = _slugify(name)
     for home in homes:
-        if home:
-            await _remove_skill_dir(os.path.join(home, "skills", slug))
+        if not home:
+            continue
+        if skill_id:
+            _remove_skill_dir_by_id(home, str(skill_id))
+        _remove_skill_dir_by_name(home, name)
 
 
-async def _remove_skill_dir(skill_dir: str) -> None:
+def _remove_skill_dir(skill_dir: str) -> None:
     """Best-effort removal of a skill directory."""
     try:
         import shutil
@@ -192,6 +291,8 @@ class HermesSkillInfo:
     description: str
     content: str
     tags: list[str]
+    # DB uuid marker written by the platform (see _PLATFORM_ID_KEY).
+    platform_skill_id: str | None = None
     # Set when the skill was found under a profile's home (multi-profile scan).
     profile_id: uuid.UUID | None = None
 
@@ -206,6 +307,7 @@ def list_hermes_fs_skills(hermes_home: str | None = None) -> list[HermesSkillInf
         return []
 
     results: list[HermesSkillInfo] = []
+    seen_slugs: dict[str, str] = {}
     for entry in os.listdir(skills_dir):
         skill_path = os.path.join(skills_dir, entry, "SKILL.md")
         if not os.path.isfile(skill_path):
@@ -219,7 +321,19 @@ def list_hermes_fs_skills(hermes_home: str | None = None) -> list[HermesSkillInf
                     description=parsed["description"],
                     content=parsed["content"],
                     tags=parsed.get("tags", []),
+                    platform_skill_id=parsed.get("platform_skill_id"),
                 ))
+                # Slug-collision health check (1c): two dirs whose slugs slugify
+                # to the same key (e.g. CJK names → "unnamed-skill") would have
+                # overwritten each other before the id-marker fix — surface it.
+                key = _slugify(parsed["name"])
+                if key in seen_slugs and seen_slugs[key] != entry:
+                    logger.warning(
+                        "Skill slug collision in %s: %r and %r both resolve to '%s' — "
+                        "re-sync via platform to disambiguate",
+                        skills_dir, seen_slugs[key], entry, key,
+                    )
+                seen_slugs.setdefault(key, entry)
         except Exception:  # noqa: BLE001
             logger.debug("Failed to parse %s", skill_path, exc_info=True)
     return results
@@ -230,7 +344,8 @@ def _parse_skill_md(raw: str) -> dict | None:
     m = _FRONTMATTER_RE.match(raw)
     if not m:
         # No frontmatter — treat whole file as content.
-        return {"name": "unnamed", "description": "", "content": raw.strip(), "tags": []}
+        return {"name": "unnamed", "description": "", "content": raw.strip(), "tags": [],
+                "platform_skill_id": None}
     try:
         meta = yaml.safe_load(m.group(1)) or {}
     except yaml.YAMLError:
@@ -252,7 +367,10 @@ def _parse_skill_md(raw: str) -> dict | None:
             tags = t
         elif isinstance(t, str):
             tags = [t]
-    return {"name": name, "description": description, "content": content, "tags": tags}
+    return {
+        "name": name, "description": description, "content": content, "tags": tags,
+        "platform_skill_id": nested_meta.get(_PLATFORM_ID_KEY) if isinstance(nested_meta, dict) else None,
+    }
 
 
 async def ingest_hermes_skills(db: AsyncSession, owner_id) -> dict:
@@ -262,18 +380,28 @@ async def ingest_hermes_skills(db: AsyncSession, owner_id) -> dict:
     bound to that profile (AgentSkill.profile_id) — this is what closes the
     multi-profile loop: per-profile agent-created skills used to be invisible
     to the DB, and DB-evolved skills never reached that profile's home.
+
+    Matching prefers the platform id marker (frontmatter metadata.platform_
+    skill_id) over slug — slugs collide for CJK/similar names, the id marker
+    is unique. Agent-created rows (origin='agent') whose FS dir disappeared
+    are tombstoned (enabled=False) so deletions on the hermes side are
+    reflected; platform rows are never touched by the scan.
     """
     from app.db.models.agent import Profile
     from app.db.models.memory import AgentSkill
     from sqlalchemy import select
 
-    # Existing DB skills by slug-matched name (owner + profile scoped).
+    # Existing DB skills (owner + profile scoped).
     existing = (await db.execute(
         select(AgentSkill).where(
             (AgentSkill.owner_id == owner_id) | (AgentSkill.profile_id.is_not(None))
         )
     )).scalars().all()
-    existing_slugs = {_slugify(s.name): s for s in existing}
+    existing_by_id: dict[str, AgentSkill] = {}
+    existing_by_slug: dict[str, AgentSkill] = {}
+    for s in existing:
+        existing_by_id.setdefault(str(s.id), s)
+        existing_by_slug.setdefault(_slugify(s.name), s)
 
     # Map profile homes → profile ids (dirname of each profile's config path).
     profiles = (await db.execute(select(Profile))).scalars().all()
@@ -287,11 +415,15 @@ async def ingest_hermes_skills(db: AsyncSession, owner_id) -> dict:
     new_count = 0
     updated_count = 0
     total = 0
+    matched_ids: set[str] = set()  # DB rows this scan found on the FS
 
     def _ingest(fs_skill: HermesSkillInfo, profile_id: uuid.UUID | None) -> None:
         nonlocal new_count, updated_count, total
         total += 1
-        existing_skill = existing_slugs.get(fs_skill.slug)
+        existing_skill = (
+            existing_by_id.get(fs_skill.platform_skill_id)
+            if fs_skill.platform_skill_id else None
+        ) or existing_by_slug.get(_slugify(fs_skill.name))
         if existing_skill is None:
             db.add(AgentSkill(
                 owner_id=owner_id,
@@ -301,16 +433,19 @@ async def ingest_hermes_skills(db: AsyncSession, owner_id) -> dict:
                 content=fs_skill.content,
                 trigger_conditions={"keywords": fs_skill.tags} if fs_skill.tags else {},
                 enabled=True,
+                origin="agent",
             ))
             new_count += 1
-        elif (existing_skill.profile_id == profile_id
-                and existing_skill.content != fs_skill.content):
-            # Content changed in hermes FS — update DB (same profile scope).
-            existing_skill.content = fs_skill.content
-            existing_skill.description = fs_skill.description
-            if fs_skill.tags:
-                existing_skill.trigger_conditions = {"keywords": fs_skill.tags}
-            updated_count += 1
+        else:
+            matched_ids.add(str(existing_skill.id))
+            if (existing_skill.profile_id == profile_id
+                    and existing_skill.content != fs_skill.content):
+                # Content changed in hermes FS — update DB (same profile scope).
+                existing_skill.content = fs_skill.content
+                existing_skill.description = fs_skill.description
+                if fs_skill.tags:
+                    existing_skill.trigger_conditions = {"keywords": fs_skill.tags}
+                updated_count += 1
 
     # 1. Global skills dir.
     for fs_skill in list_hermes_fs_skills():
@@ -321,12 +456,22 @@ async def ingest_hermes_skills(db: AsyncSession, owner_id) -> dict:
         for fs_skill in list_hermes_fs_skills(home):
             _ingest(fs_skill, profile_id=pid)
 
-    if new_count or updated_count:
+    # 3. Tombstone: agent-created rows (origin='agent') whose FS dir vanished
+    #    are disabled so deleted hermes skills stop being injected. Platform
+    #    rows are never touched — DB is the source of truth for them.
+    tombstoned = 0
+    for s in existing:
+        if s.enabled and s.origin == "agent" and str(s.id) not in matched_ids:
+            s.enabled = False
+            tombstoned += 1
+
+    if new_count or updated_count or tombstoned:
         await db.commit()
 
     return {
         "new": new_count, "updated": updated_count,
         "skipped": total - new_count - updated_count,
+        "tombstoned": tombstoned,
     }
 
 

@@ -2,6 +2,22 @@
 
 > 所有改动基于 hermes-agent 主分支。部署时需要逐个 apply。
 
+---
+
+## 0. 平台侧集成优化（hermes-python，无需 apply 补丁）
+
+> 以下为 hermes-python 仓库内实现的 hermes-agent 打通能力，**不修改 hermes-agent 代码**，升级 hermes-python 即生效。完整架构见 [CLAUDE.md](../CLAUDE.md)「hermes-agent 集成」章节。
+
+- **技能双向同步**（`app/services/skill_sync_service.py`）：Direction A 写 SKILL.md（frontmatter 保留原始 name + `metadata.platform_skill_id`，slug 冲突加 `-{id8}` 后缀防覆盖，改名/删除按 id 清理残留）；Direction B 扫描入库（runner 启动 + 每日自动，24h 冷却），agent 来源技能 FS 消失自动 tombstone
+- **配置同步**（`app/services/hermes_config_sync.py`）：平台设置 deep-merge 进全局 + 各 profile config.yaml；`reasoning_effort` 写 `agent.reasoning_effort`（顶层键 hermes 不读）；跳过已删除 profile 的目录
+- **人设投影**：`Profile.system_prompt` 变更（含演化自动应用）→ `{profile_home}/SOUL.md`；创建/克隆/导入后立即投影
+- **Profile 生命周期**：handle 改名自动迁移 FS home、删除清理 home、每助手独立 HERMES_HOME（`profiles/<handle>/`）
+- **记忆打通**：consolidation 按 profile 分组落库（`agent_memory` user+profile 两级）；合并子进程用隔离 HERMES_HOME 消除隐式双写
+- **迁移**：0089（记忆 profile_id）、0090（agent_skills.origin）
+- 相关测试：`tests/test_hermes_integration_opt.py`（13 用例）、`test_skill_sync_multiprofile.py`、`test_multiprofile_support.py`
+
+---
+
 ## 1. 依赖安装
 
 ```bash

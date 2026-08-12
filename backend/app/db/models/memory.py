@@ -72,3 +72,8 @@ class AgentSkill(UUIDPrimaryKey, Timestamps, Base):
     trigger_conditions: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Where this skill row came from: "platform" (created/edited in the admin
+    # UI or via ZIP import) vs "agent" (ingested from the hermes filesystem by
+    # Direction B). Only agent-origin rows are tombstoned when their FS dir
+    # disappears — platform skills are the DB source of truth.
+    origin: Mapped[str] = mapped_column(String(16), default="platform", nullable=False)

@@ -67,6 +67,47 @@ HTTP/WS  →  app/api/v1/*.py        路由层：解析输入、鉴权依赖、�
 
 `agent_runner/runner.py` 消费 Redis Stream `acp:prompt`，通过 `acp_client.py` 驱动 ACP（JSON-RPC over stdio）会话，将结果写入 DB，并把流式事件追加到按会话限流的 Redis Stream `evt:conv:{id}`。API 层通过 XREAD 转发给客户端（单 agent 用 SSE，支持 `Last-Event-ID`/`since` 重连续传；圆桌用 WebSocket）。无 agent CLI 时回退到 `mock_agent.py`。
 
+### hermes-agent 集成（HERMES_HOME 打通）
+
+平台通过 `HERMES_HOME` 目录驱动外部 hermes-agent（`~/.hermes/hermes-agent`，Nous Research 的 self-improving agent）。**hermes 侧 profile 生命周期与平台 DB 完全解耦**——`hermes gateway run --profile X` 直接使用 `~/.hermes/profiles/X/`，平台 DB 的 `profiles` 表只是平台自己的管理视图。
+
+**目录布局**：
+
+```
+~/.hermes/                        # hermes-default（全局 home）
+  config.yaml                     # hermes 主配置（平台 deep-merge 写 advanced settings）
+  SOUL.md / skills/ / memories/
+  state.db / memory_store.db / sessions/
+  hermes-agent/                   # hermes 源码（独立仓库，改动需逐个 apply 补丁）
+  profiles/<handle>/              # 每个助手一个独立 home
+    config.yaml  SOUL.md  skills/  memories/  state.db  memory_store.db  sessions/
+```
+
+平台 DB `Profile.path` = `<home>/config.yaml`；**DB handle 带 `hermes-` 前缀**（`hermes-emotion-master` ↔ 目录 `emotion-master`），目录名匹配需去前缀。
+
+**技能双向同步**（`app/services/skill_sync_service.py`）：
+- **Direction A（DB→FS）**：SKILL.md frontmatter 保留**原始 name**（展示用）+ `metadata.platform_skill_id`（DB 技能 UUID，改名/删除反查的唯一键）。slug 仅作目录名，冲突时（中文名 → `unnamed-skill`、"API 测试"/"API 开发" → `api`）自动加 `-{id8}` 后缀；无标记同名目录 in-place 修复补标记。改名/删除按 id 标记清理（含 hash 后缀目录），旧 slug 残留会被 Direction B 重新入库造成 DB 重复。
+- **Direction B（FS→DB）**：`ingest_hermes_skills` 扫描全局 + 各 profile home，匹配优先按 `platform_skill_id`、回退 slug。Runner 启动 + 每日自动触发（`runner.py:_maybe_ingest_hermes_skills`，Redis `hermes:skills:last-ingest` 24h 冷却）。`AgentSkill.origin`：`platform`（平台创建，永不受扫描影响）/ `agent`（Direction B 入库，FS 目录消失自动 tombstone 为 disabled）。
+
+**配置同步**（`app/services/hermes_config_sync.py`）：平台设置（prompt_caching / terminal / compression / tool_output / privacy / **agent.reasoning_effort**）deep-merge 进全局 + 各 profile config.yaml。⚠️ `reasoning_effort` 必须写 `agent.reasoning_effort`——hermes 只从 `agent:` 段解析，顶层键不生效（旧版本平台写过顶层，`_LEGACY_TOP_LEVEL_KEYS` 自动清理）。只同步 DB 中存在（handle 去 `hermes-` 前缀匹配）的 profile 目录。
+
+**人设投影**：`Profile.system_prompt` 变更（含提示词演化 auto-apply）→ `sync_profile_soul` 写 `{profile_home}/SOUL.md`（清空则删文件）；create/clone/import profile 后立即投影 + `sync_hermes_configs` 补写 config overrides。
+
+**Profile 生命周期**（`app/api/v1/agents.py`）：
+- handle 改名 → FS home 自动迁移（`shutil.move`）并更新 path
+- path 修改 → 重投影（SOUL.md + config）
+- 删除 → best-effort `rmtree` 清理 FS home
+- `_ensure_profile_home` 创建 `profiles/<handle>/` + 空 config.yaml（hermes 首次运行补键）
+
+**记忆打通**（`agent_runner/runner_memory.py`）：平台 Postgres（`AgentMemory` user+profile 两级，profile 专属优先、全局回退；`MemoryEpisode` per-profile）与 hermes 侧 `memories/MEMORY.md` / `memory_store.db` **完全隔离**（设计决策）。consolidation 按会话所属 profile 分组独立整理，flat memory 落各自 profile 行；子进程用隔离 HERMES_HOME（scratch `memconsol-{user}/hermes-home`）消除隐式双写全局记忆。
+
+**ACP 子进程 env**（`agent_runner/acp_client.py:profile_env`）：只注入 `HERMES_HOME`（profile home，缺失时回退全局）+ `REDIS_URL`（clarify 回调桥）。HERMES_* 高级配置 env 已删除（当前 hermes 版本无消费者），config.yaml 是唯一通道。
+
+**运维注意**：
+- hermes-agent 是独立仓库：`cd ~/.hermes/hermes-agent && uv pip install -e ".[all,dev]"`；改动需逐个 apply 补丁（升级会被覆盖）
+- **清理 `~/.hermes` 前必须先 `ps aux | grep hermes` 核对进程**——`gateway run --profile X` 正在使用的 home 删除即数据丢失（曾误删运行中的 beta gateway）
+- hermes gateway 多 profile 复用：`hermes gateway run --profile <name>` 每个 profile 一个进程
+
 ### Redis 键约定
 | 键 | 用途 |
 |-----|---------|
