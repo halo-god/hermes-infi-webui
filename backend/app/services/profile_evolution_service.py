@@ -42,10 +42,16 @@ async def review_proposal(
     proposal.review_note = review_note
     proposal.reviewed_by = reviewer_id
     proposal.reviewed_at = datetime.now(timezone.utc)
+    profile: Profile | None = None
     if status == "approved":
         profile = await db.get(Profile, proposal.profile_id)
         if profile is not None:
             profile.system_prompt = proposal.proposed_prompt
     await db.commit()
     await db.refresh(proposal)
+    # Keep hermes's persistent persona file (SOUL.md) in sync with the DB —
+    # including auto-applied evolution results.
+    if status == "approved" and profile is not None:
+        from app.services.hermes_config_sync import sync_profile_soul
+        await sync_profile_soul(profile)
     return proposal

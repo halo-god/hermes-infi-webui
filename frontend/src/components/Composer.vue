@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /* 1:1 port of the prototype composer (hermes-app.js Composer): rich toolbar +
    profile dropdown (ACP) + circular send button. */
+import { pickDefaultProfile, rememberProfile } from "@/utils/profilePref";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import Icon from "@/components/Icon.vue";
 import ProfileListItem from "@/components/ProfileListItem.vue";
@@ -192,12 +193,15 @@ onMounted(async () => {
     if (props.profileId) {
       selected.value = profiles.value.find((p) => p.id === props.profileId) || profiles.value[0] || null;
     } else {
-      selected.value = profiles.value[0] || null;
+      selected.value = pickDefaultProfile(profiles.value);
     }
   } catch {
     /* ignore */
   }
 });
+// Remember the last-used profile so the next conversation defaults to it.
+watch(selected, (p) => { if (p) rememberProfile(p.id); });
+
 // Sync selected profile when profileId prop changes (e.g., conversation switch)
 watch(() => props.profileId, (newId) => {
   if (newId && profiles.value.length) {

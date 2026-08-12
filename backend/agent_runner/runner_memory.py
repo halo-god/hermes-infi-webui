@@ -322,9 +322,16 @@ async def handle_memory_consolidate(task: dict, agents: dict) -> None:
                 soul=parsed["soul"], last_consolidated_at=consolidation_ts,
             )
             if episode_summaries:
+                # Episodes are attributed to the conversation's profile when it
+                # has one, so each assistant's episodic recall stays scoped;
+                # profile-less conversations land in the global layer.
+                conv_profile: dict[uuid.UUID, uuid.UUID | None] = {
+                    c.id: c.profile_id for c in convos
+                }
                 for (conv_id, title, raw_chars), summary in zip(episode_meta, episode_summaries):
                     await memory_service.add_episode(
-                        db, uuid.UUID(user_id), conv_id, title, summary, raw_chars, consolidation_ts,
+                        db, uuid.UUID(user_id), conv_id, title, summary, raw_chars,
+                        consolidation_ts, profile_id=conv_profile.get(conv_id),
                         commit=False,
                     )
                 # Single commit for all episodes instead of N round-trips.

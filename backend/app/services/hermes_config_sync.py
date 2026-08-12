@@ -97,3 +97,29 @@ def sync_hermes_configs() -> dict:
     if synced:
         logger.info("Synced hermes config to: %s", ", ".join(synced))
     return {"synced": synced}
+
+
+async def sync_profile_soul(profile) -> None:
+    """Project Profile.system_prompt into {profile_home}/SOUL.md.
+
+    hermes reads SOUL.md from HERMES_HOME as its persistent persona file;
+    the platform's DB system_prompt (also injected per-turn via【角色设定】)
+    should not drift from it. Called whenever a profile's system_prompt
+    changes — including prompt-evolution auto-apply. Cleared prompt removes
+    the file. Best-effort, never raises.
+    """
+    if profile is None or not profile.path:
+        return
+    home = os.path.dirname(os.path.expanduser(profile.path))
+    if not os.path.isdir(home):
+        return
+    try:
+        soul_path = os.path.join(home, "SOUL.md")
+        if profile.system_prompt and profile.system_prompt.strip():
+            with open(soul_path, "w", encoding="utf-8") as f:
+                f.write(profile.system_prompt)
+            logger.info("Synced SOUL.md for profile %s", getattr(profile, "handle", "?"))
+        elif os.path.isfile(soul_path):
+            os.remove(soul_path)
+    except Exception:  # noqa: BLE001
+        logger.warning("Failed to sync SOUL.md for profile %s", getattr(profile, "handle", "?"), exc_info=True)

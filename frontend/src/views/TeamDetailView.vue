@@ -269,7 +269,10 @@ const kbAdapter = computed<WsAdapter>(() => ({
   restoreVersion: (fid, v) => teamsApi.restoreKnowledgeVersion(teamId.value, fid, v),
   upload: async (file) => {
     await teamsApi.uploadKnowledge(teamId.value, file);
-    await load();
+    // loadKnowledge refreshes BOTH the panel tree (detail.knowledge via
+    // load()) and the tab list (knowledgeItems) — load() alone leaves the
+    // newly uploaded file invisible in the list until tab switch / F5.
+    await loadKnowledge();
   },
 }));
 
@@ -525,6 +528,9 @@ function openProject(id: string) {
 async function deleteTeam() {
   if (!confirm(`确认解散团队「${team.value.name}」？此操作不可恢复。`)) return;
   await teamsApi.remove(teamId.value);
+  // Refresh the sidebar team list — otherwise the dissolved team lingers
+  // in the sidebar until F5.
+  await chat.loadTeams();
   router.push("/");
 }
 </script>

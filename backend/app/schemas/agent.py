@@ -135,6 +135,20 @@ class ProfileExport(BaseModel):
     system_prompt: str | None = None
     skills: list[str] = []
     featured: bool = False
+    # Full per-profile bindings so export/import round-trips a complete
+    # assistant (knowledge, MCP, staged prompts, multi-agent orchestration).
+    knowledge_ids: list[str] = []
+    knowledge_folder_ids: list[str] = []
+    knowledge_team_ids: list[str] = []
+    mcp_server_names: list[str] = []
+    is_moa: bool = False
+    moa_target_profile_ids: list[str] = []
+    max_iterations: int = 50
+    staged_prompts: dict | None = None
+    staged_enabled: bool = False
+    is_chain: bool = False
+    chain_target_profile_ids: list[str] = []
+    is_research: bool = False
 
 
 class ScanProfilesResponse(BaseModel):

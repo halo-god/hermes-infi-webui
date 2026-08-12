@@ -217,8 +217,10 @@ async function confirmMove() {
   moveLoading.value = true;
   try {
     await filesApi.moveToFolder(moveTarget.value.id, selectedMoveFolder.value);
-    // Remove from current view if moved to a different folder
-    files.value = files.value.filter((f) => f.id !== moveTarget.value!.id);
+    // Reload the CURRENT folder: if the file was moved INTO the folder being
+    // browsed it must appear (a naive filter would wrongly remove it); if it
+    // moved out it must disappear.
+    await loadFiles(currentFolder.value);
     ns.toast(`已移动到 ${selectedMoveFolder.value === "/" ? "根目录" : selectedMoveFolder.value}`, "ok");
     showMoveModal.value = false;
     moveTarget.value = null;

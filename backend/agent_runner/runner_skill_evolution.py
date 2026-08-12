@@ -72,7 +72,7 @@ async def handle_skill_evolution(task: dict, agents: dict) -> None:
                 await _set_status("error", f"未通过门禁，未生成提案: {exc}")
                 return
 
-            db.add(SkillProposal(
+            proposal = SkillProposal(
                 skill_id=skill.id,
                 proposed_content=result.proposed_content,
                 rationale=result.rationale,
@@ -81,8 +81,26 @@ async def handle_skill_evolution(task: dict, agents: dict) -> None:
                 diff_ratio=result.diff_ratio,
                 dataset_summary=result.dataset_summary,
                 status="pending",
-            ))
-            await db.commit()
+            )
+            db.add(proposal)
+            await db.flush()
+            # Auto-apply ("Self-improvement review"): when auto mode is on AND
+            # the real (LLM) optimizer produced this proposal, approve it
+            # immediately through the SINGLE write-back path (AgentSkill.content
+            # + hermes SKILL.md sync). Gated on skill_evolution_enabled so the
+            # LLM-free stub's placeholder proposals never auto-apply.
+            if settings.evolution_auto_enabled and settings.skill_evolution_enabled:
+                from app.services.skill_evolution_service import review_proposal
+                await review_proposal(
+                    db, proposal, reviewer_id=None, status="approved",
+                    review_note="auto-applied",
+                )
+                logger.info(
+                    "auto-evolution: skill %s proposal auto-applied (score %.2f→%.2f)",
+                    skill_id[:8], result.eval_score_before, result.eval_score_after,
+                )
+            else:
+                await db.commit()
 
         await _set_status("done")
     except Exception as exc:  # noqa: BLE001

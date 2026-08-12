@@ -49,7 +49,7 @@ async def handle_profile_evolution(task: dict, agents: dict) -> None:
                 await _set_status("error", f"未通过门禁，未生成提案: {exc}")
                 return
 
-            db.add(ProfilePromptProposal(
+            proposal = ProfilePromptProposal(
                 profile_id=profile.id,
                 proposed_prompt=result.proposed_prompt,
                 rationale=result.rationale,
@@ -58,8 +58,23 @@ async def handle_profile_evolution(task: dict, agents: dict) -> None:
                 diff_ratio=result.diff_ratio,
                 dataset_summary=result.dataset_summary,
                 status="pending",
-            ))
-            await db.commit()
+            )
+            db.add(proposal)
+            await db.flush()
+            # Auto-apply: same gate as skill evolution — only the real LLM
+            # optimizer's proposals are applied automatically (reviewer=None).
+            if settings.evolution_auto_enabled and settings.skill_evolution_enabled:
+                from app.services.profile_evolution_service import review_proposal
+                await review_proposal(
+                    db, proposal, reviewer_id=None, status="approved",
+                    review_note="auto-applied",
+                )
+                logger.info(
+                    "auto-evolution: profile %s proposal auto-applied (score %.2f→%.2f)",
+                    profile_id[:8], result.eval_score_before, result.eval_score_after,
+                )
+            else:
+                await db.commit()
 
         await _set_status("done")
     except Exception as exc:  # noqa: BLE001

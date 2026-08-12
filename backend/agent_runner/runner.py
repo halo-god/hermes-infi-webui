@@ -1365,6 +1365,15 @@ class Runner:
             await self._record_profile_firing(
                 conversation_id, acc["current_msg_id"], profile_id, skill_firing_excerpt,
             )
+        # Auto-evolution ("Self-improvement review"): after a completed turn,
+        # check whether the involved skills / profile qualify for an automatic
+        # evolution run (sample threshold + cooldown). Best-effort — a failure
+        # here must never break the turn completion path.
+        if status == "complete":
+            try:
+                await self._maybe_trigger_auto_evolution(matched_skill_ids, profile_id)
+            except Exception:  # noqa: BLE001
+                logger.debug("auto-evolution trigger failed", exc_info=True)
         await R.clear_cancel(conversation_id)
         await R.publish_event(
             conversation_id,
@@ -1659,6 +1668,39 @@ class Runner:
                 trigger_query_excerpt=trigger_excerpt,
             ))
             await db.commit()
+
+    async def _maybe_trigger_auto_evolution(
+        self, matched_skill_ids: list[uuid.UUID] | None, profile_id: str | None,
+    ) -> None:
+        """Auto-evolution: enqueue skill/profile evolution runs for entities
+        that accumulated enough firing samples and are past the cooldown.
+
+        All checks live in evolution_service (config-gated on
+        evolution_auto_enabled AND skill_evolution_enabled — the LLM-free
+        stub never auto-triggers). Best-effort: callers wrap this in
+        try/except so the chat hot path is never blocked."""
+        from app.services import evolution_service
+
+        # Profile (the turn's bound persona) — one query, own session.
+        if profile_id:
+            try:
+                profile_uuid = uuid.UUID(profile_id)
+            except (ValueError, TypeError):
+                profile_uuid = None
+            if profile_uuid:
+                async with async_session_maker() as db:
+                    if await evolution_service.should_trigger_profile(db, profile_uuid):
+                        await evolution_service.enqueue_profile_evolution(profile_uuid)
+
+        # Skills whose content was injected into this turn.
+        for sid in (matched_skill_ids or []):
+            try:
+                skill_uuid = uuid.UUID(str(sid))
+            except (ValueError, TypeError):
+                continue
+            async with async_session_maker() as db:
+                if await evolution_service.should_trigger_skill(db, skill_uuid):
+                    await evolution_service.enqueue_skill_evolution(skill_uuid)
 
     async def _set_session_id(
         self, conversation_id: str, session_id: str, profile_id: str = "", stage: str = "",

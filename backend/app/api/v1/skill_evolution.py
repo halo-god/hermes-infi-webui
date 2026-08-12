@@ -146,6 +146,40 @@ async def list_all_skills(
     return [AdminSkillOut.model_validate(s, from_attributes=True) for s in skills]
 
 
+@router.get("/auto-status")
+async def auto_evolution_status(
+    user: User = Depends(require_super_admin()),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Auto-evolution ("Self-improvement review") status for the admin UI.
+
+    Reports the config switches plus the most recent auto-applied proposal and
+    the auto-applied counts per evolution type — lets admins see at a glance
+    that automatic evolution is working without digging through the queue.
+    """
+    from sqlalchemy import func, select
+    from app.db.models.profile_evolution import ProfilePromptProposal
+    from app.db.models.skill_evolution import SkillProposal
+
+    async def _auto_stats(model):
+        row = (await db.execute(
+            select(
+                func.count(),
+                func.max(model.created_at),
+            ).where(model.review_note == "auto-applied")
+        )).one()
+        return {"count": row[0] or 0, "last_applied_at": row[1]}
+
+    return {
+        "evolution_auto_enabled": bool(settings.evolution_auto_enabled),
+        "real_optimizer_enabled": bool(settings.skill_evolution_enabled),
+        "cooldown_hours": settings.evolution_auto_cooldown_hours,
+        "min_firings": settings.evolution_auto_min_firings,
+        "skills": await _auto_stats(SkillProposal),
+        "profiles": await _auto_stats(ProfilePromptProposal),
+    }
+
+
 class SkillProposalOut(BaseModel):
     id: uuid.UUID
     skill_id: uuid.UUID

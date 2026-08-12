@@ -19,6 +19,7 @@ import { profileEvolutionApi, type ProfileProposal } from "@/api/profileEvolutio
 import { colorDiff, computeLineDiff } from "@/utils/diff";
 import { useAuthStore } from "@/stores/auth";
 import { useBrandingStore } from "@/stores/branding";
+import { useChatStore } from "@/stores/chat";
 import { useNotificationStore } from "@/stores/notifications";
 import { usePresence } from "@/composables/usePresence";
 import type {
@@ -40,6 +41,7 @@ import type {
 
 const authStore = useAuthStore();
 const branding = useBrandingStore();
+const chat = useChatStore();
 const ns = useNotificationStore();
 const isSuperAdmin = computed(() => authStore.user?.role === "super_admin");
 const { queryPresence, getStatus } = usePresence();
@@ -394,6 +396,26 @@ const evoPreviewOpen = ref<Set<string>>(new Set());
 const evoPreviewLoading = ref<Set<string>>(new Set());
 const evoPreview = ref<Record<string, DatasetPreview>>({});
 let evoPollTimer: ReturnType<typeof setInterval> | null = null;
+// Auto-evolution ("Self-improvement review") status card data.
+const evoAutoStatus = ref<{
+  evolution_auto_enabled: boolean;
+  real_optimizer_enabled: boolean;
+  cooldown_hours: number;
+  min_firings: number;
+  skills: { count: number; last_applied_at: string | null };
+  profiles: { count: number; last_applied_at: string | null };
+} | null>(null);
+async function loadEvoAutoStatus() {
+  try { evoAutoStatus.value = await skillEvolutionApi.autoStatus(); } catch { /* admin card is optional */ }
+}
+function fmtAppliedAt(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+function isAutoApplied(p: { review_note?: string | null }): boolean {
+  return p.review_note === "auto-applied";
+}
 
 async function loadEvoSkills() {
   evoSkillsLoading.value = true;
@@ -590,8 +612,8 @@ watch(tab, (t) => {
   if (t === "mcp") loadMcpServers();
   if (t === "performance") { loadPerformance(); loadHealth(false); }
   if (t === "usage") loadUsage();
-  if (t === "skill-evolution") { loadEvoSkills(); loadEvoProposals(); }
-  if (t === "profile-evolution") loadPevoProposals();
+  if (t === "skill-evolution") { loadEvoSkills(); loadEvoProposals(); loadEvoAutoStatus(); }
+  if (t === "profile-evolution") { loadPevoProposals(); loadEvoAutoStatus(); }
 });
 watch([usagePeriod, usageBreakdown], () => { if (tab.value === "usage") loadUsage(); });
 watch(logCategory, (c) => {
@@ -1140,6 +1162,9 @@ async function saveProfile() {
     }
     showProfileForm.value = false;
     await loadProfiles();
+    // Global profile store (sidebar colors, chat persona names, scheduled
+    // task assistant dropdown) must follow admin edits immediately.
+    await chat.loadProfiles();
   } catch (e: unknown) {
     profileError.value = (e as { response?: { data?: { detail?: string } } }).response?.data?.detail || "保存失败";
   } finally {
@@ -1150,12 +1175,14 @@ async function deleteProfileItem(p: Profile) {
   if (!confirm(`删除助手「${p.name}」？此操作不可恢复。`)) return;
   await profilesApi.remove(p.id);
   await loadProfiles();
+  await chat.loadProfiles();
 }
 
 async function cloneProfile(p: Profile) {
   try {
     await profilesApi.clone(p.id);
     await loadProfiles();
+    await chat.loadProfiles();
   } catch { /* noop */ }
 }
 
@@ -2787,6 +2814,29 @@ async function confirmImport() {
           </div>
         </div>
 
+        <!-- Auto-evolution ("Self-improvement review") status card -->
+        <div class="section-card" style="margin-bottom: 16px; padding: 14px 16px">
+          <div class="section-title" style="margin-bottom: 8px">
+            <Icon name="bolt" :size="14" /> 自动演化（Self-improvement review）
+          </div>
+          <div v-if="!evoAutoStatus" class="text-mute-sm">加载中…</div>
+          <div v-else style="display: flex; flex-wrap: wrap; gap: 10px 22px; font-size: 12px; color: var(--ink-mute)">
+            <span>开关：
+              <b :style="{ color: evoAutoStatus.evolution_auto_enabled ? 'var(--ok)' : 'var(--danger)' }">
+                {{ evoAutoStatus.evolution_auto_enabled ? "已开启" : "关闭" }}
+              </b>
+              <span v-if="!evoAutoStatus.evolution_auto_enabled" class="text-mute-sm">（需同时开启真实 LLM 优化器才生效）</span>
+            </span>
+            <span>真实优化器：<b>{{ evoAutoStatus.real_optimizer_enabled ? "开启" : "关闭" }}</b></span>
+            <span>触发条件：<b>{{ evoAutoStatus.min_firings }} 次样本</b> / 冷却 <b>{{ evoAutoStatus.cooldown_hours }}h</b></span>
+            <span>技能自动应用：<b>{{ evoAutoStatus.skills.count }} 次</b>（最近 {{ fmtAppliedAt(evoAutoStatus.skills.last_applied_at) }}）</span>
+            <span>提示词自动应用：<b>{{ evoAutoStatus.profiles.count }} 次</b>（最近 {{ fmtAppliedAt(evoAutoStatus.profiles.last_applied_at) }}）</span>
+          </div>
+          <div style="font-size: 11px; color: var(--ink-faint); margin-top: 6px">
+            会话结束后自动触发：技能/助手样本数达标且超过冷却期即自动演化；通过门禁的提案自动应用（写回技能文件 / 助手提示词），此页保留手动触发与审批作为兜底。
+          </div>
+        </div>
+
         <!-- All skills — trigger evolution -->
         <div class="section-card" style="margin-bottom: 16px">
           <div class="section-head">
@@ -2862,6 +2912,7 @@ async function confirmImport() {
                       color: p.status === 'approved' ? 'var(--ok)' : p.status === 'rejected' ? 'var(--danger)' : 'var(--accent-deep)',
                       borderColor: (p.status === 'approved' ? 'var(--ok)' : p.status === 'rejected' ? 'var(--danger)' : 'var(--accent-deep)') + '44',
                     }">{{ { pending: '待审', approved: '已批准', rejected: '已驳回' }[p.status] }}</span>
+                    <span v-if="isAutoApplied(p)" class="fb-st-pill" style="color: var(--accent-deep); border-color: var(--accent-deep)44">系统自动</span>
                   </div>
                   <div style="font-size: 11.5px; color: var(--ink-mute); margin-top: 4px">
                     分数 {{ p.eval_score_before.toFixed(2) }} → {{ p.eval_score_after.toFixed(2) }}
@@ -2895,6 +2946,20 @@ async function confirmImport() {
       <!-- P2-4 Profile prompt evolution -->
       <template v-else-if="tab === 'profile-evolution'">
         <div style="margin-bottom: 14px"><div class="heading-serif">助手提示词演化</div><div class="text-mute-sm" style="margin-top:2px">基于真实对话样本，用 GEPA 优化助手的 system_prompt，产出待审批的提案。审批通过后写回助手人设。</div></div>
+        <!-- Auto-evolution status card -->
+        <div class="section-card" style="margin-bottom: 16px; padding: 14px 16px">
+          <div class="section-title" style="margin-bottom: 8px"><Icon name="bolt" :size="14" /> 自动演化（Self-improvement review）</div>
+          <div v-if="!evoAutoStatus" class="text-mute-sm">加载中…</div>
+          <div v-else style="display: flex; flex-wrap: wrap; gap: 10px 22px; font-size: 12px; color: var(--ink-mute)">
+            <span>开关：<b :style="{ color: evoAutoStatus.evolution_auto_enabled ? 'var(--ok)' : 'var(--danger)' }">{{ evoAutoStatus.evolution_auto_enabled ? "已开启" : "关闭" }}</b></span>
+            <span>真实优化器：<b>{{ evoAutoStatus.real_optimizer_enabled ? "开启" : "关闭" }}</b></span>
+            <span>触发条件：<b>{{ evoAutoStatus.min_firings }} 次样本</b> / 冷却 <b>{{ evoAutoStatus.cooldown_hours }}h</b></span>
+            <span>提示词自动应用：<b>{{ evoAutoStatus.profiles.count }} 次</b>（最近 {{ fmtAppliedAt(evoAutoStatus.profiles.last_applied_at) }}）</span>
+          </div>
+          <div style="font-size: 11px; color: var(--ink-faint); margin-top: 6px">
+            会话结束后自动触发：助手样本数达标且超过冷却期即自动演化；通过门禁的提案自动写回助手人设。此页保留手动触发与审批作为兜底。
+          </div>
+        </div>
         <div class="section-card">
           <div class="section-body flush">
             <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
@@ -2911,6 +2976,7 @@ async function confirmImport() {
             <div v-for="p in pevoProposals" :key="p.id" class="row-item" style="padding:14px 16px;flex-direction:column;align-items:stretch;gap:8px">
               <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
                 <span class="role-pill" :style="{ fontSize: '10px' }">{{ p.status }}</span>
+                <span v-if="isAutoApplied(p)" class="fb-st-pill" style="color: var(--accent-deep); border-color: var(--accent-deep)44">系统自动</span>
                 <span style="font-size:12px;color:var(--ink-mute)">助手 {{ p.profile_id.slice(0, 8) }}</span>
                 <span style="font-size:12px;color:var(--ink-mute)">分数 {{ p.eval_score_before.toFixed(2) }} → {{ p.eval_score_after.toFixed(2) }}（+{{ (p.eval_score_after - p.eval_score_before).toFixed(2) }}）</span>
                 <span style="font-size:12px;color:var(--ink-mute)">改动 {{ (p.diff_ratio * 100).toFixed(0) }}%</span>

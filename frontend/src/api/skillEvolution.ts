@@ -64,4 +64,15 @@ export const skillEvolutionApi = {
     http.get("/skill-evolution/proposals", { params }).then((r) => r.data),
   review: (proposalId: string, payload: { status: "approved" | "rejected"; review_note?: string }): Promise<SkillProposal> =>
     http.patch(`/skill-evolution/proposals/${proposalId}`, payload).then((r) => r.data),
+  // Auto-evolution ("Self-improvement review") status — config switches +
+  // auto-applied counts for the admin monitoring card.
+  autoStatus: (): Promise<{
+    evolution_auto_enabled: boolean;
+    real_optimizer_enabled: boolean;
+    cooldown_hours: number;
+    min_firings: number;
+    skills: { count: number; last_applied_at: string | null };
+    profiles: { count: number; last_applied_at: string | null };
+  }> =>
+    http.get("/skill-evolution/auto-status").then((r) => r.data),
 };

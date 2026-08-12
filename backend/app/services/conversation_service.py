@@ -1183,13 +1183,18 @@ async def send_chain(
     return user_msg, chain_msg
 
 
-async def _build_memory_prompt(db: AsyncSession, owner_id: uuid.UUID | None) -> str | None:
-    """Load the user's agent memory and format it as a system-prompt section."""
+async def _build_memory_prompt(
+    db: AsyncSession, owner_id: uuid.UUID | None, profile_id: uuid.UUID | None = None,
+) -> str | None:
+    """Load the user's agent memory and format it as a system-prompt section.
+
+    Multi-profile: resolves the ACTIVE profile's memory first, falling back
+    to the global user memory (profile-scoped row wins, else global)."""
     if not owner_id:
         return None
     from app.services import memory_service
 
-    mem = await memory_service.get_memory(db, owner_id)
+    mem = await memory_service.get_memory(db, owner_id, profile_id=profile_id)
     if mem is None:
         return None
     parts = []
@@ -1214,6 +1219,7 @@ _SKILLS_LIMIT = 2            # max skills injected per turn — see search_skill
 
 async def _build_episodic_memory_prompt(
     db: AsyncSession, owner_id: uuid.UUID | None, query_text: str,
+    profile_id: uuid.UUID | None = None,
 ) -> str | None:
     """Retrieve pg_trgm-matched episode summaries and format as a system-prompt
     section. Unlike _build_knowledge_prompt (curated static docs, concatenated
@@ -1224,7 +1230,9 @@ async def _build_episodic_memory_prompt(
         return None
     from app.services import memory_service
 
-    episodes = await memory_service.search_episodes(db, owner_id, query_text, limit=_EPISODIC_LIMIT)
+    episodes = await memory_service.search_episodes(
+        db, owner_id, query_text, limit=_EPISODIC_LIMIT, profile_id=profile_id,
+    )
     if not episodes:
         return None
     parts = [f"- 「{e.title}」{e.summary[:_EPISODIC_PER_ITEM]}" for e in episodes]
@@ -1832,7 +1840,7 @@ async def dispatch(
 
     # Inject the user's long-term agent memory (semi-stable: changes only on
     # consolidation). Placed after profile+knowledge for prefix-cache stability.
-    memory_prompt = await _build_memory_prompt(db, owner_id)
+    memory_prompt = await _build_memory_prompt(db, owner_id, profile_id=effective_profile_id)
     if memory_prompt:
         system_prompt = f"{system_prompt}\n\n{memory_prompt}" if system_prompt else memory_prompt
 
@@ -1866,7 +1874,9 @@ async def dispatch(
     # skills (dynamic per turn). Gated by a kill switch.
     matched_skill_ids: list[uuid.UUID] = []
     if settings.memory_episodic_injection_enabled:
-        episodic_prompt = await _build_episodic_memory_prompt(db, owner_id, text)
+        episodic_prompt = await _build_episodic_memory_prompt(
+            db, owner_id, text, profile_id=effective_profile_id,
+        )
         if episodic_prompt:
             system_prompt = f"{system_prompt}\n\n{episodic_prompt}" if system_prompt else episodic_prompt
         skills_prompt, matched_skill_ids = await _build_skills_prompt(db, profile, owner_id, text)
@@ -2741,7 +2751,7 @@ async def dispatch_group(
             if skills_prompt:
                 system_prompt = f"{system_prompt}\n\n{skills_prompt}" if system_prompt else skills_prompt
 
-        memory_prompt = await _build_memory_prompt(db, owner_id)
+        memory_prompt = await _build_memory_prompt(db, owner_id, profile_id=effective_profile_id)
         if memory_prompt:
             system_prompt = f"{system_prompt}\n\n{memory_prompt}" if system_prompt else memory_prompt
         if knowledge_ids:
@@ -2775,7 +2785,9 @@ async def dispatch_group(
 
     # 圆桌模式：多 Agent 并行 — 每个目标独立解析自己绑定的 Profile 人设/工作目录，
     # 不再用单一会话级 Profile 覆盖全部参与者（这正是此前"圆桌形同虚设"的根因）。
-    memory_prompt = await _build_memory_prompt(db, owner_id)
+    # Memory resolves against the conversation's profile (targets have their
+    # own persona but share the group's memory context).
+    memory_prompt = await _build_memory_prompt(db, owner_id, profile_id=convo.profile_id)
     request_knowledge_prompt = (
         await _build_request_knowledge_prompt(db, knowledge_ids, owner_id=owner_id)
         if knowledge_ids else None

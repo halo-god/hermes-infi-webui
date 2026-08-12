@@ -9,6 +9,7 @@ import Icon from "@/components/Icon.vue";
 import Composer from "@/components/Composer.vue";
 import ConfirmModal from "@/components/ConfirmModal.vue";
 import ConvoSeal from "@/components/ConvoSeal.vue";
+import { storedProfileId } from "@/utils/profilePref";
 import { useChatStore } from "@/stores/chat";
 import { useAuthStore } from "@/stores/auth";
 import { useBrandingStore } from "@/stores/branding";
@@ -71,8 +72,12 @@ onMounted(async () => {
   if (queryProfile && chat.profiles.find((p) => p.id === queryProfile)) {
     landingProfileId.value = queryProfile;
   } else if (chat.profiles.length) {
-    const firstProfile = chat.profiles.find((p) => p.is_active && p.default_agent_id);
-    if (firstProfile) landingProfileId.value = firstProfile.id;
+    // Remembered profile wins; otherwise the first active one.
+    const remembered = storedProfileId();
+    const hit = remembered ? chat.profiles.find((p) => p.id === remembered && p.is_active && p.default_agent_id) : null;
+    landingProfileId.value = hit?.id
+      || chat.profiles.find((p) => p.is_active && p.default_agent_id)?.id
+      || "";
   }
   const cid = route.query.c as string | undefined;
   const teamCtx = route.query.team as string | undefined;

@@ -186,6 +186,19 @@ class Settings(BaseSettings):
     skill_evolution_llm_api_base: str = ""   # optional self-hosted/proxy endpoint
     skill_evolution_llm_max_calls_per_run: int = 60  # hard cap on judge-LM calls, on top of GEPA's own budget
 
+    # ── Auto-evolution ("Self-improvement review") ──
+    # After every completed turn the runner checks whether any involved skill
+    # or profile has accumulated enough real firing samples (≥
+    # evolution_auto_min_firings) AND hasn't evolved within the cooldown
+    # window; if so it enqueues an evolution run automatically. Proposals that
+    # pass the gates are applied automatically (reviewed_by=None) — writing
+    # AgentSkill.content (+ hermes SKILL.md sync) and Profile.system_prompt.
+    # Auto mode is gated on skill_evolution_enabled too: the LLM-free stub
+    # produces placeholder proposals that must NEVER be auto-applied.
+    evolution_auto_enabled: bool = False
+    evolution_auto_cooldown_hours: int = 24   # per skill/profile between auto runs
+    evolution_auto_min_firings: int = 8       # real firing samples before auto-trigger
+
     # ── P1-1 RAG: vector retrieval over team knowledge ──
     # Off by default. When off, _build_knowledge_prompt keeps the legacy
     # whole-document injection (truncated at _KNOWLEDGE_TOTAL). When on AND a

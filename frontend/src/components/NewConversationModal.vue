@@ -2,6 +2,7 @@
 import { onMounted, ref } from "vue";
 import Icon from "@/components/Icon.vue";
 import ModalShell from "@/components/ModalShell.vue";
+import { pickDefaultProfile, rememberProfile } from "@/utils/profilePref";
 import { profilesApi, type Profile } from "@/api/agents";
 
 const emit = defineEmits<{ close: []; created: [profileId: string] }>();
@@ -13,7 +14,7 @@ const loading = ref(true);
 onMounted(async () => {
   try {
     profiles.value = await profilesApi.list();
-    selected.value = profiles.value[0] || null;
+    selected.value = pickDefaultProfile(profiles.value);
   } catch {
     /* ignore */
   } finally {
@@ -25,8 +26,12 @@ function pick(p: Profile) {
   selected.value = p;
 }
 function confirm() {
-  if (selected.value) emit("created", selected.value.id);
-  else emit("created", "");
+  if (selected.value) {
+    rememberProfile(selected.value.id);
+    emit("created", selected.value.id);
+  } else {
+    emit("created", "");
+  }
 }
 </script>
 

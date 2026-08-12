@@ -1,6 +1,8 @@
 """Agent registry (from ACP discovery) + Profile CRUD."""
 from __future__ import annotations
 import json
+import logging
+import os
 import uuid
 from datetime import datetime, timezone
 
@@ -22,6 +24,31 @@ from app.schemas.agent import (
     ProfileUpdate,
     ScanProfilesResponse,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _ensure_profile_home(handle: str) -> str | None:
+    """Create {HERMES_HOME}/profiles/<handle>/ with a minimal config.yaml so a
+    platform-created profile runs in its OWN isolated HERMES_HOME (memory,
+    sessions, skills) instead of silently sharing the global home with every
+    other path-less profile."""
+    from app.services.skill_sync_service import _get_hermes_home
+    base = _get_hermes_home()
+    if not base:
+        return None
+    home = os.path.join(base, "profiles", handle)
+    try:
+        os.makedirs(home, exist_ok=True)
+        config_path = os.path.join(home, "config.yaml")
+        if not os.path.isfile(config_path):
+            with open(config_path, "w", encoding="utf-8") as f:
+                f.write("")  # hermes initializes missing keys on first run
+        return config_path
+    except Exception:  # noqa: BLE001
+        logger.warning("Failed to create profile home for %s", handle, exc_info=True)
+        return None
+
 
 router = APIRouter()
 
@@ -160,6 +187,10 @@ async def create_profile(
     db: AsyncSession = Depends(get_db),
 ):
     data = _serialize_skills(payload.model_dump())
+    # Platform-created profiles get their own isolated HERMES_HOME — without
+    # a path they'd silently share the global home with every other profile.
+    if not data.get("path"):
+        data["path"] = _ensure_profile_home(data.get("handle") or data["name"])
     p = Profile(**data)
     db.add(p)
     await db.commit()
@@ -181,6 +212,11 @@ async def update_profile(
         setattr(p, field, value)
     await db.commit()
     await db.refresh(p)
+    # system_prompt edits must also project into the profile's SOUL.md so
+    # hermes's persistent persona follows the DB truth.
+    if "system_prompt" in payload.model_dump(exclude_unset=True):
+        from app.services.hermes_config_sync import sync_profile_soul
+        await sync_profile_soul(p)
     return ProfileOut.model_validate(p)
 
 
@@ -203,13 +239,16 @@ async def clone_profile(
     user: User = Depends(require_permission("agent.manage")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Clone an existing profile — copies all fields, generates a new handle."""
+    """Clone an existing profile — copies ALL fields, generates a new handle
+    and a fresh isolated HERMES_HOME (never shares the source's memory /
+    sessions / skills dirs)."""
     p = await db.get(Profile, profile_id)
     if p is None:
         raise HTTPException(status_code=404, detail="助手不存在")
+    new_handle = f"{p.handle}-copy-{uuid.uuid4().hex[:6]}"
     clone = Profile(
         name=f"{p.name} (副本)",
-        handle=f"{p.handle}-copy-{uuid.uuid4().hex[:6]}",
+        handle=new_handle,
         scope=p.scope,
         color=p.color,
         icon=p.icon,
@@ -217,10 +256,24 @@ async def clone_profile(
         default_agent_id=p.default_agent_id,
         default_model=p.default_model,
         team_id=p.team_id,
-        path=p.path,
+        # Fresh clean home — the clone starts with its own memory/sessions.
+        path=_ensure_profile_home(new_handle),
         system_prompt=p.system_prompt,
         skills=p.skills,
         featured=False,
+        # Full per-profile bindings (knowledge, MCP, staged, orchestration).
+        knowledge_ids=p.knowledge_ids,
+        knowledge_folder_ids=p.knowledge_folder_ids,
+        knowledge_team_ids=p.knowledge_team_ids,
+        mcp_server_names=p.mcp_server_names,
+        is_moa=p.is_moa,
+        moa_target_profile_ids=p.moa_target_profile_ids,
+        max_iterations=p.max_iterations,
+        staged_prompts=p.staged_prompts,
+        staged_enabled=p.staged_enabled,
+        is_chain=p.is_chain,
+        chain_target_profile_ids=p.chain_target_profile_ids,
+        is_research=p.is_research,
     )
     db.add(clone)
     await db.commit()
@@ -256,6 +309,18 @@ async def export_profile(
         system_prompt=p.system_prompt,
         skills=skills,
         featured=p.featured,
+        knowledge_ids=list(p.knowledge_ids or []),
+        knowledge_folder_ids=list(p.knowledge_folder_ids or []),
+        knowledge_team_ids=list(p.knowledge_team_ids or []),
+        mcp_server_names=list(p.mcp_server_names or []),
+        is_moa=bool(p.is_moa),
+        moa_target_profile_ids=list(p.moa_target_profile_ids or []),
+        max_iterations=p.max_iterations or 50,
+        staged_prompts=p.staged_prompts,
+        staged_enabled=bool(p.staged_enabled),
+        is_chain=bool(p.is_chain),
+        chain_target_profile_ids=list(p.chain_target_profile_ids or []),
+        is_research=bool(p.is_research),
     )
 
 
@@ -290,6 +355,20 @@ async def import_profiles(
             system_prompt=item.system_prompt,
             skills=json.dumps(item.skills, ensure_ascii=False) if item.skills else None,
             featured=item.featured,
+            # Restore full per-profile bindings + own isolated home.
+            knowledge_ids=item.knowledge_ids,
+            knowledge_folder_ids=item.knowledge_folder_ids,
+            knowledge_team_ids=item.knowledge_team_ids,
+            mcp_server_names=item.mcp_server_names,
+            is_moa=item.is_moa,
+            moa_target_profile_ids=item.moa_target_profile_ids,
+            max_iterations=item.max_iterations,
+            staged_prompts=item.staged_prompts,
+            staged_enabled=item.staged_enabled,
+            is_chain=item.is_chain,
+            chain_target_profile_ids=item.chain_target_profile_ids,
+            is_research=item.is_research,
+            path=_ensure_profile_home(handle),
         )
         db.add(p)
         created.append(p)

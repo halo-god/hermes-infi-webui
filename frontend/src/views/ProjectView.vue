@@ -284,11 +284,17 @@ async function addTask() {
   const t = await projectsApi.createTask(projectId.value, { title: v });
   tasks.value.push(t);
   newTaskTitle.value = "";
+  // Progress bar + activity log must follow: creating a task changes the
+  // completion percentage and records activity.
+  syncProgressLocal();
+  loadActivity().catch(() => {});
 }
 async function deleteTask(t: Task) {
   if (!confirm(`删除任务「${t.title}」？`)) return;
   await projectsApi.deleteTask(t.id);
   tasks.value = tasks.value.filter((x) => x.id !== t.id);
+  syncProgressLocal();
+  loadActivity().catch(() => {});
 }
 
 // ── Kanban drag-and-drop ──
