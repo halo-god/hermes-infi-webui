@@ -6,7 +6,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import Query, APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -56,21 +56,23 @@ def _to_out(mem) -> MemoryOut:
 
 @router.get("", response_model=MemoryOut)
 async def get_memory(
+    profile_id: uuid.UUID | None = Query(None, description="助手（profile）专属记忆；缺省返回全局记忆"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> MemoryOut:
-    mem = await memory_service.get_memory(db, user.id)
+    mem = await memory_service.get_memory(db, user.id, profile_id=profile_id)
     return _to_out(mem)
 
 
 @router.put("", response_model=MemoryOut)
 async def update_memory(
     payload: MemoryUpdate,
+    profile_id: uuid.UUID | None = Query(None, description="写入该助手的专属记忆；缺省写全局记忆"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> MemoryOut:
     # None means "unchanged", so validate against the merged result.
-    current = await memory_service.get_memory(db, user.id)
+    current = await memory_service.get_memory(db, user.id, profile_id=profile_id)
     effective = {
         "notes": payload.notes if payload.notes is not None else (current.notes if current else None),
         "user_profile": payload.user_profile
@@ -90,6 +92,7 @@ async def update_memory(
         notes=payload.notes,
         user_profile=payload.user_profile,
         soul=payload.soul,
+        profile_id=profile_id,
     )
     return _to_out(mem)
 
@@ -289,30 +292,37 @@ async def import_skill_zip(
     if skill_md is None:
         raise HTTPException(status_code=400, detail="ZIP 中未找到 SKILL.md，不是标准技能包")
 
-    from app.services.skill_sync_service import _get_hermes_home, _slugify, parse_skill_md
+    # Extract resource files into the hermes skills dir(s) — the SKILL.md
+    # itself is projected to global + every profile home by Direction A, so
+    # resources must land in the SAME homes or profile agents get a skill
+    # whose scripts/data are missing.
+    from app.services.skill_sync_service import (
+        _get_hermes_home, _profile_homes, _slugify, parse_skill_md,
+    )
 
     parsed = parse_skill_md(skill_md) or {}
     name = parsed.get("name") or "unnamed-skill"
     tags = parsed.get("tags") or []
     slug = _slugify(name)
 
-    # Extract resource files into the hermes skills dir (before create_skill,
-    # whose Direction-A sync writes the SKILL.md into the same directory).
-    hermes_home = _get_hermes_home()
-    if hermes_home and resources:
-        dest = os.path.join(hermes_home, "skills", slug)
-        try:
-            os.makedirs(dest, exist_ok=True)
-            for rel, data in resources:
-                target = os.path.join(dest, rel)
-                if os.path.exists(target):
-                    continue  # never overwrite existing files on re-import
-                os.makedirs(os.path.dirname(target) or dest, exist_ok=True)
-                with open(target, "wb") as f:
-                    f.write(data)
-        except Exception:  # noqa: BLE001
-            # resource extraction is best-effort; the DB row still imports
-            pass
+    if resources:
+        homes = ([_get_hermes_home()] if _get_hermes_home() else []) + _profile_homes()
+        for home in homes:
+            if not home:
+                continue
+            dest = os.path.join(home, "skills", slug)
+            try:
+                os.makedirs(dest, exist_ok=True)
+                for rel, data in resources:
+                    target = os.path.join(dest, rel)
+                    if os.path.exists(target):
+                        continue  # never overwrite existing files on re-import
+                    os.makedirs(os.path.dirname(target) or dest, exist_ok=True)
+                    with open(target, "wb") as f:
+                        f.write(data)
+            except Exception:  # noqa: BLE001
+                # resource extraction is best-effort; the DB row still imports
+                pass
 
     skill = await memory_service.create_skill(
         db, name=name, description=parsed.get("description", ""),

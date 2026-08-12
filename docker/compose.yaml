@@ -118,7 +118,10 @@ services:
       resources:
         limits:
           cpus: "2.0"
-          memory: 1G
+          # 1.5G: LibreOffice (soffice) conversions of legacy .doc/.xls/.ppt
+          # and ODF files peak at 300-800MB per conversion (capped at 2
+          # concurrent via _SOFFICE_SLOTS), on top of the API process itself.
+          memory: 1.5G
         reservations:
           cpus: "0.5"
           memory: 256M

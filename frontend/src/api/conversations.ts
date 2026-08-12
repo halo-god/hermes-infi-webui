@@ -50,7 +50,9 @@ export const conversationsApi = {
     return (await http.post(`/conversations/${id}/share`)).data;
   },
   async unshare(id: string): Promise<void> {
-    await http.patch(`/conversations/${id}`, { visibility: "private" });
+    // Dedicated DELETE endpoint — the old PATCH {visibility} was silently
+    // ignored (schema has no visibility field), leaving shares permanent.
+    await http.delete(`/conversations/${id}/share`);
   },
   async getShared(id: string): Promise<ConversationDetail> {
     return (await http.get<ConversationDetail>(`/conversations/shared/${id}`)).data;
@@ -78,6 +80,11 @@ export const conversationsApi = {
   },
   fileRawUrl(id: string, fileId: string): string {
     return `${API_BASE}/conversations/${id}/files/${fileId}/raw?ticket=${encodeURIComponent(mediaTicket.current())}`;
+  },
+  // LibreOffice-converted PDF preview (office files); falls back to the raw
+  // bytes server-side for native PDFs.
+  filePdfUrl(id: string, fileId: string): string {
+    return `${API_BASE}/conversations/${id}/files/${fileId}/pdf?ticket=${encodeURIComponent(mediaTicket.current())}`;
   },
   async patchFile(id: string, fileId: string, content: string): Promise<WorkspaceFile & { content: string }> {
     return (await http.patch(`/conversations/${id}/files/${fileId}`, { content })).data;

@@ -18,7 +18,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python deps from pyproject.toml for reproducible builds.
-COPY backend/pyproject.toml backend/README.md ./
+COPY backend/pyproject.toml ./
 COPY backend/app ./app
 RUN pip install --upgrade pip && pip install .
 

@@ -148,11 +148,17 @@ export function registerStreamHandlers(
 
   // Debounced refresh
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  let fileRefetchTimer: ReturnType<typeof setTimeout> | null = null;
   const scheduleRefresh = () => {
     if (refreshTimer) clearTimeout(refreshTimer);
+    // Capture the conversation the turn belonged to: if the user switched
+    // conversations during the 500ms window, the refresh must not run against
+    // the NEW conversation (it would refetch its files and, worse, close its
+    // group WS via refreshAfterTurn).
+    const convId = activeId.value;
     refreshTimer = setTimeout(() => {
       refreshTimer = null;
-      refreshAfterTurn();
+      if (activeId.value === convId) refreshAfterTurn();
     }, 500);
   };
   const cancelRefresh = () => {
@@ -313,13 +319,26 @@ export function registerStreamHandlers(
       if (!m.content.files) m.content = { ...m.content, files: [] };
       const existing = m.content.files!.find((f) => f.id === ev.file_id);
       if (!existing) {
-        m.content.files!.push({ id: ev.file_id, name: ev.name, kind: ev.kind, diff: ev.diff });
+        // Guard against null file_id chips (db storage backend emits file
+        // events without a row id) — a null-id chip is a dead link.
+        if (ev.file_id) {
+          m.content.files!.push({ id: ev.file_id, name: ev.name, kind: ev.kind, diff: ev.diff });
+        }
       }
       triggerMessages();
     }
-    if (activeId.value) {
-      conversationsApi.files(activeId.value).then((f) => (files.value = f)).catch(() => {});
-    }
+    // Debounced refetch: an agent turn writing N files fires N file events —
+    // N full list fetches would re-render the tree N times and race each
+    // other. Also verify the conversation hasn't changed by the time the
+    // fetch resolves (the scoped handler can't stop an in-flight request).
+    const convId = activeId.value;
+    if (!convId) return;
+    if (fileRefetchTimer) clearTimeout(fileRefetchTimer);
+    fileRefetchTimer = setTimeout(() => {
+      conversationsApi.files(convId).then((f) => {
+        if (activeId.value === convId) files.value = f;
+      }).catch(() => {});
+    }, 300);
   }, activeId));
 
   stream.on("confirmation_request", scoped((ev) => {

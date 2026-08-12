@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import os
 import uuid
 from dataclasses import dataclass
+from functools import partial
 
 from fastapi import HTTPException, UploadFile
+
+logger = logging.getLogger(__name__)
 
 _UPLOAD_CHUNK = 1024 * 1024  # 1 MiB
 
@@ -323,18 +327,29 @@ OFFICE_EXTRACTORS = {
     "pptx": extract_pptx_html,
     "csv": extract_csv_html,
     "rtf": extract_rtf_html,
-    # Legacy OLE2 formats — require LibreOffice (soffice) at runtime; absent
-    # soffice yields a clear "convert to docx/xlsx" hint instead of an
-    # unreadable file. Imported lazily below to avoid a cycle at module load.
+    # Legacy OLE2 formats (.doc/.xls/.ppt) and OpenDocument (.odt/.ods/.odp)
+    # — require LibreOffice (soffice) at runtime; absent soffice yields a
+    # clear "convert to docx/xlsx" hint instead of an unreadable file.
+    # Registered below via partial (extractor signature stays single-arg).
     "doc": None,
     "xls": None,
     "ppt": None,
+    "odt": None,
+    "ods": None,
+    "odp": None,
 }
 
 from app.core.office_legacy import extract_legacy_doc_html  # noqa: E402
 
-for _ext in ("doc", "xls", "ppt"):
-    OFFICE_EXTRACTORS[_ext] = extract_legacy_doc_html
+for _ext in ("doc", "xls", "ppt", "odt", "ods", "odp"):
+    OFFICE_EXTRACTORS[_ext] = partial(extract_legacy_doc_html, ext=_ext)
+
+# Formats that get the unified LibreOffice PDF preview. csv/rtf are excluded:
+# their structured extraction (HTML table / text) is strictly better for both
+# preview and AI injection, and PDF conversion would waste a soffice run.
+_PDF_PREVIEW_EXTS = frozenset({
+    "docx", "xlsx", "pptx", "doc", "xls", "ppt", "odt", "ods", "odp",
+})
 
 
 
@@ -355,6 +370,9 @@ class ProcessedUpload:
     content: str | None
     storage_key: str | None
     size_bytes: int
+    # Object-storage key of the LibreOffice-converted PDF (Office uploads
+    # only); None when soffice is missing/failed or the format isn't Office.
+    preview_pdf_key: str | None = None
 
 
 def _decode_text(raw: bytes) -> str:
@@ -568,6 +586,7 @@ async def process_upload(
     threshold_bytes = settings.file_offload_threshold_kb * 1024
     storage_key: str | None = None
     content: str | None = None
+    preview_pdf_key: str | None = None
 
     # P2-file: strip EXIF from images (privacy: GPS/camera metadata).
     if settings.strip_exif_enabled and ext in ("jpg", "jpeg", "png", "webp"):
@@ -588,10 +607,26 @@ async def process_upload(
             raise HTTPException(
                 status_code=503, detail="文件预览服务不可用，请检查对象存储配置"
             ) from exc
-        # P2-file: prefer Docling (Markdown, tables, OCR) over the legacy
-        # per-format HTML extractors. Falls back transparently if Docling is
-        # unavailable or the conversion fails.
+        # `content` always comes from the per-format extractor (csv/xlsx keep
+        # their structured HTML tables, rtf its text, docx the mammoth HTML,
+        # legacy formats the soffice HTML) — NEVER from PDF text extraction,
+        # which would destroy table structure and waste a soffice conversion.
+        # LibreOffice PDF conversion is preview-only: it fills
+        # preview_pdf_key and nothing else. csv/rtf skip it entirely (they
+        # have no PDF preview in the UI).
         content = await _extract_doc_content(raw, ext, prefer_docling=not fast_mode)
+        if ext in _PDF_PREVIEW_EXTS:
+            from app.core.office_legacy import convert_to_pdf
+            pdf_bytes = await asyncio.to_thread(convert_to_pdf, raw, ext)
+            if pdf_bytes:
+                preview_pdf_key = f"{storage_key_prefix}/previews/{uuid.uuid4().hex}.pdf"
+                try:
+                    await asyncio.to_thread(
+                        object_storage.put, preview_pdf_key, pdf_bytes, "application/pdf"
+                    )
+                except Exception:
+                    logger.warning("failed to store preview pdf for .%s upload", ext, exc_info=True)
+                    preview_pdf_key = None
     elif len(raw) > threshold_bytes or settings.storage_backend == "minio":
         storage_key = f"{storage_key_prefix}/{uuid.uuid4().hex}/{name}"
         await asyncio.to_thread(object_storage.put, storage_key, raw, ctype)
@@ -607,7 +642,10 @@ async def process_upload(
         else:
             content = base64.b64encode(raw).decode("ascii")
 
-    return ProcessedUpload(content=content, storage_key=storage_key, size_bytes=len(raw))
+    return ProcessedUpload(
+        content=content, storage_key=storage_key, size_bytes=len(raw),
+        preview_pdf_key=preview_pdf_key,
+    )
 
 
 async def hydrate_stored_content(
@@ -631,7 +669,10 @@ async def hydrate_stored_content(
     data = await asyncio.to_thread(object_storage.get, storage_key)
     ext = kind.lower()
     if ext in OFFICE_EXTRACTORS:
-        return OFFICE_EXTRACTORS[ext](data) or None
+        # to_thread: legacy extractors may spawn a soffice subprocess (45s
+        # timeout cap) — running it on the event loop would freeze the whole
+        # API for every request touching an un-extracted legacy file.
+        return await asyncio.to_thread(OFFICE_EXTRACTORS[ext], data) or None
     if is_text_extractable(ext):
         return data.decode("utf-8", "ignore")
     return None
@@ -661,7 +702,6 @@ async def read_upload_capped(file: UploadFile, max_bytes: int) -> bytes:
 
 def safe_relative_path(name: str, fallback: str = "untitled.txt") -> str:
     """Normalize a user/agent-supplied path to a contained relative path.
-
     Anchors the path at root before normalizing so ``../`` segments can never
     climb above it (``a/../../b`` → ``b``, ``../../etc/passwd`` → ``etc/passwd``),
     then strips the leading separator. Never raises — preserves valid nested
@@ -672,14 +712,37 @@ def safe_relative_path(name: str, fallback: str = "untitled.txt") -> str:
     return normalized.replace(os.sep, "/") or fallback
 
 
+def safe_download_headers(name: str, mime: str) -> dict[str, str]:
+    """Response headers for file downloads/previews.
+
+    SVG is served as an ATTACHMENT with a sandbox CSP: an uploaded SVG can
+    embed <script>/onload payloads, and serving it inline from the app origin
+    would be stored XSS (the payload runs with our origin's localStorage /
+    cookies). <img> embedding is safe, direct navigation is not.
+    """
+    from urllib.parse import quote
+    ascii_name = (name or "file").encode("ascii", "ignore").decode() or "file"
+    disposition = "attachment" if mime == "image/svg+xml" else "inline"
+    headers = {
+        "Content-Disposition": (
+            f'{disposition}; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(name or "file")}'
+        ),
+    }
+    if mime == "image/svg+xml":
+        headers["Content-Security-Policy"] = "sandbox"
+    return headers
+
+
 def confine_to_dir(base_dir: str, relative: str) -> str:
     """Join base_dir + a (pre-normalized) relative path and assert containment.
 
     Defense in depth after ``safe_relative_path``: resolves symlinks and rejects
-    any result that escapes base_dir. Raises HTTP 400 on escape.
+    any result that escapes base_dir. Raises ValueError on escape — callers in
+    the service layer translate it to a skip/400 as appropriate (an HTTP
+    exception here would couple the files module to the API layer).
     """
     base_real = os.path.realpath(base_dir)
     target = os.path.realpath(os.path.join(base_real, relative))
     if target != base_real and not target.startswith(base_real + os.sep):
-        raise HTTPException(status_code=400, detail="非法文件路径")
+        raise ValueError(f"path escapes base dir: {relative}")
     return target

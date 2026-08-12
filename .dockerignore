@@ -1,0 +1,18 @@
+# Local Python venv — 2GB+ with torch/playwright; must never enter the image
+# (COPY backend/ ./ would otherwise ship the host venv).
+**/.venv/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local runtime artifacts
+backend/dump.rdb
+backend/*.log
+backend/.env
+backend/hermes_backend.egg-info/
+**/.playwright/

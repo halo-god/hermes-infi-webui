@@ -75,6 +75,8 @@ class KnowledgeOut(BaseModel):
     sort_order: int = 0
     current_version: int = 1
     processing_status: str = "ready"  # ready | processing | error
+    # Present when LibreOffice produced a PDF preview for an Office upload.
+    preview_pdf_key: str | None = None
     created_at: datetime
 
 
@@ -206,6 +208,8 @@ class DocOut(BaseModel):
     size_bytes: int
     created_by_name: str | None = None
     current_version: int = 1
+    # Present when LibreOffice produced a PDF preview for an Office upload.
+    preview_pdf_key: str | None = None
     created_at: datetime
 
 
@@ -235,6 +239,7 @@ class DocCreate(BaseModel):
     size_bytes: int = 0
     content: str | None = None
     storage_key: str | None = None
+    preview_pdf_key: str | None = None
     source_conversation_id: uuid.UUID | None = None
     source_message_id: uuid.UUID | None = None
 

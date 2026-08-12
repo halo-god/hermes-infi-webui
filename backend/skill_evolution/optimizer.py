@@ -88,6 +88,9 @@ def _build_task_lm():
         settings.skill_evolution_llm_model,
         api_key=settings.skill_evolution_llm_api_key,
         api_base=settings.skill_evolution_llm_api_base or None,
+        # A hung upstream call must not freeze the whole evolution task (the
+        # runner has no per-LLM-call timeout; GEPA makes up to 60 calls).
+        timeout=settings.skill_evolution_llm_timeout,
     )
 
 

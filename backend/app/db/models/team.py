@@ -125,6 +125,9 @@ class TeamKnowledge(UUIDPrimaryKey, Timestamps, Base):
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     content: Mapped[str | None] = mapped_column(Text)
     storage_key: Mapped[str | None] = mapped_column(String(512))
+    # LibreOffice-converted PDF preview (object-storage key); mirrors
+    # workspace_files.preview_pdf_key so the unified PDF preview works here.
+    preview_pdf_key: Mapped[str | None] = mapped_column(String(512))
     uploaded_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     uploaded_by_name: Mapped[str | None] = mapped_column(String(120))
     source_conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
@@ -164,6 +167,9 @@ class ProjectDoc(UUIDPrimaryKey, Timestamps, Base):
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     content: Mapped[str | None] = mapped_column(Text)
     storage_key: Mapped[str | None] = mapped_column(String(512))
+    # LibreOffice-converted PDF preview (object-storage key); mirrors
+    # workspace_files.preview_pdf_key so the unified PDF preview works here.
+    preview_pdf_key: Mapped[str | None] = mapped_column(String(512))
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     created_by_name: Mapped[str | None] = mapped_column(String(120))
     source_conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))

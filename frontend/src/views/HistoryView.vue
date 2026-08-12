@@ -101,21 +101,29 @@ async function commitRename(c: Conversation) {
   if (t && t !== c.title) {
     await conversationsApi.update(c.id, { title: t });
     c.title = t;
+    // Sync the sidebar / chat store — otherwise the old title lingers
+    // everywhere until F5.
+    await chat.loadConversations();
   }
 }
 async function togglePin(c: Conversation) {
   const u = await conversationsApi.update(c.id, { pinned: !c.pinned });
   c.pinned = u.pinned;
+  await chat.loadConversations();
 }
 async function del(id: string) {
   if (!confirm("删除该会话？")) return;
-  await conversationsApi.remove(id);
+  // Route through the store so the active conversation / messages are
+  // cleaned up too (a raw API delete leaves a ghost active conversation).
+  await chat.deleteConversation(id);
   await reload();
 }
 async function bulkDelete() {
   if (!selected.value.size) return;
   if (!confirm(`删除选中的 ${selected.value.size} 个会话？`)) return;
-  await conversationsApi.bulkDelete([...selected.value]);
+  for (const id of [...selected.value]) {
+    await chat.deleteConversation(id);
+  }
   clearSel();
   await reload();
 }

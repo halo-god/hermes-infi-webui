@@ -193,6 +193,8 @@ class WorkspaceFileOut(BaseModel):
     size_bytes: int
     created_by_agent: str | None
     processing_status: str = "ready"  # ready | processing | error
+    # Present when LibreOffice produced a PDF preview for an Office upload.
+    preview_pdf_key: str | None = None
     updated_at: datetime
 
 

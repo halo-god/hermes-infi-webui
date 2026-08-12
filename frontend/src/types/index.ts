@@ -464,11 +464,15 @@ export interface FileItem {
   // ready | processing | error — uploads needing conversion are accepted
   // immediately and converted in the background.
   processing_status?: string;
+  // Present when LibreOffice produced a PDF preview for an Office upload.
+  preview_pdf_key?: string | null;
 }
 
 export interface WsAdapter {
   getContent: (fileId: string) => Promise<string>;
   getRawUrl: (fileId: string) => string;
+  // URL of the LibreOffice-converted PDF preview (office files only).
+  getPdfUrl: (fileId: string) => string;
   patchContent?: (fileId: string, content: string) => Promise<string>;
   getVersions?: (fileId: string) => Promise<WorkspaceFileVersion[]>;
   restoreVersion?: (fileId: string, versionNum: number) => Promise<string>;
@@ -486,6 +490,8 @@ export interface WorkspaceFile {
   size_bytes: number;
   created_by_agent: string | null;
   processing_status?: string;  // ready | processing | error
+  // Present when LibreOffice produced a PDF preview for an Office upload.
+  preview_pdf_key?: string | null;
   updated_at: string;
 }
 
@@ -598,6 +604,8 @@ export interface Knowledge {
   is_folder: boolean;
   sort_order: number;
   processing_status?: string;  // ready | processing | error
+  // Present when LibreOffice produced a PDF preview for an Office upload.
+  preview_pdf_key?: string | null;
   created_at?: string;
 }
 export interface ActivityItem {
@@ -672,6 +680,8 @@ export interface ProjectDoc {
   created_by_name: string | null;
   folder_id: string | null;
   is_folder: boolean;
+  // Present when LibreOffice produced a PDF preview for an Office upload.
+  preview_pdf_key?: string | null;
   created_at: string;
 }
 

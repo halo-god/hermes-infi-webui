@@ -38,6 +38,11 @@ class WorkspaceFile(UUIDPrimaryKey, Timestamps, Base):
     # preview HTML while the AI injection prefers this higher-quality text.
     content_md: Mapped[str | None] = mapped_column(Text)
     storage_key: Mapped[str | None] = mapped_column(String(512))
+    # Object-storage key of the LibreOffice-converted PDF used for the unified
+    # PDF preview of Office uploads. NULL when soffice is unavailable (new
+    # formats degrade to the HTML extraction in `content`) or for pre-0086
+    # rows. `storage_key` remains the ORIGINAL uploaded bytes.
+    preview_pdf_key: Mapped[str | None] = mapped_column(String(512))
     size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     created_by_agent: Mapped[str | None] = mapped_column(String(64))
     is_folder: Mapped[bool] = mapped_column(Boolean, default=False)

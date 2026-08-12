@@ -111,8 +111,21 @@ async def delete_team(
     team, member = await svc.require_membership(db, team_id, user.id)
     if member.role != "owner":
         raise HTTPException(status_code=403, detail="仅所有者可解散团队")
+    # Collect object-storage keys (original bytes + preview PDFs) BEFORE the
+    # FK cascade wipes the rows — otherwise team dissolution leaks every
+    # knowledge file + LibreOffice preview in MinIO/S3.
+    from sqlalchemy import select
+    from app.db.models.team import TeamKnowledge
+    rows = (
+        await db.execute(
+            select(TeamKnowledge).where(TeamKnowledge.team_id == team_id)
+        )
+    ).scalars().all()
+    keys = [k for r in rows for k in (r.storage_key, r.preview_pdf_key) if k]
     await db.delete(team)
     await db.commit()
+    for key in keys:
+        await svc.cleanup_storage_key(key)
 
 
 # ── team channel ──
@@ -395,6 +408,8 @@ async def create_knowledge_folder(
     if not name:
         raise HTTPException(status_code=400, detail="目录名不能为空")
     parent_id = payload.get("folder_id")
+    if parent_id:
+        await _ensure_knowledge_folder(db, team_id, parent_id)
     folder = TeamKnowledge(
         team_id=team_id,
         name=name,
@@ -422,9 +437,24 @@ async def move_knowledge(
     if item is None or item.team_id != team_id:
         raise HTTPException(status_code=404, detail="知识条目不存在")
     target_folder = payload.get("folder_id")  # None = root
+    if target_folder:
+        await _ensure_knowledge_folder(db, team_id, target_folder)
     item.folder_id = uuid.UUID(target_folder) if target_folder else None
     await db.commit()
     return {"status": "ok"}
+
+
+async def _ensure_knowledge_folder(db: AsyncSession, team_id: uuid.UUID, folder_id: str) -> None:
+    """Reject folder ids that don't belong to this team — a cross-team folder
+    id would silently drop the item out of this team's tree."""
+    from app.db.models.team import TeamKnowledge
+    try:
+        fid = uuid.UUID(str(folder_id))
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="目标文件夹不存在") from None
+    f = await db.get(TeamKnowledge, fid)
+    if f is None or f.team_id != team_id or not f.is_folder:
+        raise HTTPException(status_code=400, detail="目标文件夹不存在")
 
 
 @router.delete("/teams/{team_id}/knowledge/{kid}", status_code=204)
@@ -502,6 +532,12 @@ async def get_knowledge_chunks_count(
     Drives the "已索引 N 块" badge in the knowledge list. Returns 0 when RAG
     is off or the item has never been indexed."""
     await svc.require_membership(db, team_id, user.id)
+    # IDOR guard: the kid must belong to THIS team — otherwise any member of
+    # one team could probe another team's chunk counts.
+    from app.db.models.team import TeamKnowledge
+    item = await db.get(TeamKnowledge, kid)
+    if item is None or item.team_id != team_id:
+        raise HTTPException(status_code=404, detail="知识条目不存在")
     from app.services import rag_service
     count = await rag_service.count_chunks(db, kid)
     return {"count": count, "rag_enabled": settings.rag_enabled}
@@ -554,14 +590,53 @@ async def get_knowledge_raw(
     else:
         raise HTTPException(status_code=404, detail="文件内容不存在")
 
-    from urllib.parse import quote
-    safe_name = k.name.replace('"', "_").replace("\\", "_")
-    ascii_name = safe_name.encode("ascii", "ignore").decode() or "file"
+    from app.core.files import safe_download_headers
     return Response(
         content=data, media_type=mime,
-        headers={
-            "Content-Disposition": f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(safe_name)}"
-        },
+        headers=safe_download_headers(k.name, mime),
+    )
+
+
+@router.get("/teams/{team_id}/knowledge/{kid}/pdf")
+async def get_knowledge_pdf(
+    team_id: uuid.UUID, kid: uuid.UUID,
+    request: Request,
+    ticket: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Serve the LibreOffice-converted PDF preview for a knowledge file.
+
+    Mirrors the conversation workspace /pdf endpoint: preview_pdf_key wins,
+    native PDFs fall back to their raw bytes, everything else 404s.
+    """
+    import asyncio
+    from fastapi.responses import Response
+    from app.core import object_storage
+    from app.db.models.team import TeamKnowledge
+    from app.deps import user_from_ticket_or_header
+
+    user = await user_from_ticket_or_header(ticket, request, db)
+    await svc.require_membership(db, team_id, user.id)
+    k = await db.get(TeamKnowledge, kid)
+    if k is None or k.team_id != team_id:
+        raise HTTPException(status_code=404, detail="知识条目不存在")
+
+    key = k.preview_pdf_key
+    if not key and (k.kind or "").lower() == "pdf":
+        key = k.storage_key  # native PDFs are their own preview
+    if not key:
+        raise HTTPException(status_code=404, detail="该文件暂无 PDF 预览")
+    try:
+        data = await asyncio.to_thread(object_storage.get, key)
+    except Exception:
+        raise HTTPException(status_code=503, detail="存储不可用")
+    if not data:
+        raise HTTPException(status_code=404, detail="预览内容不存在")
+
+    from app.core.files import safe_download_headers
+    return Response(
+        content=data, media_type="application/pdf",
+        headers=safe_download_headers(k.name, "application/pdf"),
     )
 
 
@@ -592,6 +667,8 @@ async def upload_knowledge(
     from app.core.docling_converter import is_supported as docling_supported
     needs_bg = docling_supported(ext) and settings.docling_enabled if hasattr(settings, 'docling_enabled') else docling_supported(ext)
 
+    if folder_id:
+        await _ensure_knowledge_folder(db, team_id, folder_id)
     k = TeamKnowledge(
         team_id=team_id,
         name=name,
@@ -599,6 +676,7 @@ async def upload_knowledge(
         size_bytes=processed.size_bytes,
         content=processed.content,
         storage_key=processed.storage_key,
+        preview_pdf_key=processed.preview_pdf_key,
         folder_id=uuid.UUID(folder_id) if folder_id else None,
         uploaded_by=user.id,
         uploaded_by_name=user.name,
@@ -746,6 +824,7 @@ async def upload_doc(
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"
     processed = await process_upload(
         raw, ext, f"project-docs/{project_id}", name, content_type=file.content_type,
+        fast_mode=True,  # skip Docling cold start; keep uploads snappy
     )
     payload = DocCreate(
         name=name,
@@ -753,6 +832,7 @@ async def upload_doc(
         size_bytes=processed.size_bytes,
         content=processed.content,
         storage_key=processed.storage_key,
+        preview_pdf_key=processed.preview_pdf_key,
     )
     return await svc.add_doc(db, project_id, payload, user)
 
@@ -781,6 +861,12 @@ async def update_doc(
     if d is None:
         raise HTTPException(status_code=404, detail="文件不存在")
     await _project_with_perm(db, d.project_id, user, "project.edit")
+    # Non-text docs (office/pdf/images) hold binary in object storage — a text
+    # overwrite would desync content from the stored bytes (mirror of the
+    # conversation patch_file guard).
+    from app.core.files import PLAIN_TEXT_EXTS
+    if (d.kind or "").lower() not in PLAIN_TEXT_EXTS:
+        raise HTTPException(status_code=400, detail="仅支持编辑纯文本文件")
     updated = await svc.update_doc_content(
         db, d.project_id, doc_id, payload.content, author=user.name or str(user.id)
     )
@@ -860,8 +946,19 @@ async def delete_project(
     project_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
     proj = await _project_with_perm(db, project_id, user, "project.delete")
+    # Collect object-storage keys BEFORE the FK cascade wipes the docs.
+    from sqlalchemy import select
+    from app.db.models.team import ProjectDoc
+    rows = (
+        await db.execute(
+            select(ProjectDoc).where(ProjectDoc.project_id == project_id)
+        )
+    ).scalars().all()
+    keys = [k for r in rows for k in (r.storage_key, r.preview_pdf_key) if k]
     await db.delete(proj)
     await db.commit()
+    for key in keys:
+        await svc.cleanup_storage_key(key)
 
 
 # ── tasks ──
@@ -1120,14 +1217,52 @@ async def get_doc_raw(
     else:
         raise HTTPException(status_code=404, detail="文件内容不存在")
 
-    from urllib.parse import quote
-    safe_name = d.name.replace('"', "_").replace("\\", "_")
-    ascii_name = safe_name.encode("ascii", "ignore").decode() or "file"
+    from app.core.files import safe_download_headers
     return Response(
         content=data, media_type=mime,
-        headers={
-            "Content-Disposition": f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(safe_name)}"
-        },
+        headers=safe_download_headers(d.name, mime),
+    )
+
+
+@router.get("/projects/docs/{doc_id}/pdf")
+async def get_doc_pdf(
+    doc_id: uuid.UUID,
+    request: Request,
+    ticket: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Serve the LibreOffice-converted PDF preview for a project document.
+
+    Mirrors the conversation workspace /pdf endpoint: preview_pdf_key wins,
+    native PDFs fall back to their raw bytes, everything else 404s.
+    """
+    import asyncio
+    from fastapi.responses import Response
+    from app.core import object_storage
+    from app.deps import user_from_ticket_or_header
+
+    user = await user_from_ticket_or_header(ticket, request, db)
+    d = await svc.get_doc(db, doc_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    await svc.require_membership(db, (await svc.get_project(db, d.project_id)).team_id, user.id)
+
+    key = d.preview_pdf_key
+    if not key and (d.kind or "").lower() == "pdf":
+        key = d.storage_key  # native PDFs are their own preview
+    if not key:
+        raise HTTPException(status_code=404, detail="该文件暂无 PDF 预览")
+    try:
+        data = await asyncio.to_thread(object_storage.get, key)
+    except Exception:
+        raise HTTPException(status_code=503, detail="存储不可用")
+    if not data:
+        raise HTTPException(status_code=404, detail="预览内容不存在")
+
+    from app.core.files import safe_download_headers
+    return Response(
+        content=data, media_type="application/pdf",
+        headers=safe_download_headers(d.name, "application/pdf"),
     )
 
 

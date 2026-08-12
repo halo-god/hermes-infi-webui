@@ -250,8 +250,20 @@ async function shareConvo(id: string) {
       document.body.removeChild(ta);
     }
     ns.toast("分享链接已复制到剪贴板");
+    // Refresh so the context menu flips to "取消分享" (visibility changed).
+    await chat.loadConversations();
   } catch (e: unknown) {
     ns.toast("分享失败：" + ((e as Error).message || "未知错误"), "error");
+  }
+}
+async function unshareConvo(id: string) {
+  closeCtx();
+  try {
+    await conversationsApi.unshare(id);
+    ns.toast("已取消分享，分享链接已失效");
+    await chat.loadConversations();
+  } catch (e: unknown) {
+    ns.toast("取消失败：" + ((e as Error).message || "未知错误"), "error");
   }
 }
 
@@ -869,7 +881,10 @@ function doDeleteFolder() {
         <button class="menu-item" @click="togglePin(ctxMenu!.id, !!chat.conversations.find(c => c.id === ctxMenu!.id)?.pinned)">
           <Icon name="pin" /> <span class="m-name">{{ chat.conversations.find(c => c.id === ctxMenu!.id)?.pinned ? '取消置顶' : '置顶' }}</span>
         </button>
-        <button class="menu-item" @click="shareConvo(ctxMenu!.id)">
+        <button v-if="chat.conversations.find(c => c.id === ctxMenu!.id)?.visibility === 'shared'" class="menu-item" @click="unshareConvo(ctxMenu!.id)">
+          <Icon name="share" /> <span class="m-name">取消分享</span>
+        </button>
+        <button v-else class="menu-item" @click="shareConvo(ctxMenu!.id)">
           <Icon name="share" /> <span class="m-name">分享</span>
         </button>
         <div class="menu-item has-sub" @mouseenter="showMoveMenu = ctxMenu!.id" @mouseleave="showMoveMenu = null">
@@ -891,7 +906,7 @@ function doDeleteFolder() {
               <Icon name="folder" :size="11" />
               <span class="m-name">{{ f.name }}</span>
             </button>
-            <div v-if="!chat.folders.length" class="sub-menu-empty">暂无文件夹</div>
+            <div v-if="!(convoTab === 'group' ? chat.groupFolders : chat.folders).length" class="sub-menu-empty">暂无文件夹</div>
           </div>
         </div>
         <div class="menu-sep"></div>
@@ -911,9 +926,9 @@ function doDeleteFolder() {
         </button>
         <button
           class="menu-item"
-          @click="() => { const f = chat.folders.find(x => x.id === folderCtx!.id); if (f) toggleFolderPin(f.id, f.pinned); closeFolderCtx(); }"
+          @click="() => { const f = (chat.folders.find(x => x.id === folderCtx!.id) || chat.groupFolders.find(x => x.id === folderCtx!.id)); if (f) toggleFolderPin(f.id, f.pinned); closeFolderCtx(); }"
         >
-          <Icon name="pin" /> <span class="m-name">{{ chat.folders.find(x => x.id === folderCtx?.id)?.pinned ? '取消置顶' : '置顶文件夹' }}</span>
+          <Icon name="pin" /> <span class="m-name">{{ (chat.folders.find(x => x.id === folderCtx?.id) || chat.groupFolders.find(x => x.id === folderCtx?.id))?.pinned ? '取消置顶' : '置顶文件夹' }}</span>
         </button>
         <div class="menu-sep"></div>
         <button class="menu-item danger" @click="doDeleteFolder">

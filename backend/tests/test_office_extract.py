@@ -118,9 +118,12 @@ def test_extract_pptx_html_per_slide():
 @pytest.mark.asyncio
 async def test_upload_docx_preview_and_raw_download_roundtrip(client: AsyncClient, auth_headers, test_user, db):
     """Uploading a real .docx must: accept immediately with
-    processing_status="processing" (conversion is async), then end with the
-    extracted HTML in `content`, keep the original bytes byte-identical via
-    the raw-download route (the dual-storage split), and tag `kind` correctly."""
+    processing_status="processing" (conversion is async), then end with
+    extractable text in `content` (PDF-extracted when soffice is present,
+    HTML otherwise), keep the original bytes byte-identical via the
+    raw-download route (the dual-storage split), and tag `kind` correctly.
+    With soffice installed the LibreOffice PDF preview key is set and /pdf
+    serves a real PDF."""
     pytest.importorskip("moto")
     from moto import mock_aws
 
@@ -175,6 +178,7 @@ async def test_upload_docx_preview_and_raw_download_roundtrip(client: AsyncClien
             )
             wf.content = processed.content
             wf.storage_key = processed.storage_key
+            wf.preview_pdf_key = processed.preview_pdf_key
             wf.processing_status = "ready"
             await db.commit()
             # updated_at is a server-side onupdate column — after commit it is
@@ -186,11 +190,21 @@ async def test_upload_docx_preview_and_raw_download_roundtrip(client: AsyncClien
             detail = await client.get(f"/api/v1/conversations/{convo.id}/files/{file_id}", headers=auth_headers)
             assert detail.status_code == 200
             assert detail.json()["processing_status"] == "ready"
-            assert "<h1>Title</h1>" in detail.json()["content"]
+            content = detail.json()["content"]
+            # "Title" survives both pipelines: mammoth HTML fallback
+            # (<h1>Title</h1>) and PDF text extraction.
+            assert "Title" in content
+            # With soffice installed, the unified PDF preview is produced and
+            # served by the /pdf endpoint.
+            pdf_key = detail.json().get("preview_pdf_key")
+            if pdf_key:
+                pdf_resp = await client.get(f"/api/v1/conversations/{convo.id}/files/{file_id}/pdf", headers=auth_headers)
+                assert pdf_resp.status_code == 200
+                assert pdf_resp.content[:4] == b"%PDF"
 
             raw_resp = await client.get(f"/api/v1/conversations/{convo.id}/files/{file_id}/raw", headers=auth_headers)
             assert raw_resp.status_code == 200
-            assert raw_resp.content == raw  # byte-identical original, not the HTML preview
+            assert raw_resp.content == raw  # byte-identical original, not the preview
     finally:
         settings.minio_endpoint = prev_endpoint
         settings.minio_bucket = prev_bucket

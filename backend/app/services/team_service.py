@@ -156,6 +156,32 @@ async def remove_member(db: AsyncSession, team_id: uuid.UUID, user_id: uuid.UUID
     if member.role == "owner":
         raise HTTPException(status_code=400, detail="不能移除所有者")
     await db.delete(member)
+    # Scrub the removed user from every project's member_ids AND from project/
+    # team group chats — otherwise the next sync_group_membership (triggered by
+    # anyone opening the group) resurrects their access from Project.member_ids
+    # and they keep receiving project notifications and writing to the group.
+    projects = (
+        await db.execute(
+            select(Project).where(Project.team_id == team_id)
+        )
+    ).scalars().all()
+    for p in projects:
+        mids = [m for m in (p.member_ids or []) if str(m) != str(user_id)]
+        if len(mids) != len(p.member_ids or []):
+            p.member_ids = mids
+    from app.db.models.conversation import GroupMember
+    group_rows = (
+        await db.execute(
+            select(GroupMember).where(
+                GroupMember.user_id == user_id,
+                GroupMember.conversation_id.in_(
+                    select(Conversation.id).where(Conversation.team_id == team_id)
+                ),
+            )
+        )
+    ).scalars().all()
+    for g in group_rows:
+        await db.delete(g)
     await db.commit()
 
 
@@ -369,6 +395,12 @@ async def _cleanup_storage(storage_key: str) -> None:
         )
 
 
+async def cleanup_storage_key(storage_key: str) -> None:
+    """Public wrapper over _cleanup_storage for bulk-delete paths (team /
+    project dissolution) that collect keys before the FK cascade wipes rows."""
+    await _cleanup_storage(storage_key)
+
+
 async def _maybe_index_knowledge(db: AsyncSession, knowledge_id: uuid.UUID) -> None:
     """Best-effort RAG indexing hook. Never raises — embedding/model/pgvector
     failures only log a warning, so uploads and content edits always succeed
@@ -426,11 +458,23 @@ async def add_knowledge(db: AsyncSession, team_id: uuid.UUID, data, user: User) 
 async def delete_knowledge(db: AsyncSession, team_id: uuid.UUID, kid: uuid.UUID) -> None:
     k = await db.get(TeamKnowledge, kid)
     if k and k.team_id == team_id:
+        # Folders delete RECURSIVELY: children whose folder_id points at the
+        # deleted row have no FK and would silently vanish from the default
+        # list while still being RAG-indexed and prompt-injected.
+        if k.is_folder:
+            children = (
+                await db.execute(
+                    select(TeamKnowledge).where(TeamKnowledge.folder_id == k.id)
+                )
+            ).scalars().all()
+            for child in list(children):
+                await delete_knowledge(db, team_id, child.id)
         # P2-storage: clean up the offloaded original bytes so we don't leak
         # orphan objects in MinIO/S3. Best-effort — a missing object shouldn't
         # block the DB delete.
-        if k.storage_key:
-            await _cleanup_storage(k.storage_key)
+        for key in (k.storage_key, k.preview_pdf_key):
+            if key:
+                await _cleanup_storage(key)
         await db.delete(k)
         await db.commit()
 
@@ -461,12 +505,15 @@ async def update_knowledge(
             await db.delete(o)
         k.current_version += 1
     content_changed = "content" in fields
+    name_changed = "name" in fields and fields["name"] != k.name
     for f, v in fields.items():
         setattr(k, f, v)
     await db.commit()
     await db.refresh(k)
-    # P1-1 RAG: re-index when content changed (old chunks are stale).
-    if content_changed:
+    # P1-1 RAG: re-index when content OR name changed — chunks carry a
+    # source_name snapshot, so a rename alone left the citation showing the
+    # old filename.
+    if content_changed or name_changed:
         await _maybe_index_knowledge(db, k.id)
     return k
 
@@ -606,6 +653,7 @@ async def add_doc(db: AsyncSession, project_id: uuid.UUID, data, user: User) -> 
         size_bytes=data.size_bytes, created_by_name=user.name, created_by=user.id,
         content=getattr(data, "content", None),
         storage_key=getattr(data, "storage_key", None),
+        preview_pdf_key=getattr(data, "preview_pdf_key", None),
         source_conversation_id=getattr(data, "source_conversation_id", None),
         source_message_id=getattr(data, "source_message_id", None),
     )
@@ -691,8 +739,9 @@ async def set_profile_knowledge(db: AsyncSession, profile, knowledge_ids: list[s
 async def delete_doc(db: AsyncSession, did: uuid.UUID) -> None:
     d = await db.get(ProjectDoc, did)
     if d:
-        if d.storage_key:
-            await _cleanup_storage(d.storage_key)
+        for key in (d.storage_key, d.preview_pdf_key):
+            if key:
+                await _cleanup_storage(key)
         await db.delete(d)
         await db.commit()
 

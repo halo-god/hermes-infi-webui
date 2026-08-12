@@ -66,14 +66,20 @@ async def handle_docling_upgrade(task: dict) -> None:
             k.processing_status = "ready"
             await db.commit()
 
-    except Exception:  # noqa: BLE001 — mark error so the UI can show it
+    except Exception:  # noqa: BLE001
         logger.exception("Docling upgrade failed for knowledge %s", knowledge_id)
         try:
             async with async_session_maker() as db:
                 k = await db.get(TeamKnowledge, uuid.UUID(knowledge_id))
                 if k:
-                    k.processing_status = "error"
-                    await db.commit()
+                    # The upload already stored fast-extracted content and
+                    # indexed it — a transient Docling failure must NOT flip
+                    # the row to error (UI shows "解析失败" + retry button for
+                    # a file that is actually usable). Only mark error when
+                    # there is NO usable content at all.
+                    if not (k.content or "").strip():
+                        k.processing_status = "error"
+                        await db.commit()
         except Exception:
             pass
 

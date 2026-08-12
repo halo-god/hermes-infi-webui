@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core import redis as redis_core
 from app.db.models.scheduled import ScheduledTask
+from app.db.models.user import User
 from app.schemas.scheduled import ScheduledTaskCreate, ScheduledTaskUpdate
 
 logger = logging.getLogger(__name__)
@@ -189,8 +190,13 @@ async def tick(db: AsyncSession) -> int:
 
     due = (
         await db.execute(
-            select(ScheduledTask).where(
+            select(ScheduledTask)
+            # Never trigger tasks of deactivated users — an admin-disable must
+            # stop their agents from firing (cost + unwanted notifications).
+            .join(User, ScheduledTask.owner_id == User.id)
+            .where(
                 ScheduledTask.enabled.is_(True),
+                User.is_active.is_(True),
                 ScheduledTask.next_run_at <= now,
             ).limit(MAX_ENQUEUE_PER_TICK)
         )
@@ -216,7 +222,10 @@ async def tick(db: AsyncSession) -> int:
             task.last_status = "failed"
             task.next_run_at = compute_next_run(task.cron, tz_base)
 
-    if due:
+    # Commit BOTH the due-enqueue updates AND any stale-reclaim changes —
+    # previously the stale branch only landed when a due task existed in the
+    # same tick, so a lone stale task stayed "running" forever.
+    if due or stale:
         await db.commit()
     return count
 

@@ -44,7 +44,7 @@ const SSE_MAX_BACKOFF = 30_000;
  * Composable: creates a managed stream connection.
  * Returns reactive state + lifecycle methods.
  */
-export function useStream() {
+export function useStream(onGiveUp?: () => void) {
   const connected = ref(false);
   const error = ref<string | null>(null);
 
@@ -98,6 +98,9 @@ export function useStream() {
     if (wsPingTimer) { clearInterval(wsPingTimer); wsPingTimer = null; }
     if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
     connected.value = false;
+    // A deliberate close is not an error — clear the banner (cancel / switch
+    // conversation would otherwise leave "SSE 连接断开" stuck on screen).
+    error.value = null;
   }
 
   /** Open an SSE connection with exponential backoff reconnection. */
@@ -114,6 +117,10 @@ export function useStream() {
       if (consecutiveErrors >= SSE_MAX_ERRORS) {
         error.value = "SSE 连接断开";
         close();
+        // The caller (chat store) must clear streamingConvoId here —
+        // otherwise the conversation is stuck in "生成中" forever and the
+        // composer refuses to send (no done/error event will ever arrive).
+        onGiveUp?.();
         return;
       }
       if (es) { es.close(); es = null; }

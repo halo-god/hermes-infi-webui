@@ -5,8 +5,6 @@ import asyncio
 import re
 import uuid
 
-import urllib.parse
-
 from fastapi import APIRouter, Depends, File as FastApiFile, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -24,6 +22,7 @@ from app.core.files import (
     process_upload,
     extract_pdf_text,
     is_text_extractable,
+    safe_download_headers,
     OFFICE_EXTRACTORS,
 )
 from app.config import settings
@@ -371,6 +370,7 @@ async def upload_standalone_file(
     raw = await read_upload_capped(file, settings.max_upload_bytes)
     processed = await process_upload(
         raw, ext, f"standalone/{user.id}", name, content_type=file.content_type,
+        fast_mode=True,  # skip Docling cold start; keep uploads snappy
     )
     content = processed.content
     storage_key = processed.storage_key
@@ -404,6 +404,7 @@ async def upload_standalone_file(
         kind=ext,
         content=content,
         storage_key=storage_key,
+        preview_pdf_key=processed.preview_pdf_key,
         size_bytes=len(raw),
         created_by_agent=None,
     )
@@ -470,16 +471,19 @@ async def get_file_raw(
         raise HTTPException(404, "File is empty")
 
     filename = wf.name or "download"
-    inline = wf.kind in ("png", "jpg", "jpeg", "gif", "webp", "svg", "pdf")
-    disposition = (
-        f"inline; filename*=UTF-8''{urllib.parse.quote(filename)}"
-        if inline
-        else f"attachment; filename*=UTF-8''{urllib.parse.quote(filename)}"
-    )
+    # SVG is never served inline (stored-XSS risk — see safe_download_headers).
+    inline = wf.kind in ("png", "jpg", "jpeg", "gif", "webp", "pdf")
+    headers = safe_download_headers(filename, content_type)
+    if not inline:
+        # Force attachment for non-previewable kinds (safe_download_headers
+        # defaults to inline).
+        headers["Content-Disposition"] = headers["Content-Disposition"].replace(
+            "inline", "attachment", 1
+        )
     return Response(
         content=content,
         media_type=content_type,
-        headers={"Content-Disposition": disposition},
+        headers=headers,
     )
 
 
@@ -587,8 +591,10 @@ async def get_file_content(
         try:
             raw = await asyncio.to_thread(object_storage.get, wf.storage_key)
             if wf.kind in OFFICE_EXTRACTORS:
-                # Re-extract HTML from the stored original bytes.
-                content = OFFICE_EXTRACTORS[wf.kind](raw) or None
+                # Re-extract HTML from the stored original bytes. to_thread:
+                # legacy extractors may spawn a soffice subprocess (45s cap) —
+                # never run those on the event loop.
+                content = await asyncio.to_thread(OFFICE_EXTRACTORS[wf.kind], raw) or None
             elif wf.kind == "pdf":
                 content = extract_pdf_text(raw)
             elif is_text_extractable(wf.kind):
@@ -610,10 +616,12 @@ async def delete_standalone_file(
     """Delete a standalone file."""
     wf = await _require_file_owner(db, file_id, user)
 
-    # Delete from MinIO if stored there
-    if wf.storage_key:
+    # Delete from MinIO if stored there (original bytes + preview PDF).
+    for key in (wf.storage_key, wf.preview_pdf_key):
+        if not key:
+            continue
         try:
-            await asyncio.to_thread(object_storage.delete, wf.storage_key)
+            await asyncio.to_thread(object_storage.delete, key)
         except Exception:
             pass
 

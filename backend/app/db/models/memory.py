@@ -17,7 +17,12 @@ class AgentMemory(UUIDPrimaryKey, Timestamps, Base):
     __tablename__ = "agent_memory"
 
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True, index=True
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # NULL = global user memory (fallback); set = this profile's own memory.
+    # Uniqueness is enforced by the two partial indexes from migration 0089.
+    profile_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("profiles.id", ondelete="CASCADE"), nullable=True, index=True
     )
     notes: Mapped[str | None] = mapped_column(Text)
     user_profile: Mapped[str | None] = mapped_column(Text)
@@ -33,6 +38,10 @@ class MemoryEpisode(UUIDPrimaryKey, Timestamps, Base):
 
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # NULL = global episodes; set = this profile's own episodes.
+    profile_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("profiles.id", ondelete="CASCADE"), nullable=True, index=True
     )
     conversation_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True

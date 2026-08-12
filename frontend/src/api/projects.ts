@@ -82,6 +82,8 @@ export const projectsApi = {
     form.append("file", file);
     return (await http.post<ProjectDoc>(`/projects/${projectId}/docs/upload`, form, {
       headers: { "Content-Type": "multipart/form-data" },
+      // Office conversion (soffice) can take tens of seconds server-side.
+      timeout: 120_000,
     })).data;
   },
   async docContent(docId: string): Promise<string> {
@@ -90,6 +92,11 @@ export const projectsApi = {
   },
   docRawUrl(docId: string): string {
     return `${API_BASE}/projects/docs/${docId}/raw?ticket=${encodeURIComponent(mediaTicket.current())}`;
+  },
+  // LibreOffice-converted PDF preview (office files); falls back to the raw
+  // bytes server-side for native PDFs.
+  docPdfUrl(docId: string): string {
+    return `${API_BASE}/projects/docs/${docId}/pdf?ticket=${encodeURIComponent(mediaTicket.current())}`;
   },
   async updateDocContent(docId: string, content: string): Promise<string> {
     const r = await http.patch<{ content: string | null }>(`/projects/docs/${docId}`, { content });

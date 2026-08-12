@@ -29,6 +29,8 @@ export const filesApi = {
     return (await http.post<FileItem>("/files/upload", form, {
       headers: { "Content-Type": "multipart/form-data" },
       params: { folder },
+      // Office conversion (soffice) can take tens of seconds server-side.
+      timeout: 120_000,
     })).data;
   },
   async createFolder(name: string, parent = "/"): Promise<{ id: string; name: string; kind: string; folder_path: string; is_folder: boolean }> {

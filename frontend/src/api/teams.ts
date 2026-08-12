@@ -71,6 +71,11 @@ export const teamsApi = {
   knowledgeRawUrl(id: string, kid: string): string {
     return `${API_BASE}/teams/${id}/knowledge/${kid}/raw?ticket=${encodeURIComponent(mediaTicket.current())}`;
   },
+  // LibreOffice-converted PDF preview (office files); falls back to the raw
+  // bytes server-side for native PDFs.
+  knowledgePdfUrl(id: string, kid: string): string {
+    return `${API_BASE}/teams/${id}/knowledge/${kid}/pdf?ticket=${encodeURIComponent(mediaTicket.current())}`;
+  },
   async updateKnowledgeContent(id: string, kid: string, content: string): Promise<string> {
     const r = await http.patch<{ content: string | null }>(`/teams/${id}/knowledge/${kid}`, { content });
     return r.data.content || "";
