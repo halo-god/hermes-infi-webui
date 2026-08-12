@@ -2,6 +2,7 @@
 ProfilePromptProposal. Mirrors runner_skill_evolution. Never writes to
 Profile.system_prompt directly — approval is the only path that does."""
 from __future__ import annotations
+import asyncio
 
 import json
 import logging
@@ -44,9 +45,15 @@ async def handle_profile_evolution(task: dict, agents: dict) -> None:
                 return
 
             try:
-                result = await run_profile_evolution(db, profile)
-            except EvolutionGateFailure as exc:
-                await _set_status("error", f"未通过门禁，未生成提案: {exc}")
+                # Watchdog: GEPA can make up to 60 LLM calls (each now with a
+                # per-call timeout) — cap the WHOLE run so a pathological
+                # session can't occupy a runner slot forever.
+                result = await asyncio.wait_for(
+                    run_profile_evolution(db, profile),
+                    timeout=settings.skill_evolution_run_timeout,
+                )
+            except (asyncio.TimeoutError, EvolutionGateFailure) as exc:
+                await _set_status("error", f"演化超时或未通过门禁: {exc}")
                 return
 
             proposal = ProfilePromptProposal(

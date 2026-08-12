@@ -185,6 +185,13 @@ class Settings(BaseSettings):
     skill_evolution_llm_api_key: str = ""    # treat as a secret: never logged, never in a response
     skill_evolution_llm_api_base: str = ""   # optional self-hosted/proxy endpoint
     skill_evolution_llm_max_calls_per_run: int = 60  # hard cap on judge-LM calls, on top of GEPA's own budget
+    # Per-call timeout (seconds) for the evolution optimizer's LLM calls —
+    # a hung upstream request must not freeze the evolution task indefinitely.
+    skill_evolution_llm_timeout: int = 120
+    # Whole-run watchdog for one evolution task (GEPA makes up to 60 LLM
+    # calls) — a pathological session fails fast instead of occupying the
+    # runner slot until the lock TTL.
+    skill_evolution_run_timeout: int = 300
 
     # ── Auto-evolution ("Self-improvement review") ──
     # After every completed turn the runner checks whether any involved skill
