@@ -403,7 +403,7 @@ async def put_settings(
     if hermes_cfg:
         try:
             from app.services.hermes_config_sync import sync_hermes_configs
-            result = sync_hermes_configs()
+            result = await sync_hermes_configs()
             if result.get("synced"):
                 logger.info("Hermes config.yaml re-synced after settings update: %s", result["synced"])
         except Exception:

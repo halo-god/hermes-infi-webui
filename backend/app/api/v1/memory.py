@@ -295,9 +295,11 @@ async def import_skill_zip(
     # Extract resource files into the hermes skills dir(s) — the SKILL.md
     # itself is projected to global + every profile home by Direction A, so
     # resources must land in the SAME homes or profile agents get a skill
-    # whose scripts/data are missing.
+    # whose scripts/data are missing. The dir is resolved the same way as
+    # Direction A (slug-collision aware), so resources follow the SKILL.md.
     from app.services.skill_sync_service import (
-        _get_hermes_home, _profile_homes, _slugify, parse_skill_md,
+        _get_hermes_home, _profile_homes, _resolve_skill_dir, _slugify,
+        parse_skill_md,
     )
 
     parsed = parse_skill_md(skill_md) or {}
@@ -305,12 +307,20 @@ async def import_skill_zip(
     tags = parsed.get("tags") or []
     slug = _slugify(name)
 
+    skill = await memory_service.create_skill(
+        db, name=name, description=parsed.get("description", ""),
+        content=parsed.get("content", ""),
+        trigger_conditions={"keywords": tags} if tags else {},
+        owner_id=user.id,
+    )
+
     if resources:
+        sid = str(skill.id)
         homes = ([_get_hermes_home()] if _get_hermes_home() else []) + _profile_homes()
         for home in homes:
             if not home:
                 continue
-            dest = os.path.join(home, "skills", slug)
+            dest = _resolve_skill_dir(home, slug, sid, name)
             try:
                 os.makedirs(dest, exist_ok=True)
                 for rel, data in resources:
@@ -324,12 +334,6 @@ async def import_skill_zip(
                 # resource extraction is best-effort; the DB row still imports
                 pass
 
-    skill = await memory_service.create_skill(
-        db, name=name, description=parsed.get("description", ""),
-        content=parsed.get("content", ""),
-        trigger_conditions={"keywords": tags} if tags else {},
-        owner_id=user.id,
-    )
     return SkillOut.model_validate(skill, from_attributes=True)
 
 

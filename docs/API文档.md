@@ -66,10 +66,53 @@ LDAP：`method:"ldap"`，`username` 为域账号；首登按部门映射自动�
 
 ## 4. 助手与 Profile
 
+### Agent 注册表 `/agents`
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/agents` | ACP 注册表（来自 runner 探测）：`[{id,label,kind(acp_cli/builtin_mock),available,official,version,color,icon,description}]` |
-| GET | `/profiles` | Profile（ACP 会话）列表，含默认 agent/model |
+| POST | `/agents/scan` | 管理员：重新扫描 PATH 上的 agent CLI 并 upsert |
+
+### Profile（助手）`/profiles`
+每个 Profile 是一个独立助手，运行在独立 HERMES_HOME（`~/.hermes/profiles/<handle>/`）。**handle 改名自动迁移 FS home 目录**；**删除自动清理 FS home**；创建/克隆/导入自动投影 SOUL.md（persona）+ 补写 config.yaml overrides。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/profiles` | 列表（含默认 agent/model） |
+| POST | `/profiles` | 创建（管理员）：`{name,handle,system_prompt,default_model,…}` → 自动建隔离 home |
+| PATCH | `/profiles/{id}` | 更新（管理员）：`system_prompt` 变更投影 SOUL.md；`handle` 变更迁移 home |
+| DELETE | `/profiles/{id}` | 删除（管理员）：清理 DB 行 + best-effort 删除 FS home |
+| POST | `/profiles/{id}/clone` | 克隆：全新隔离 home（不共享源记忆/会话） |
+| GET | `/profiles/{id}/export` | 导出为可移植 JSON |
+| POST | `/profiles/import` | 批量导入（按 handle 去重） |
+| POST | `/profiles/scan` | 扫描 hermes FS 中的 profile（未注册的自动创建） |
+
+### 技能 `/memory/skills`
+技能与 hermes FS 双向同步：平台创建/修改 → 写 `{home}/skills/{slug}/SKILL.md`（frontmatter 保留原始 name + `platform_skill_id`，slug 冲突自动加 hash 后缀）；hermes 侧创建/修改 → 由 runner 启动 + 每日自动 scan 入库（也可手动触发）。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/memory/skills?profile_id=` | 技能列表（可按 profile 过滤） |
+| POST | `/memory/skills` | 创建：`{name,description,content,trigger_conditions:{keywords:[…]},profile_id?}` |
+| PATCH | `/memory/skills/{id}` | 更新（改名自动清理旧 FS 目录） |
+| DELETE | `/memory/skills/{id}` | 删除（按 id 标记清理所有 home 目录） |
+| POST | `/memory/skills/import` | ZIP 技能包导入（agentskills.io 布局，资源文件投影到各 home） |
+| POST | `/memory/skills/scan` | Direction B：手动扫描 hermes FS 技能入库 → `{new,updated,skipped,tombstoned}` |
+| GET | `/memory/skills/evolution/auto-status` | 自动演化状态（开关 + 自动应用计数）——实际路径 `skill-evolution/auto-status`（见下） |
+
+### 技能演化 `/skill-evolution`
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/skill-evolution/skills/{id}/evolve` | 触发技能演化（GEPA 优化器） |
+| GET | `/skill-evolution/skills/{id}/evolve/status` | 演化状态 |
+| GET | `/skill-evolution/auto-status` | 自动演化状态（配置开关 + 自动应用计数） |
+| GET | `/skill-evolution/proposals` | 演化提案列表（审批/驳回/自动应用） |
+| PATCH | `/skill-evolution/proposals/{id}` | 审批 / 驳回提案 |
+
+### 记忆 `/memory`
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/memory?profile_id=` | 长期记忆（notes/user_profile/soul；profile 专属优先、全局回退） |
+| PUT | `/memory?profile_id=` | 更新长期记忆（exact-scope：profile 写不碰全局行） |
 
 ---
 

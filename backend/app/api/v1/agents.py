@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import uuid
 from datetime import datetime, timezone
 
@@ -48,6 +49,30 @@ def _ensure_profile_home(handle: str) -> str | None:
     except Exception:  # noqa: BLE001
         logger.warning("Failed to create profile home for %s", handle, exc_info=True)
         return None
+
+
+async def _project_profile_home(p: Profile) -> None:
+    """After a profile is created (or its home changed), bring the new home
+    up to date with the platform's truth: SOUL.md persona + config overrides.
+
+    Config overrides used to wait for the next admin save / runner restart,
+    leaving a brand-new profile on defaults with no persona — this closes that
+    gap. Best-effort: never raises.
+    """
+    try:
+        from app.services.hermes_config_sync import sync_hermes_configs, sync_profile_soul
+        await sync_profile_soul(p)
+        await sync_hermes_configs()
+    except Exception:  # noqa: BLE001
+        logger.warning("Failed to project profile home for %s", getattr(p, "handle", "?"), exc_info=True)
+
+
+def _profile_home_dir(p: Profile) -> str | None:
+    """Directory of the profile's HERMES_HOME (dirname of its config path)."""
+    if not p.path:
+        return None
+    home = os.path.dirname(os.path.expanduser(p.path))
+    return home if home else None
 
 
 router = APIRouter()
@@ -195,6 +220,9 @@ async def create_profile(
     db.add(p)
     await db.commit()
     await db.refresh(p)
+    # Bring the fresh home up to date: SOUL.md persona + config overrides
+    # (the empty config.yaml gets the admin's advanced settings right away).
+    await _project_profile_home(p)
     return ProfileOut.model_validate(p)
 
 
@@ -208,15 +236,45 @@ async def update_profile(
     p = await db.get(Profile, profile_id)
     if p is None:
         raise HTTPException(status_code=404, detail="助手不存在")
-    for field, value in _serialize_skills(payload.model_dump(exclude_unset=True)).items():
+    updates = _serialize_skills(payload.model_dump(exclude_unset=True))
+    old_handle = p.handle
+    old_home = _profile_home_dir(p)
+    changed = set(updates.keys())
+
+    # Handle rename migrates the FS home directory (otherwise the old home —
+    # memory_store.db, sessions, skills, SOUL.md — becomes an orphan while the
+    # new handle has no isolated home at all).
+    new_handle = updates.get("handle")
+    if new_handle and new_handle != old_handle and old_home and os.path.isdir(old_home):
+        new_home = os.path.join(os.path.dirname(old_home), new_handle)
+        try:
+            if os.path.isdir(new_home):
+                raise HTTPException(status_code=409, detail=f"目标 home 已存在: {new_home}")
+            os.makedirs(os.path.dirname(new_home), exist_ok=True)
+            shutil.move(old_home, new_home)
+            updates["path"] = os.path.join(new_home, "config.yaml")
+            logger.info("Migrated profile home %s → %s", old_home, new_home)
+        except HTTPException:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed to migrate profile home %s → %s", old_home, new_home, exc_info=True)
+
+    # Direct path change: make sure the target home exists (may be a fresh dir
+    # the caller points at) so projections land somewhere real.
+    if "path" in updates and updates["path"] != old_home and not os.path.isdir(
+        os.path.dirname(os.path.expanduser(updates["path"]))
+    ):
+        _ensure_profile_home(new_handle or old_handle)
+
+    for field, value in updates.items():
         setattr(p, field, value)
     await db.commit()
     await db.refresh(p)
-    # system_prompt edits must also project into the profile's SOUL.md so
-    # hermes's persistent persona follows the DB truth.
-    if "system_prompt" in payload.model_dump(exclude_unset=True):
-        from app.services.hermes_config_sync import sync_profile_soul
-        await sync_profile_soul(p)
+
+    # Re-project whenever persona or the home location changed.
+    new_home = _profile_home_dir(p)
+    if "system_prompt" in changed or (new_home and new_home != old_home):
+        await _project_profile_home(p)
     return ProfileOut.model_validate(p)
 
 
@@ -229,8 +287,18 @@ async def delete_profile(
     p = await db.get(Profile, profile_id)
     if p is None:
         raise HTTPException(status_code=404, detail="助手不存在")
+    # Best-effort cleanup of the profile's isolated HERMES_HOME (memory,
+    # sessions, skills, SOUL.md) — without it the dir lingers forever and the
+    # config sync keeps writing overrides for a deleted profile.
+    home = _profile_home_dir(p)
     await db.delete(p)
     await db.commit()
+    if home and os.path.isdir(home):
+        try:
+            shutil.rmtree(home)
+            logger.info("Removed profile home %s", home)
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed to remove profile home %s", home, exc_info=True)
 
 
 @router.post("/profiles/{profile_id}/clone", response_model=ProfileOut, status_code=201)
@@ -278,6 +346,9 @@ async def clone_profile(
     db.add(clone)
     await db.commit()
     await db.refresh(clone)
+    # Clone carries system_prompt — project SOUL.md + config overrides into
+    # the fresh home so the copy is persona-ready on first run.
+    await _project_profile_home(clone)
     return ProfileOut.model_validate(clone)
 
 
@@ -376,6 +447,9 @@ async def import_profiles(
     await db.commit()
     for p in created:
         await db.refresh(p)
+        # Imported profiles may carry system_prompt — project persona + config
+        # overrides into their fresh homes right away.
+        await _project_profile_home(p)
     return [ProfileOut.model_validate(p) for p in created]
 
 

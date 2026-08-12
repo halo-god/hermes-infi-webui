@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import asyncio
@@ -163,6 +164,42 @@ def _message_excerpt(msg: Message) -> str | None:
     return f"{prefix}: {text}"
 
 
+@dataclass
+class _ConsolidationPlan:
+    """One LLM consolidation run: the conversations of a single profile
+    (profile_id=None → the global memory layer), its current memory as the
+    "existing memory" baseline, and the excerpt sections to feed the prompt."""
+
+    profile_id: uuid.UUID | None
+    sections: list[str] = field(default_factory=list)
+    # Parallel to sections — (conversation_id, title, raw_chars) for writing
+    # one MemoryEpisode per section once the LLM returns summaries in order.
+    episode_meta: list[tuple[uuid.UUID, str, int]] = field(default_factory=list)
+    old: dict[str, str] = field(default_factory=dict)
+
+
+def _build_plan_sections(
+    convos: list[Conversation], msgs_by_conv: dict[uuid.UUID, list[Message]], budget: int,
+) -> tuple[list[str], list[tuple[uuid.UUID, str, int]]]:
+    """Build excerpt sections for a group of conversations within the budget."""
+    sections: list[str] = []
+    episode_meta: list[tuple[uuid.UUID, str, int]] = []
+    used = 0
+    for convo in convos:
+        lines = [e for m in msgs_by_conv.get(convo.id, []) if (e := _message_excerpt(m))]
+        if not lines:
+            continue
+        section = f"## 会话「{convo.title}」\n" + "\n".join(lines)
+        if used + len(section) > budget:
+            section = section[: budget - used]
+        sections.append(section)
+        episode_meta.append((convo.id, convo.title, len(section)))
+        used += len(section)
+        if used >= budget:
+            break
+    return sections, episode_meta
+
+
 async def handle_memory_consolidate(task: dict, agents: dict) -> None:
     """Handle memory consolidation task."""
     from app.services import memory_service
@@ -189,23 +226,11 @@ async def handle_memory_consolidate(task: dict, agents: dict) -> None:
 
     try:
         async with async_session_maker() as db:
-            mem = await memory_service.get_memory(db, uuid.UUID(user_id))
-            since = mem.last_consolidated_at if mem else None
             stmt = select(Conversation).where(Conversation.owner_id == uuid.UUID(user_id))
-            if since is not None:
-                stmt = stmt.where(Conversation.updated_at > since)
             stmt = stmt.order_by(Conversation.updated_at.desc()).limit(
                 settings.memory_consolidate_max_conversations
             )
             convos = list((await db.execute(stmt)).scalars().all())
-
-            budget = settings.memory_consolidate_input_chars
-            sections: list[str] = []
-            # Parallel to `sections` - (conversation_id, title, raw_chars) for
-            # each section, used to write one MemoryEpisode per section once
-            # the LLM returns per-section summaries in the same order.
-            episode_meta: list[tuple[uuid.UUID, str, int]] = []
-            used = 0
 
             # Batch-load messages for all conversations in a single query
             # instead of N per-conversation round-trips (N+1 prevention).
@@ -226,33 +251,42 @@ async def handle_memory_consolidate(task: dict, agents: dict) -> None:
             for m in all_msgs:
                 msgs_by_conv.setdefault(m.conversation_id, []).append(m)
 
-            for convo in convos:
-                lines = [e for m in msgs_by_conv.get(convo.id, []) if (e := _message_excerpt(m))]
-                if not lines:
-                    continue
-                section = f"## 会话「{convo.title}」\n" + "\n".join(lines)
-                if used + len(section) > budget:
-                    section = section[: budget - used]
-                sections.append(section)
-                episode_meta.append((convo.id, convo.title, len(section)))
-                used += len(section)
-                if used >= budget:
-                    break
-            old = {
-                "user_profile": (mem.user_profile if mem else "") or "",
-                "soul": (mem.soul if mem else "") or "",
-                "notes": (mem.notes if mem else "") or "",
-            }
-            if mem is None or not mem.last_consolidated_at:
-                user = await db.get(User, uuid.UUID(user_id))
-                if user and user.preferences:
-                    prefs = user.preferences
-                    pref_lines = [f"- {k}: {v}" for k, v in prefs.items() if v]
-                    if pref_lines:
-                        legacy = "【旧版偏好设置（自动迁移）】\n" + "\n".join(pref_lines)
-                        old["notes"] = (old["notes"] + "\n\n" + legacy).strip() if old["notes"] else legacy
+            # Per-profile memory semantics: each profile's conversations are
+            # consolidated against THAT profile's memory row (global rows fall
+            # back to the shared row as baseline); profile-less conversations
+            # land in the global layer. One plan per profile with content.
+            groups: dict[uuid.UUID | None, list[Conversation]] = {}
+            for c in convos:
+                groups.setdefault(c.profile_id, []).append(c)
 
-        if not sections:
+            budget = settings.memory_consolidate_input_chars
+            plans: list[_ConsolidationPlan] = []
+            for pid, group_convos in groups.items():
+                mem = await memory_service.get_memory(db, uuid.UUID(user_id), profile_id=pid)
+                since = mem.last_consolidated_at if mem else None
+                recent = [c for c in group_convos if since is None or c.updated_at > since]
+                if not recent:
+                    continue
+                sections, episode_meta = _build_plan_sections(recent, msgs_by_conv, budget)
+                if not sections:
+                    continue
+                old = {
+                    "user_profile": (mem.user_profile if mem else "") or "",
+                    "soul": (mem.soul if mem else "") or "",
+                    "notes": (mem.notes if mem else "") or "",
+                }
+                if mem is None or not mem.last_consolidated_at:
+                    user = await db.get(User, uuid.UUID(user_id))
+                    if user and user.preferences:
+                        prefs = user.preferences
+                        pref_lines = [f"- {k}: {v}" for k, v in prefs.items() if v]
+                        if pref_lines:
+                            legacy = "【旧版偏好设置（自动迁移）】\n" + "\n".join(pref_lines)
+                            old["notes"] = (old["notes"] + "\n\n" + legacy).strip() if old["notes"] else legacy
+                plans.append(_ConsolidationPlan(profile_id=pid, sections=sections,
+                                                episode_meta=episode_meta, old=old))
+
+        if not plans:
             await _set_status("done", "没有新的对话内容，记忆保持不变")
             return
 
@@ -261,17 +295,16 @@ async def handle_memory_consolidate(task: dict, agents: dict) -> None:
             await _set_status("error", "没有可用的 agent")
             return
 
-        prompt = CONSOLIDATE_PROMPT.format(
-            budget=settings.memory_total_chars,
-            excerpts="\n\n".join(sections),
-            user_profile=old["user_profile"] or "（空）",
-            soul=old["soul"] or "（空）",
-            notes=old["notes"] or "（空）",
-        )
-
         cwd = os.path.join(settings.workspace_root, f"memconsol-{user_id}")
         await asyncio.to_thread(os.makedirs, cwd, exist_ok=True)
-        buf = {"text": ""}
+        # Isolated HERMES_HOME for the subprocess: without it the agent's own
+        # memory tools write the GLOBAL ~/.hermes memories/MEMORY.md and
+        # memory_store.db while the platform writes Postgres — an implicit
+        # double-write that drifts. Pointing it at a scratch home keeps the
+        # consolidation read (the prompt already carries the existing memory)
+        # and any incidental memory writes inside this run's scratch dir.
+        tmp_home = os.path.join(cwd, "hermes-home")
+        await asyncio.to_thread(os.makedirs, tmp_home, exist_ok=True)
 
         async def on_update(update: dict) -> None:
             if update.get("sessionUpdate") == "agent_message_chunk":
@@ -280,63 +313,87 @@ async def handle_memory_consolidate(task: dict, agents: dict) -> None:
         async def _noop_fs(_p: str, _c: str) -> None:
             return None
 
-        client = ACPClient(
-            agent.command, cwd, protocol_version=settings.acp_protocol_version,
-            on_update=on_update, on_fs_write=_noop_fs,
-            on_permission_request=auto_deny_permission,
-        )
-        try:
-            await client.start()
-            await client.initialize()
-            await client.new_session(cwd)
-            await client.prompt(prompt)
-        finally:
-            await client.stop()
-
-        parsed = parse_memory_json(buf["text"])
-        if parsed is None:
-            logger.warning(
-                "memory_consolidate: unparseable output for %s: %r",
-                user_id[:8], buf["text"][:300],
+        # One LLM run per plan; a failing group must not sink the others.
+        results: list[tuple[_ConsolidationPlan, dict[str, str], list[str] | None]] = []
+        for plan in plans:
+            prompt = CONSOLIDATE_PROMPT.format(
+                budget=settings.memory_total_chars,
+                excerpts="\n\n".join(plan.sections),
+                user_profile=plan.old["user_profile"] or "（空）",
+                soul=plan.old["soul"] or "（空）",
+                notes=plan.old["notes"] or "（空）",
             )
+            buf = {"text": ""}
+            client = ACPClient(
+                agent.command, cwd, protocol_version=settings.acp_protocol_version,
+                on_update=on_update, on_fs_write=_noop_fs,
+                on_permission_request=auto_deny_permission,
+                env={"HERMES_HOME": tmp_home},
+            )
+            try:
+                await client.start()
+                await client.initialize()
+                await client.new_session(cwd)
+                await client.prompt(prompt)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "memory_consolidate: group profile_id=%s failed for %s: %s",
+                    plan.profile_id, user_id[:8], type(exc).__name__,
+                )
+                continue
+            finally:
+                await client.stop()
+
+            parsed = parse_memory_json(buf["text"])
+            if parsed is None:
+                logger.warning(
+                    "memory_consolidate: unparseable output for %s (profile_id=%s): %r",
+                    user_id[:8], plan.profile_id, buf["text"][:300],
+                )
+                continue
+            for k in _MEMORY_KEYS:
+                parsed[k] = parsed[k] or plan.old[k]
+            parsed = trim_memory_to_budget(parsed, settings.memory_total_chars)
+            # Per-conversation summaries for the searchable episodic layer —
+            # best effort: a missing/malformed "episodes" field skips episode
+            # creation for this group without failing the flat update.
+            episode_summaries = parse_episode_summaries(buf["text"], len(plan.episode_meta))
+            if episode_summaries is None and plan.episode_meta:
+                logger.info(
+                    "memory_consolidate: no usable per-section episodes for %s (profile_id=%s, expected %d)",
+                    user_id[:8], plan.profile_id, len(plan.episode_meta),
+                )
+            results.append((plan, parsed, episode_summaries))
+
+        if not results:
             await _set_status("error", "AI 输出无法解析，记忆未变更")
             return
-        for k in _MEMORY_KEYS:
-            parsed[k] = parsed[k] or old[k]
-        parsed = trim_memory_to_budget(parsed, settings.memory_total_chars)
 
-        # Per-conversation summaries for the searchable episodic layer — best
-        # effort: a missing/malformed "episodes" field skips episode creation
-        # for this run without failing the (already-shipped) flat update above.
-        episode_summaries = parse_episode_summaries(buf["text"], len(episode_meta))
-        if episode_summaries is None and episode_meta:
-            logger.info(
-                "memory_consolidate: no usable per-section episodes for %s (expected %d)",
-                user_id[:8], len(episode_meta),
-            )
-
+        conv_profile: dict[uuid.UUID, uuid.UUID | None] = {
+            c.id: c.profile_id for c in convos
+        }
         async with async_session_maker() as db:
-            await memory_service.upsert_memory(
-                db, uuid.UUID(user_id),
-                notes=parsed["notes"], user_profile=parsed["user_profile"],
-                soul=parsed["soul"], last_consolidated_at=consolidation_ts,
-            )
-            if episode_summaries:
-                # Episodes are attributed to the conversation's profile when it
-                # has one, so each assistant's episodic recall stays scoped;
-                # profile-less conversations land in the global layer.
-                conv_profile: dict[uuid.UUID, uuid.UUID | None] = {
-                    c.id: c.profile_id for c in convos
-                }
-                for (conv_id, title, raw_chars), summary in zip(episode_meta, episode_summaries):
-                    await memory_service.add_episode(
-                        db, uuid.UUID(user_id), conv_id, title, summary, raw_chars,
-                        consolidation_ts, profile_id=conv_profile.get(conv_id),
-                        commit=False,
-                    )
-                # Single commit for all episodes instead of N round-trips.
-                await db.commit()
-        await _set_status("done")
+            for plan, parsed, episode_summaries in results:
+                # Flat memory lands on the plan's own profile row (global row
+                # for profile-less conversations) — never the shared fallback.
+                await memory_service.upsert_memory(
+                    db, uuid.UUID(user_id), profile_id=plan.profile_id,
+                    notes=parsed["notes"], user_profile=parsed["user_profile"],
+                    soul=parsed["soul"], last_consolidated_at=consolidation_ts,
+                )
+                if episode_summaries:
+                    # Episodes are attributed to the conversation's profile when
+                    # it has one, so each assistant's episodic recall stays
+                    # scoped; profile-less conversations land in the global layer.
+                    for (conv_id, title, raw_chars), summary in zip(plan.episode_meta, episode_summaries):
+                        await memory_service.add_episode(
+                            db, uuid.UUID(user_id), conv_id, title, summary, raw_chars,
+                            consolidation_ts, profile_id=conv_profile.get(conv_id),
+                            commit=False,
+                        )
+            # Single commit for all groups instead of N round-trips.
+            await db.commit()
+        await _set_status("done", f"整理完成（{len(results)} 组）")
     except ACPTimeout:
         await _set_status("error", "整理超时")
     except Exception as exc:  # noqa: BLE001

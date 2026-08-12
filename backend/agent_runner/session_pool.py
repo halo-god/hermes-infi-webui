@@ -123,7 +123,7 @@ class SessionPool:
         # persist across restarts and survive agent self-edits.
         try:
             from app.services.hermes_config_sync import sync_hermes_configs
-            result = sync_hermes_configs()
+            result = await sync_hermes_configs()
             if result.get("synced"):
                 logger.info("Hermes config.yaml synced: %s", ", ".join(result["synced"]))
         except Exception:

@@ -18,8 +18,11 @@
 | [文件处理流程.md](文件处理流程.md) | 上传/解析/预览流水线 | 开发 |
 | [企业微信SSO集成.md](企业微信SSO集成.md) | 企微扫码登录与组织映射 | 开发 / 运维 |
 | [Hermes助手变更记录.md](Hermes助手变更记录.md) | hermes CLI 侧改动跟踪 | 开发 |
+| [ACP-Runner稳定性问题修复记录.md](ACP-Runner稳定性问题修复记录.md) | ACP 链路稳定性修复历史 | 开发 / 运维 |
 | [design/群聊设计.md](design/群聊设计.md) | 群聊/圆桌/频道模式设计 | 开发 |
 | [沙箱部署指南.md](沙箱部署指南.md) | Agent 子进程隔离：bubblewrap/firejail 生产配置 | 运维 / 安全 |
+
+> hermes-agent 集成架构（HERMES_HOME 布局、技能双向同步、配置/人设投影、记忆打通）见 [CLAUDE.md](../CLAUDE.md)「hermes-agent 集成」章节。
 
 ## 5 分钟跑起来
 
@@ -34,7 +37,7 @@ make up        # postgres + redis + minio + api + agent-runner + web
 
 ## 项目状态
 
-P0–P5 六阶段 + 真机联调全部完成，10 个集成测试基于真实 PostgreSQL + Redis 通过。详见各阶段说明（[根 README](../README.md#实现进度)）。
+P0–P5 六阶段 + 真机联调全部完成。后端 90+ 集成测试（真实 PostgreSQL + Redis）、前端 Playwright E2E 39+ 用例。已扩展能力：知识库（混合检索）、定时任务、**多 Profile 助手（独立 HERMES_HOME）**、记忆（per-profile + 全局回退）、技能双向同步 + 自动演化、群聊/圆桌、会话分享、企业微信 SSO。详见 [用户操作手册](用户操作手册.md)。
 
 ## 仓库结构
 
