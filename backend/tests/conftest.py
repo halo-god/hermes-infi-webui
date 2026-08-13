@@ -78,67 +78,36 @@ def _assert_approved_redis(label: str, raw_url: str) -> None:
 
 # Belt: env-level value must be approved...
 _assert_approved_redis("REDIS_URL", os.environ["REDIS_URL"])
-# ...and suspenders: the value the app ACTUALLY uses must be approved too.
-# Importing app.config here forces the singleton to resolve NOW (after the
-# setdefault above), so the guard sees whatever the suite would connect to.
-from app.config import settings as _settings  # noqa: E402
-_assert_approved_redis("settings.redis_url", _settings.redis_url)
 
-# Pin storage backend BEFORE the pydantic singleton can be first constructed:
+# Pin storage backend BEFORE the pydantic singleton can be constructed:
 # backend/.env sets STORAGE_BACKEND=minio (production); env beats .env in
-# pydantic-settings, so setting it before ANY settings import (incl. the
-# redis effective-value guard below) keeps every test on the 'db' backend.
+# pydantic-settings, so setting it before ANY settings import keeps every
+# test on the 'db' backend.
 os.environ["STORAGE_BACKEND"] = "db"
 
-# The REDIS_URL env check above is necessary but NOT sufficient (verified
-# 2026-08-12): pydantic-settings resolves settings.redis_url ONCE, at
-# singleton instantiation. If a parent conftest, plugin, or earlier import
-# constructs the singleton before this module's setdefault ran, it reads
-# backend/.env (production 127.0.0.1:1979) while os.environ here reads the
-# pinned 6380, so the env guard passes while app.core.redis and
-# agent_runner.acp_client still dial production (78 real ACP roundtable
-# dispatches, 2026-08-04..11). Guard the EFFECTIVE value the app actually
-# connects with.
-from app.config import settings as _settings  # noqa: E402
-_sru = _urlparse(_settings.redis_url)
-if (_sru.hostname, _sru.port) not in _ALLOWED_REDIS:
-    raise RuntimeError(
-        f"settings.redis_url resolves to an unapproved Redis "
-        f"({_sru.hostname}:{_sru.port}); the pydantic settings singleton was "
-        "instantiated before conftest pinned the test instance and read "
-        "backend/.env. Re-run with REDIS_URL=redis://127.0.0.1:6380/0 exported "
-        "(env beats .env) and do NOT run the suite until this resolves."
-    )
-# ── Second guard: the app Settings singleton must ALSO target test Redis ──
-# The 2026-08-12 production-dispatch incident: pytest tests/test_group_chat.py
-# (test_group_roundtable_attachment_gets_content_blocks) dispatched a REAL
-# roundtable session ("大家看看这份笔记" + notes.md fixture) to the production
-# acp_stream because the ACP subprocess env (agent_runner/acp_client.py) and the
-# test assertions (app/core/redis.py) read settings.redis_url — the pydantic
-# Settings singleton — NOT os.environ["REDIS_URL"]. If that singleton is
-# instantiated before the setdefault above (a higher-level conftest / plugin
-# importing app.config early), it picks up backend/.env's production URL
-# (127.0.0.1:1979) and the env-var guard above passes anyway. Validate the
-# singleton itself; creating it here (env vars set) also pins it to 6380 for
-# every subsequent import.
-from app.config import get_settings as _get_settings  # noqa: E402
-
-_sredis = _get_settings().redis_url
-_sru = _urlparse(_sredis)
-if (_sru.hostname, _sru.port) not in _ALLOWED_REDIS:
-    raise RuntimeError(
-        f"settings.redis_url points at an unapproved Redis "
-        f"({_sru.hostname}:{_sru.port}). The Settings singleton must resolve to "
-        "the dedicated test instance (127.0.0.1:6380) — see the 2026-08-12 "
-        "production-dispatch note above. Something imported app.config before "
-        "conftest pinned REDIS_URL; move that import after this file, or export "
-        "REDIS_URL before pytest runs."
-    )
+# Skill evolution: backend/.env ships a REAL LLM key + enabled flag
+# (production). Tests must never reach the dspy optimizer — it would spend
+# money and needs a real eval dataset — so pin to the free Stage D1 stub
+# before the settings singleton is built (same pattern as STORAGE_BACKEND).
+os.environ["SKILL_EVOLUTION_ENABLED"] = "false"
+os.environ["SKILL_EVOLUTION_LLM_API_KEY"] = ""
 
 # Tests must never depend on the network: force HF Hub offline so embedding
 # model loads use the local cache only (an unreachable huggingface.co would
 # otherwise stall real-model tests for 30s+ per DNS timeout).
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
+# ...and suspenders: the value the app ACTUALLY uses must be approved too.
+# Importing app.config here forces the Settings singleton to resolve NOW
+# (after the setdefaults/pins above), so the guard sees whatever the suite
+# would connect to — app/core/redis.py dials settings.redis_url, and
+# agent_runner/acp_client.py copies it into the ACP subprocess env. If a
+# stale singleton was already constructed before this module ran (a plugin
+# or early app import reading backend/.env: production 127.0.0.1:1979),
+# this raises instead of dispatching real ACP roundtable tasks to
+# production Redis (the 2026-08-04..12 recurrence).
+from app.config import settings as _settings  # noqa: E402
+_assert_approved_redis("settings.redis_url", _settings.redis_url)
 
 from app.core.security import create_token  # noqa: E402
 from app.db import base as db_base  # noqa: E402

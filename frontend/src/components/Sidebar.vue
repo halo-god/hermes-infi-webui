@@ -11,6 +11,7 @@ import { useAuthStore } from "@/stores/auth";
 import { useBrandingStore } from "@/stores/branding";
 import { useChatStore } from "@/stores/chat";
 import { useNotificationStore } from "@/stores/notifications";
+import { usePromptModal } from "@/composables/usePromptModal";
 import { conversationsApi } from "@/api/conversations";
 import type { Conversation } from "@/types";
 
@@ -18,6 +19,7 @@ const auth = useAuthStore();
 const chat = useChatStore();
 const branding = useBrandingStore();
 const ns = useNotificationStore();
+const { promptModal, confirmModal } = usePromptModal();
 const router = useRouter();
 const route = useRoute();
 const { t } = useI18n();
@@ -310,7 +312,11 @@ async function moveToFolder(conversationId: string, folderId: string | null) {
 }
 
 async function renameFolderPrompt(folderId: string, currentName: string) {
-  const name = window.prompt("文件夹名称", currentName);
+  const name = await promptModal({
+    title: "重命名文件夹",
+    initial: currentName,
+    placeholder: "文件夹名称",
+  });
   if (name === null) return;
   const trimmed = name.trim();
   if (!trimmed || trimmed === currentName) return;
@@ -322,7 +328,11 @@ async function renameFolderPrompt(folderId: string, currentName: string) {
 }
 
 async function deleteFolderPrompt(folderId: string, name: string) {
-  if (!window.confirm(`删除文件夹「${name}」？其中的会话将移至未分组，不会被删除。`)) return;
+  const ok = await confirmModal({
+    title: "删除文件夹",
+    message: `删除文件夹「${name}」？其中的会话将移至未分组，不会被删除。`,
+  });
+  if (!ok) return;
   try {
     await chat.deleteFolder(folderId);
     ns.toast("文件夹已删除");

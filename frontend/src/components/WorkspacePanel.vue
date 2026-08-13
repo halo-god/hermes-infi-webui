@@ -3,7 +3,12 @@ import { computed, nextTick, ref, watch } from "vue";
 import Icon from "@/components/Icon.vue";
 import { renderMarkdown, renderMarkdownAsync } from "@/utils/markdown";
 import { computeLineDiff, colorDiff } from "@/utils/diff";
+import { useNotificationStore } from "@/stores/notifications";
+import { usePromptModal } from "@/composables/usePromptModal";
 import type { FileItem, WsAdapter, WorkspaceFileVersion } from "@/types";
+
+const ns = useNotificationStore();
+const { confirmModal } = usePromptModal();
 
 const props = defineProps<{
   files: FileItem[];
@@ -347,14 +352,18 @@ async function loadContent(f: FileItem) {
 
 async function removeFile(f: FileItem) {
   if (!props.adapter.removeFile) return;
-  if (!window.confirm(`确定删除「${f.name}」吗？此操作不可恢复。`)) return;
+  const ok = await confirmModal({
+    title: "删除文件",
+    message: `确定删除「${f.name}」吗？此操作不可恢复。`,
+  });
+  if (!ok) return;
   try {
     await props.adapter.removeFile(f.id);
     const tab = openTabs.value.find((t) => t.fileId === f.id);
     if (tab) closeTab(tab.id);
     emit("changed");
   } catch {
-    window.alert("删除失败，请稍后重试");
+    ns.toast("删除失败，请稍后重试", "error");
   }
 }
 
@@ -370,7 +379,7 @@ async function retryFile(f: FileItem) {
     }
     emit("changed");
   } catch {
-    window.alert("重试失败，请重新上传该文件");
+    ns.toast("重试失败，请重新上传该文件", "error");
   }
 }
 

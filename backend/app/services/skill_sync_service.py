@@ -11,11 +11,14 @@ hermes filesystem is a runtime projection.
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import logging
 import os
 import re
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -140,19 +143,28 @@ async def _profile_home(profile_id: uuid.UUID) -> str | None:
         return None
 
 
+def _hash_content(content: str) -> str:
+    """sha256 of skill content — the sync loop's change detector."""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
 def _render_skill_md(name: str, description: str, content: str, tags: list[str] | None = None,
-                     skill_id: str | None = None) -> str:
+                     skill_id: str | None = None, content_hash: str | None = None) -> str:
     """Render an agentskills.io-standard SKILL.md from AgentSkill fields.
 
     frontmatter `name` keeps the ORIGINAL name (hermes displays it via
     frontmatter, the slug is only the directory name); the DB uuid travels in
-    metadata.platform_skill_id for rename/delete lookup.
+    metadata.platform_skill_id for rename/delete lookup; metadata.content_hash
+    lets Direction B recognise this file as a projection of the current DB
+    version (loop breaker — see 0092).
     """
     meta: dict = {"name": name, "description": description[:1024]}
     if tags:
         meta["metadata"] = {"tags": tags}
     if skill_id:
         meta.setdefault("metadata", {})[_PLATFORM_ID_KEY] = skill_id
+    if content_hash:
+        meta.setdefault("metadata", {})["content_hash"] = content_hash
     frontmatter = yaml.dump(meta, allow_unicode=True, default_flow_style=False, sort_keys=False)
     return f"---\n{frontmatter}---\n\n{content}\n"
 
@@ -224,6 +236,11 @@ async def sync_skill_to_hermes(skill_id, name: str, description: str, content: s
     only exists in THAT profile's HERMES_HOME (each profile's agent reads only
     its own home). Global / owner / team skills project to the global
     skills/ dir AND every profile home so all profiles can use them.
+
+    Loop breaker: the frontmatter carries content_hash, and the DB row's
+    content_hash is refreshed AFTER the writes — Direction B then sees the
+    file as a projection of the DB and skips it, so platform/evolution edits
+    can never be bounced back by the next scan.
     """
     if not settings.hermes_skills_sync_enabled:
         return
@@ -246,10 +263,30 @@ async def sync_skill_to_hermes(skill_id, name: str, description: str, content: s
     tags = []
     if trigger_conditions and isinstance(trigger_conditions, dict):
         tags = trigger_conditions.get("keywords") or []
-    md = _render_skill_md(name, description, content, tags, skill_id=sid)
+    # Hash is computed over the PARSED form (content.strip()) — Direction B
+    # strips the file body when parsing, so a projection whose DB content has
+    # trailing whitespace must still hash-match and stay a projection.
+    content_hash = _hash_content(content.strip())
+    md = _render_skill_md(name, description, content, tags, skill_id=sid, content_hash=content_hash)
 
     for home in homes:
-        _write_skill_to_home(home, slug, md, enabled=enabled, name=name, skill_id=sid)
+        await asyncio.to_thread(
+            _write_skill_to_home, home, slug, md,
+            enabled=enabled, name=name, skill_id=sid,
+        )
+
+    # Record the hash the FS now mirrors so Direction B skips this row.
+    try:
+        from app.db.base import async_session_maker
+        from app.db.models.memory import AgentSkill
+        async with async_session_maker() as db:
+            row = await db.get(AgentSkill, uuid.UUID(sid))
+            if row is not None:
+                row.content_hash = content_hash
+                row.last_synced_at = datetime.now(timezone.utc)
+                await db.commit()
+    except Exception:  # noqa: BLE001
+        logger.debug("Failed to record content_hash for skill %s", sid, exc_info=True)
 
 
 async def remove_skill_from_hermes(name: str, skill_id=None) -> None:
@@ -293,6 +330,9 @@ class HermesSkillInfo:
     tags: list[str]
     # DB uuid marker written by the platform (see _PLATFORM_ID_KEY).
     platform_skill_id: str | None = None
+    # Hash of `content` recorded in the frontmatter by Direction A — when it
+    # equals the DB row's content_hash, the file is a projection: skip.
+    content_hash: str | None = None
     # Set when the skill was found under a profile's home (multi-profile scan).
     profile_id: uuid.UUID | None = None
 
@@ -322,6 +362,7 @@ def list_hermes_fs_skills(hermes_home: str | None = None) -> list[HermesSkillInf
                     content=parsed["content"],
                     tags=parsed.get("tags", []),
                     platform_skill_id=parsed.get("platform_skill_id"),
+                    content_hash=parsed.get("content_hash"),
                 ))
                 # Slug-collision health check (1c): two dirs whose slugs slugify
                 # to the same key (e.g. CJK names → "unnamed-skill") would have
@@ -340,12 +381,12 @@ def list_hermes_fs_skills(hermes_home: str | None = None) -> list[HermesSkillInf
 
 
 def _parse_skill_md(raw: str) -> dict | None:
-    """Parse a SKILL.md into {name, description, content, tags}."""
+    """Parse a SKILL.md into {name, description, content, tags, content_hash}."""
     m = _FRONTMATTER_RE.match(raw)
     if not m:
         # No frontmatter — treat whole file as content.
         return {"name": "unnamed", "description": "", "content": raw.strip(), "tags": [],
-                "platform_skill_id": None}
+                "platform_skill_id": None, "content_hash": None}
     try:
         meta = yaml.safe_load(m.group(1)) or {}
     except yaml.YAMLError:
@@ -367,9 +408,13 @@ def _parse_skill_md(raw: str) -> dict | None:
             tags = t
         elif isinstance(t, str):
             tags = [t]
+    content_hash = nested_meta.get("content_hash") if isinstance(nested_meta, dict) else None
+    if content_hash is not None and not isinstance(content_hash, str):
+        content_hash = None
     return {
         "name": name, "description": description, "content": content, "tags": tags,
         "platform_skill_id": nested_meta.get(_PLATFORM_ID_KEY) if isinstance(nested_meta, dict) else None,
+        "content_hash": content_hash,
     }
 
 
@@ -424,7 +469,14 @@ async def ingest_hermes_skills(db: AsyncSession, owner_id) -> dict:
             existing_by_id.get(fs_skill.platform_skill_id)
             if fs_skill.platform_skill_id else None
         ) or existing_by_slug.get(_slugify(fs_skill.name))
+        if existing_skill is not None and existing_skill.profile_id != profile_id:
+            # Slug matched a row in ANOTHER scope (global vs profile, or two
+            # profiles): adopting it would silently merge distinct skills
+            # (and never tombstone either). Treat as unmatched — create the
+            # correct profile-scoped row instead.
+            existing_skill = None
         if existing_skill is None:
+            fs_hash = _hash_content(fs_skill.content)
             db.add(AgentSkill(
                 owner_id=owner_id,
                 profile_id=profile_id,
@@ -434,26 +486,38 @@ async def ingest_hermes_skills(db: AsyncSession, owner_id) -> dict:
                 trigger_conditions={"keywords": fs_skill.tags} if fs_skill.tags else {},
                 enabled=True,
                 origin="agent",
+                content_hash=fs_hash,
+                last_synced_at=datetime.now(timezone.utc),
             ))
             new_count += 1
         else:
             matched_ids.add(str(existing_skill.id))
-            if (existing_skill.profile_id == profile_id
-                    and existing_skill.content != fs_skill.content):
-                # Content changed in hermes FS — update DB (same profile scope).
+            fs_hash = _hash_content(fs_skill.content)
+            # Loop breaker: when the row's content_hash equals the parsed file
+            # hash, the file is a projection of the current DB version (or
+            # simply unchanged) — never bounce the DB back. The hash is stored
+            # over the parsed form (see sync_skill_to_hermes), so trailing-
+            # whitespace normalisation can't cause a false "changed" either.
+            if existing_skill.content_hash and existing_skill.content_hash == fs_hash:
+                return
+            if existing_skill.profile_id == profile_id:
+                # Content changed on the hermes side (or first sync since
+                # 0092, hash was NULL) — FS wins for agent-origin rows.
                 existing_skill.content = fs_skill.content
                 existing_skill.description = fs_skill.description
+                existing_skill.content_hash = fs_hash
+                existing_skill.last_synced_at = datetime.now(timezone.utc)
                 if fs_skill.tags:
                     existing_skill.trigger_conditions = {"keywords": fs_skill.tags}
                 updated_count += 1
 
     # 1. Global skills dir.
-    for fs_skill in list_hermes_fs_skills():
+    for fs_skill in await asyncio.to_thread(list_hermes_fs_skills):
         _ingest(fs_skill, profile_id=None)
 
     # 2. Every profile home — skills there belong to that profile.
     for home, pid in home_to_profile.items():
-        for fs_skill in list_hermes_fs_skills(home):
+        for fs_skill in await asyncio.to_thread(list_hermes_fs_skills, home):
             _ingest(fs_skill, profile_id=pid)
 
     # 3. Tombstone: agent-created rows (origin='agent') whose FS dir vanished

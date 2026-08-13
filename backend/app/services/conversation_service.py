@@ -568,6 +568,24 @@ def _clarify_directives(is_first_turn: bool, text: str, *, group: bool = False) 
     return _CLARIFY_PREAMBLE
 
 
+async def _has_acp_session(conversation_id: uuid.UUID, profile_id, stage: str | None) -> bool:
+    """True when the runner already holds an ACP session for this turn's
+    (conversation, profile, stage). Profile-scoped sessions live in Redis
+    (acp_session:{conv}:{profile}[:stage] — runner._set_session_id) rather
+    than on the Conversation row, so the acp_session_id column alone is not a
+    sufficient first-turn probe."""
+    if not profile_id:
+        return False
+    suffix = f":{stage}" if stage else ""
+    key = f"acp_session:{conversation_id}:{str(profile_id)}{suffix}"
+    try:
+        return bool(await redis_core.get_redis().exists(key))
+    except Exception:
+        # Redis hiccup: fall back to first-turn semantics (the preamble is
+        # advisory — the runner's clarify handling is the real guard).
+        return False
+
+
 async def send_user_only(
     db: AsyncSession,
     convo: Conversation,
@@ -906,8 +924,12 @@ async def send_message(
     when multiple Profiles share one agent_id).
     """
     # NOTE: read acp_session_id before any commit expires the instance —
-    # _clarify_directives needs it to detect first-turn vs follow-up.
-    is_first_turn = convo.acp_session_id is None
+    # _clarify_directives needs it to detect first-turn vs follow-up. A
+    # profile-bound session is stored in Redis, not on the row, so probe
+    # that too (otherwise every profile turn looks like the first).
+    is_first_turn = convo.acp_session_id is None and not await _has_acp_session(
+        convo.id, profile_id, stage,
+    )
     reply_agent_id = agent_id_override or convo.primary_agent_id
 
     attached = await _resolve_attached_files(db, attached_file_ids or [], conversation_id=str(convo.id), owner_id=owner_id)
@@ -1977,8 +1999,13 @@ async def dispatch(
         )
 
     # Anti-clarify guidance only on follow-up turns — the first turn carries the
-    # clarify preamble, and sending both contradicted each other.
-    if convo.acp_session_id and len(agents) == 1:
+    # clarify preamble, and sending both contradicted each other. Profile-bound
+    # sessions live in Redis, so probe that as well as the row column.
+    turn_stage = convo.staged_stage if (profile and getattr(profile, "staged_enabled", False)) else None
+    first_turn = convo.acp_session_id is None and not await _has_acp_session(
+        convo.id, effective_profile_id, turn_stage,
+    )
+    if not first_turn and len(agents) == 1:
         system_prompt = f"{system_prompt}\n\n{_ANTI_CLARIFY}" if system_prompt else _ANTI_CLARIFY
 
     if len(agents) > 1:
@@ -2012,7 +2039,7 @@ async def dispatch(
         max_iterations=profile.max_iterations if profile else None,
         agent_id_override=agent_id_override,
         rag_refs=rag_refs if knowledge_prompt else None,
-        stage=convo.staged_stage if (profile and getattr(profile, "staged_enabled", False)) else None,
+        stage=turn_stage,
     )
 
 

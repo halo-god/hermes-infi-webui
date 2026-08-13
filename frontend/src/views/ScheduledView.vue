@@ -81,6 +81,21 @@ const cronHuman = computed(() => {
   }
 });
 
+function describeCron(cron: string): string {
+  // Per-row cron description — the shared cronHuman computed reflects the
+  // edit form's last parse, so every row would show the same time.
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length >= 6) parts.shift();  // legacy 6-field: drop seconds
+  if (parts.length < 5) return "自定义 Cron";
+  const [m, h, dom, , dow] = parts;
+  if (h.startsWith("*/")) return `每 ${parseInt(h.slice(2))} 小时`;
+  const time = `${String(parseInt(h)).padStart(2, "0")}:${String(parseInt(m)).padStart(2, "0")}`;
+  if (dom === "*" && dow === "*") return `每天 ${time}`;
+  if (dom === "*") return `每周${dow.split(",").map((d) => WEEKDAY_LABELS[Number(d)]).filter(Boolean).join("、")} ${time}`;
+  if (dow === "*") return `每月${parseInt(dom)}号 ${time}`;
+  return "自定义 Cron";
+}
+
 function profileById(id: string | null) {
   if (!id) return { label: "默认", color: branding.accent, icon: "sparkle" };
   const p = chat.profiles.find((pp) => pp.id === id);
@@ -237,7 +252,7 @@ onMounted(() => {
             <div class="sched-body" style="flex: 1; min-width: 0">
               <div class="sched-name" style="font-size: 13.5px; font-weight: 600; color: var(--ink)">{{ t.name }}</div>
               <div class="sched-meta" style="font-size: 11.5px; color: var(--ink-mute); margin-top: 3px; display: flex; gap: 12px; flex-wrap: wrap">
-                <span>🕐 {{ cronHuman }}</span>
+                <span>🕐 {{ describeCron(t.cron) }}</span>
                 <span>由 {{ profileById(t.profile_id).label }} 执行</span>
                 <span v-if="t.enabled">下次：{{ fmtDate(t.next_run_at) }}</span>
                 <span v-else>已暂停</span>

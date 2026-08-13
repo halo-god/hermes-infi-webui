@@ -10,6 +10,7 @@ import Composer from "@/components/Composer.vue";
 import ConfirmModal from "@/components/ConfirmModal.vue";
 import ConvoSeal from "@/components/ConvoSeal.vue";
 import { storedProfileId } from "@/utils/profilePref";
+import { usePromptModal } from "@/composables/usePromptModal";
 import { useChatStore } from "@/stores/chat";
 import { useAuthStore } from "@/stores/auth";
 import { useBrandingStore } from "@/stores/branding";
@@ -34,6 +35,7 @@ const chat = useChatStore();
 const auth = useAuthStore();
 const branding = useBrandingStore();
 const ns = useNotificationStore();
+const { promptModal, confirmModal } = usePromptModal();
 const route = useRoute();
 const router = useRouter();
 
@@ -433,7 +435,11 @@ function reactionEntries(msg: Message): { emoji: string; count: number; mine: bo
 
 async function editMsg(msg: Message) {
   if (!chat.activeId) return;
-  const next = window.prompt("编辑消息", msg.content?.text || "");
+  const next = await promptModal({
+    title: "编辑消息",
+    initial: msg.content?.text || "",
+    placeholder: "输入新内容",
+  });
   if (next == null || next.trim() === "" || next === msg.content?.text) return;
   try {
     const updated = await conversationsApi.editMessage(chat.activeId, msg.id, next.trim());
@@ -442,7 +448,9 @@ async function editMsg(msg: Message) {
   } catch { ns.toast("编辑失败"); }
 }
 async function recallMsg(msg: Message) {
-  if (!chat.activeId || !window.confirm("撤回这条消息？")) return;
+  if (!chat.activeId) return;
+  const ok = await confirmModal({ title: "撤回消息", message: "撤回这条消息？" });
+  if (!ok) return;
   try {
     const updated = await conversationsApi.recallMessage(chat.activeId, msg.id);
     msg.content = { ...msg.content, text: "" };
@@ -463,7 +471,12 @@ async function consolidateOutput(msg: Message, target: "project_doc" | "team_kno
   const text = (msg.content?.text || "").trim();
   if (!text) { ns.toast("没有可沉淀的内容"); return; }
   const defaultName = text.slice(0, 24).replace(/\n/g, " ");
-  const name = window.prompt(target === "project_doc" ? "沉淀为项目文档，命名：" : "沉淀为团队知识，命名：", defaultName);
+  const name = await promptModal({
+    title: target === "project_doc" ? "沉淀为项目文档" : "沉淀为团队知识",
+    label: "命名：",
+    initial: defaultName,
+    placeholder: "输入名称",
+  });
   if (!name) return;
   try {
     await conversationsApi.consolidateMessage(chat.activeId, msg.id, {

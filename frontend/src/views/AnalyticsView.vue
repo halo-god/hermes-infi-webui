@@ -130,6 +130,18 @@ const roleLabels: Record<string, string> = {
 }
 .stat-card {
   background: var(--bg-panel);
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+}
+:deep(.n-statistic .n-statistic__label) {
+  color: var(--ink-mute);
+  font-size: 12px;
+}
+:deep(.n-statistic .n-statistic-value) {
+  color: var(--ink);
+  font-family: var(--font-serif);
+  font-size: 26px;
+  font-weight: 500;
 }
 .section-card {
   background: var(--bg-panel);

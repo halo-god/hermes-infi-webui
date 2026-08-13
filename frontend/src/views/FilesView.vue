@@ -5,11 +5,13 @@ import { NCard, NDataTable, NSpin, NTag, NButton, NEmpty } from "naive-ui";
 import { filesApi, type FileItem } from "@/api/files";
 import { conversationsApi } from "@/api/conversations";
 import { useNotificationStore } from "@/stores/notifications";
+import { usePromptModal } from "@/composables/usePromptModal";
 import Icon from "@/components/Icon.vue";
 import ModalShell from "@/components/ModalShell.vue";
 
 const router = useRouter();
 const ns = useNotificationStore();
+const { confirmModal } = usePromptModal();
 const files = ref<FileItem[]>([]);
 const allFiles = ref<FileItem[]>([]);
 const loading = ref(true);
@@ -115,7 +117,11 @@ async function downloadFile(row: FileItem) {
 
 async function deleteFile(row: FileItem) {
   if (row.is_folder) {
-    if (!confirm(`确定删除文件夹 "${row.name}" 及其所有内容吗？此操作不可恢复。`)) return;
+    const ok = await confirmModal({
+      title: "删除文件夹",
+      message: `确定删除文件夹 "${row.name}" 及其所有内容吗？此操作不可恢复。`,
+    });
+    if (!ok) return;
     try {
       await filesApi.removeFolder(row.id);
       await loadFiles(currentFolder.value);
@@ -125,7 +131,11 @@ async function deleteFile(row: FileItem) {
     }
     return;
   }
-  if (!confirm(`确定删除文件 "${row.name}" 吗？`)) return;
+  const ok = await confirmModal({
+    title: "删除文件",
+    message: `确定删除文件 "${row.name}" 吗？`,
+  });
+  if (!ok) return;
   try {
     await filesApi.remove(row.id);
     files.value = files.value.filter((f) => f.id !== row.id);

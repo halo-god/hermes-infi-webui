@@ -11,6 +11,7 @@ import NotificationPanel from "@/components/NotificationPanel.vue";
 import FeedbackPanel from "@/components/FeedbackPanel.vue";
 import HelpPanel from "@/components/HelpPanel.vue";
 import ToastContainer from "@/components/ToastContainer.vue";
+import PromptModalHost from "@/components/PromptModalHost.vue";
 import { useChatStore } from "@/stores/chat";
 import { useAuthStore } from "@/stores/auth";
 import { useNotificationStore } from "@/stores/notifications";
@@ -136,6 +137,7 @@ function openSearch() {
     </main>
 
     <TweaksPanel :open="showTweaks" @close="showTweaks = false" />
+    <PromptModalHost />
     <SearchPalette v-if="showSearch" @close="showSearch = false" />
     <ToastContainer />
   </div>
