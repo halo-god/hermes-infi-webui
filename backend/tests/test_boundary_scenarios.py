@@ -240,3 +240,77 @@ async def test_recalled_message_not_counted_unread(db):
 
     summary = await svc.unread_summary(db, member.id, [group.id])
     assert summary[str(group.id)]["unread"] == 1, "recalled message counted as unread"
+
+
+# ── Enqueue failure closes out streaming placeholders ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_send_message_enqueue_failure_flips_agent_msg_to_error(db, monkeypatch):
+    """send_message commits a "streaming" agent row BEFORE enqueuing — if the
+    Redis enqueue fails, the row must flip to error or the UI would show an
+    endless spinner for a turn the runner never receives."""
+    from sqlalchemy import select
+
+    owner = await _mk_user(db, "enfail1@h.io")
+    convo = await _mk_convo(db, owner)
+
+    async def _boom(payload):
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr(svc.redis_core, "enqueue_prompt", _boom)
+    with pytest.raises(ConnectionError):
+        await svc.send_message(db, convo, "你好")
+
+    msgs = (await db.execute(
+        select(Message).where(Message.conversation_id == convo.id)
+    )).scalars().all()
+    agent = [m for m in msgs if m.role == "agent"][0]
+    assert agent.status == "error"
+    assert "服务暂不可用" in (agent.content or {}).get("error", "")
+
+
+@pytest.mark.asyncio
+async def test_send_roundtable_enqueue_failure_flips_rt_msg_to_error(db, monkeypatch):
+    from sqlalchemy import select
+
+    owner = await _mk_user(db, "enfail2@h.io")
+    convo = await _mk_convo(db, owner)
+    targets = [{"agent_id": "hermes", "profile_id": None, "system_prompt": "", "profile_dir": None}]
+
+    async def _boom(payload):
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr(svc.redis_core, "enqueue_prompt", _boom)
+    with pytest.raises(ConnectionError):
+        await svc.send_roundtable(db, convo, "你好", targets, owner_id=owner.id)
+
+    msgs = (await db.execute(
+        select(Message).where(Message.conversation_id == convo.id)
+    )).scalars().all()
+    rt = [m for m in msgs if m.role == "roundtable"][0]
+    assert rt.status == "error"
+    assert "服务暂不可用" in (rt.content or {}).get("error", "")
+
+
+@pytest.mark.asyncio
+async def test_send_chain_enqueue_failure_flips_chain_msg_to_error(db, monkeypatch):
+    from sqlalchemy import select
+
+    owner = await _mk_user(db, "enfail3@h.io")
+    convo = await _mk_convo(db, owner)
+    targets = [{"agent_id": "hermes", "profile_id": None, "system_prompt": "", "profile_dir": None}]
+
+    async def _boom(payload):
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr(svc.redis_core, "enqueue_prompt", _boom)
+    with pytest.raises(ConnectionError):
+        await svc.send_chain(db, convo, "你好", targets, owner_id=owner.id)
+
+    msgs = (await db.execute(
+        select(Message).where(Message.conversation_id == convo.id)
+    )).scalars().all()
+    chain = [m for m in msgs if m.role == "chain"][0]
+    assert chain.status == "error"
+    assert "服务暂不可用" in (chain.content or {}).get("error", "")

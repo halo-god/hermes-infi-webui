@@ -792,6 +792,14 @@ async def conversation_ws(
             if action == "send":
                 text = (payload.get("text") or "").strip()
                 if text:
+                    # Parity with the HTTP path (Pydantic max_length=100000):
+                    # the WS path has no schema validation, so reject
+                    # oversized payloads explicitly.
+                    if len(text) > 100000:
+                        await websocket.send_text(
+                            json.dumps({"type": "error", "message_id": "", "detail": "消息过长，请分段发送"})
+                        )
+                        continue
                     if not await ratelimit.allow_send(str(user_id)):
                         await websocket.send_text(
                             json.dumps({"type": "error", "message_id": "", "detail": "发送过于频繁"})

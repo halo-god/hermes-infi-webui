@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable
 
 from app.config import settings
 from agent_runner.acp_client import ACPClient, OnFsWrite, OnUpdate, profile_env
+from agent_runner.metrics import ACTIVE_SESSIONS, SESSION_POOL_SIZE
 
 logger = logging.getLogger("hermes.pool")
 
@@ -48,6 +49,13 @@ class SessionPool:
             and c._proc is not None
             and c._proc.returncode is None
         )
+
+    def _update_gauges(self) -> None:
+        """Feed the active-session / pool-size gauges after every mutation."""
+        active = len(self._clients)
+        warm = sum(len(dq) for dq in self._warm_pool.values())
+        ACTIVE_SESSIONS.set(active)
+        SESSION_POOL_SIZE.set(active + warm)
 
     # ── Warm pool: pre-initialized clients for fast cold-start ──
 
@@ -173,6 +181,7 @@ class SessionPool:
                     }
         total = sum(len(v) for v in self._warm_pool.values())
         logger.info("Warm pool: %d clients ready across %d profiles", total, len(self._warm_pool))
+        self._update_gauges()
 
     async def _refill_warm_pool(self, profile_dir: str | None = None) -> None:
         """Replenish the warm pool for a given profile after a client is taken."""
@@ -189,6 +198,7 @@ class SessionPool:
             if c is not None:
                 dq.append(c)
                 self._warm_results[profile_dir] = {"ok": True, "error": None}
+            self._update_gauges()
 
     def pool_stats(self) -> dict:
         """Snapshot of the warm pool for the admin health check: target size,
@@ -348,6 +358,7 @@ class SessionPool:
         self._clients[pool_key] = c
         self._profile_dirs[pool_key] = profile_dir
         self._mcp_servers[pool_key] = mcp_servers
+        self._update_gauges()
         return c, session_id
 
     async def drop(self, conversation_id: str, session_namespace: str = "") -> None:
@@ -366,6 +377,7 @@ class SessionPool:
             # subprocess is sufficient cleanup; agent-side session state is
             # rebuilt on the next load/resume.
             await c.stop()
+        self._update_gauges()
 
     async def evict_idle(self) -> None:
         """Drop sessions that have been idle longer than IDLE_TIMEOUT."""
@@ -391,3 +403,4 @@ class SessionPool:
                 except Exception:
                     pass
         self._warm_pool.clear()
+        self._update_gauges()

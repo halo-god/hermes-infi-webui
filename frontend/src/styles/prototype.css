@@ -779,6 +779,7 @@
   }
   body.dark .send-btn { color: var(--bg-canvas); }
   body.dark .msg.user .msg-bubble { background: var(--accent-tint); border-color: var(--accent-soft); }
+  body.dark .msg.user .msg-avatar { background: var(--ink); color: var(--bg-canvas); }
   body.dark .msg.agent .msg-bubble { background: rgba(255,255,255,0.06); }
 
   /* Theme: ink (mono) */

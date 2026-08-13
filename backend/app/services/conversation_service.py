@@ -861,6 +861,21 @@ def _build_attachment_content_blocks(convo: Conversation, attached: list[dict]) 
     return blocks
 
 
+async def _fail_message_on_enqueue(db: AsyncSession, msg: Message, exc: Exception) -> None:
+    """Flip a committed streaming placeholder to error when enqueue failed.
+
+    send_message / send_roundtable / send_chain commit the placeholder BEFORE
+    enqueuing, so a Redis blip would 500 the request yet leave a permanently
+    "streaming" row the runner never picks up — the UI would spin forever
+    (runner._mark_task_failed only covers failures AFTER enqueue).
+    """
+    msg.status = "error"
+    content = dict(msg.content or {})
+    content["error"] = "消息发送失败（服务暂不可用），请重试"
+    msg.content = content
+    await db.commit()
+
+
 async def send_message(
     db: AsyncSession,
     convo: Conversation,
@@ -965,24 +980,28 @@ async def send_message(
     prompt_blocks.extend(_build_attachment_content_blocks(convo, attached))
 
     await redis_core.clear_cancel(str(convo.id))
-    await redis_core.enqueue_prompt(
-        {
-            "type": "single",
-            "conversation_id": str(convo.id),
-            "message_id": str(agent_msg.id),
-            "agent_id": reply_agent_id,
-            "profile_id": str(parsed_profile_id) if parsed_profile_id else None,
-            "text": full_text,
-            "content_blocks": prompt_blocks if len(prompt_blocks) > 1 else None,
-            "system_prompt": system_prompt,
-            "profile_dir": profile_dir,
-            "mcp_servers": mcp_servers or [],
-            "matched_skill_ids": [str(sid) for sid in (matched_skill_ids or [])],
-            "skill_firing_excerpt": text[:500],
-            "max_iterations": max_iterations,
-            "stage": stage,
-        }
-    )
+    try:
+        await redis_core.enqueue_prompt(
+            {
+                "type": "single",
+                "conversation_id": str(convo.id),
+                "message_id": str(agent_msg.id),
+                "agent_id": reply_agent_id,
+                "profile_id": str(parsed_profile_id) if parsed_profile_id else None,
+                "text": full_text,
+                "content_blocks": prompt_blocks if len(prompt_blocks) > 1 else None,
+                "system_prompt": system_prompt,
+                "profile_dir": profile_dir,
+                "mcp_servers": mcp_servers or [],
+                "matched_skill_ids": [str(sid) for sid in (matched_skill_ids or [])],
+                "skill_firing_excerpt": text[:500],
+                "max_iterations": max_iterations,
+                "stage": stage,
+            }
+        )
+    except Exception as exc:
+        await _fail_message_on_enqueue(db, agent_msg, exc)
+        raise
     return user_msg, agent_msg
 
 
@@ -1083,18 +1102,22 @@ async def send_roundtable(
     attachment_blocks = _build_attachment_content_blocks(convo, attached)
 
     await redis_core.clear_cancel(str(convo.id))
-    await redis_core.enqueue_prompt(
-        {
-            "type": "roundtable",
-            "conversation_id": str(convo.id),
-            "message_id": str(rt_msg.id),
-            "targets": targets,
-            "text": prompt_text,
-            "content_blocks": attachment_blocks or None,
-            "moa": moa,
-            "research_mode": research_mode,
-        }
-    )
+    try:
+        await redis_core.enqueue_prompt(
+            {
+                "type": "roundtable",
+                "conversation_id": str(convo.id),
+                "message_id": str(rt_msg.id),
+                "targets": targets,
+                "text": prompt_text,
+                "content_blocks": attachment_blocks or None,
+                "moa": moa,
+                "research_mode": research_mode,
+            }
+        )
+    except Exception as exc:
+        await _fail_message_on_enqueue(db, rt_msg, exc)
+        raise
     return user_msg, rt_msg
 
 
@@ -1175,16 +1198,20 @@ async def send_chain(
     attachment_blocks = _build_attachment_content_blocks(convo, attached)
 
     await redis_core.clear_cancel(str(convo.id))
-    await redis_core.enqueue_prompt(
-        {
-            "type": "chain",
-            "conversation_id": str(convo.id),
-            "message_id": str(chain_msg.id),
-            "targets": targets,
-            "text": prompt_text,
-            "content_blocks": attachment_blocks or None,
-        }
-    )
+    try:
+        await redis_core.enqueue_prompt(
+            {
+                "type": "chain",
+                "conversation_id": str(convo.id),
+                "message_id": str(chain_msg.id),
+                "targets": targets,
+                "text": prompt_text,
+                "content_blocks": attachment_blocks or None,
+            }
+        )
+    except Exception as exc:
+        await _fail_message_on_enqueue(db, chain_msg, exc)
+        raise
     return user_msg, chain_msg
 
 

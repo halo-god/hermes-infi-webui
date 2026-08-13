@@ -48,6 +48,7 @@ from agent_runner.metrics import (
     TASKS_FAILED,
     TASK_DURATION,
     DLQ_MESSAGES,
+    REDIS_OPS_FAILED,
 )
 
 logger = logging.getLogger("hermes.runner")
@@ -542,6 +543,7 @@ class Runner:
                     )
                     _xread_backoff = 2.0
                 except Exception:
+                    REDIS_OPS_FAILED.labels(operation="xreadgroup").inc()
                     logger.exception("xreadgroup failed; backing off %.0fs", _xread_backoff)
                     await asyncio.sleep(_xread_backoff)
                     _xread_backoff = min(_xread_backoff * 1.5, 30.0)
@@ -558,6 +560,7 @@ class Runner:
                                 settings.acp_stream, settings.acp_group, entry_id
                             )
                         except Exception:
+                            REDIS_OPS_FAILED.labels(operation="xack").inc()
                             logger.warning("Failed to ACK %s", entry_id)
 
                         task_data = json.loads(fields["data"])

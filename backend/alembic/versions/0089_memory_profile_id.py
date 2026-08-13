@@ -39,8 +39,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # ix_memory_episodes_user_profile must be dropped BEFORE its column —
+    # dropping the column removes the index implicitly, and the original
+    # MySQL-style "ALTER TABLE ... DROP INDEX" is a Postgres syntax error.
+    op.execute("DROP INDEX IF EXISTS ix_memory_episodes_user_profile")
     op.execute("DROP INDEX IF EXISTS ix_agent_memory_user_profile")
     op.execute("DROP INDEX IF EXISTS ix_agent_memory_user_global")
     op.execute("ALTER TABLE agent_memory DROP COLUMN profile_id")
     op.execute("ALTER TABLE memory_episodes DROP COLUMN profile_id")
-    op.execute("ALTER TABLE memory_episodes DROP INDEX IF EXISTS ix_memory_episodes_user_profile")

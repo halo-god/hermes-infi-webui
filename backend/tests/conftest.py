@@ -41,7 +41,6 @@ os.environ.setdefault(
 # production instance (127.0.0.1:1979, db0), fail loudly at import instead of
 # silently enqueueing real ACP tasks / deleting production rate-limit keys.
 from urllib.parse import urlparse as _urlparse
-_ru = _urlparse(os.environ["REDIS_URL"])
 # Whitelist semantics, NOT a blocklist: any host:port that is not a
 # dedicated test instance is rejected. The old guard only blocked
 # localhost/127.0.0.1:1979, so container-name variants (redis:1979,
@@ -53,20 +52,88 @@ _ALLOWED_REDIS = (
     ("localhost", 6379),  # CI (.github/workflows/ci.yml sets this explicitly)
     ("127.0.0.1", 6379),  # CI variant
 )
-if (_ru.hostname, _ru.port) not in _ALLOWED_REDIS:
-    raise RuntimeError(
-        f"REDIS_URL points at an unapproved Redis ({_ru.hostname}:{_ru.port}). "
-        "Tests MUST use the dedicated instance (127.0.0.1:6380); CI sets "
-        "REDIS_URL=redis://localhost:6379 explicitly. Never run tests against "
-        "the production instance (127.0.0.1:1979)."
-    )
 
 
-# Tests assume the 'db' storage backend (small files inline in Postgres);
-# minio-offload tests switch to moto themselves. The repo's backend/.env sets
-# STORAGE_BACKEND=minio for production — override it so it can't leak in
-# (env vars take precedence over .env in pydantic-settings).
+def _assert_approved_redis(label: str, raw_url: str) -> None:
+    """Fail loudly if the URL the suite would actually use is unapproved.
+
+    CRITICAL: validate the pydantic settings singleton (settings.redis_url),
+    NOT just os.environ. app/core/redis.py connects via settings.redis_url
+    (redis.py:14-15). The singleton is lru_cache'd at first app import; if it
+    was instantiated BEFORE this conftest's setdefault ran (e.g. by a plugin
+    or a script importing app modules directly), it holds the backend/.env
+    production value (127.0.0.1:1979) even though os.environ was patched to
+    6380. Checking os.environ alone passes while the suite still hits
+    production Redis — the 2026-08-12 recurrence.
+    """
+    _ru = _urlparse(raw_url)
+    if (_ru.hostname, _ru.port) not in _ALLOWED_REDIS:
+        raise RuntimeError(
+            f"{label} points at an unapproved Redis ({_ru.hostname}:{_ru.port}). "
+            "Tests MUST use the dedicated instance (127.0.0.1:6380); CI sets "
+            "REDIS_URL=redis://localhost:6379 explicitly. Never run tests against "
+            "the production instance (127.0.0.1:1979)."
+        )
+
+
+# Belt: env-level value must be approved...
+_assert_approved_redis("REDIS_URL", os.environ["REDIS_URL"])
+# ...and suspenders: the value the app ACTUALLY uses must be approved too.
+# Importing app.config here forces the singleton to resolve NOW (after the
+# setdefault above), so the guard sees whatever the suite would connect to.
+from app.config import settings as _settings  # noqa: E402
+_assert_approved_redis("settings.redis_url", _settings.redis_url)
+
+# Pin storage backend BEFORE the pydantic singleton can be first constructed:
+# backend/.env sets STORAGE_BACKEND=minio (production); env beats .env in
+# pydantic-settings, so setting it before ANY settings import (incl. the
+# redis effective-value guard below) keeps every test on the 'db' backend.
 os.environ["STORAGE_BACKEND"] = "db"
+
+# The REDIS_URL env check above is necessary but NOT sufficient (verified
+# 2026-08-12): pydantic-settings resolves settings.redis_url ONCE, at
+# singleton instantiation. If a parent conftest, plugin, or earlier import
+# constructs the singleton before this module's setdefault ran, it reads
+# backend/.env (production 127.0.0.1:1979) while os.environ here reads the
+# pinned 6380, so the env guard passes while app.core.redis and
+# agent_runner.acp_client still dial production (78 real ACP roundtable
+# dispatches, 2026-08-04..11). Guard the EFFECTIVE value the app actually
+# connects with.
+from app.config import settings as _settings  # noqa: E402
+_sru = _urlparse(_settings.redis_url)
+if (_sru.hostname, _sru.port) not in _ALLOWED_REDIS:
+    raise RuntimeError(
+        f"settings.redis_url resolves to an unapproved Redis "
+        f"({_sru.hostname}:{_sru.port}); the pydantic settings singleton was "
+        "instantiated before conftest pinned the test instance and read "
+        "backend/.env. Re-run with REDIS_URL=redis://127.0.0.1:6380/0 exported "
+        "(env beats .env) and do NOT run the suite until this resolves."
+    )
+# ── Second guard: the app Settings singleton must ALSO target test Redis ──
+# The 2026-08-12 production-dispatch incident: pytest tests/test_group_chat.py
+# (test_group_roundtable_attachment_gets_content_blocks) dispatched a REAL
+# roundtable session ("大家看看这份笔记" + notes.md fixture) to the production
+# acp_stream because the ACP subprocess env (agent_runner/acp_client.py) and the
+# test assertions (app/core/redis.py) read settings.redis_url — the pydantic
+# Settings singleton — NOT os.environ["REDIS_URL"]. If that singleton is
+# instantiated before the setdefault above (a higher-level conftest / plugin
+# importing app.config early), it picks up backend/.env's production URL
+# (127.0.0.1:1979) and the env-var guard above passes anyway. Validate the
+# singleton itself; creating it here (env vars set) also pins it to 6380 for
+# every subsequent import.
+from app.config import get_settings as _get_settings  # noqa: E402
+
+_sredis = _get_settings().redis_url
+_sru = _urlparse(_sredis)
+if (_sru.hostname, _sru.port) not in _ALLOWED_REDIS:
+    raise RuntimeError(
+        f"settings.redis_url points at an unapproved Redis "
+        f"({_sru.hostname}:{_sru.port}). The Settings singleton must resolve to "
+        "the dedicated test instance (127.0.0.1:6380) — see the 2026-08-12 "
+        "production-dispatch note above. Something imported app.config before "
+        "conftest pinned REDIS_URL; move that import after this file, or export "
+        "REDIS_URL before pytest runs."
+    )
 
 # Tests must never depend on the network: force HF Hub offline so embedding
 # model loads use the local cache only (an unreachable huggingface.co would
