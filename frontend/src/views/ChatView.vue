@@ -685,11 +685,35 @@ function toggleChosen(msgId: string, slot: number) {
 function isChosen(msgId: string, slot: number): boolean {
   return !!chosenMap.value[`${msgId}:${slot}`];
 }
-function followUp(agentId: string, profileId?: string | null) {
-  // Find the exact profile that answered (falls back to agent-id lookup)
-  const profile = profileForEntity(agentId, profileId);
-  if (profile) landingProfileId.value = profile.id;
-  (document.querySelector(".dock .composer-input") as HTMLTextAreaElement)?.focus();
+// Roundtable "追问": prefill "@AI名" + quote that AI's answer (inheriting
+// this session's output as context), seed the mention, and focus the composer.
+// Sending routes to that AI alone (group: @mention single target; personal:
+// dispatch's mentions single-target resolution).
+const pendingMentions = ref<{ key: string; name: string }[]>([]);
+function followUp(agentId: string, profileId?: string | null, text?: string) {
+  const display = rtProfileDisplay(agentId, profileId);
+  const label = display.label || agentId;
+  const key = isGroup.value && profileId ? `profile:${profileId}` : agentId;
+
+  let prefill = `@${label} `;
+  if (text && text.trim()) {
+    const snippet = text.trim();
+    const clipped = snippet.length > 600 ? snippet.slice(0, 600) + "…" : snippet;
+    prefill += `> 你刚才的回答：\n> ${clipped.split("\n").join("\n> ")}\n\n`;
+  }
+  draft.value = prefill;
+  pendingMentions.value = [{ key, name: label }];
+  nextTick(() => {
+    const ta = document.querySelector(".dock .composer-input") as HTMLTextAreaElement | null;
+    if (ta) {
+      ta.focus();
+      const len = ta.value.length;
+      ta.setSelectionRange(len, len);
+    }
+  });
+  if (isGroup.value && activeConvo.value?.channel_mode === "off") {
+    ns.toast("频道已关闭：发送后仅记录，不会触发 AI 回复", "warn");
+  }
 }
 async function startWithProfile(profile: Profile) {
   landingProfileId.value = profile.id;
@@ -1155,12 +1179,18 @@ onUnmounted(() => {
                   <span v-if="r.status === 'streaming' && !r.text" class="typing"><span></span><span></span><span></span></span>
                   <div v-else class="md-body" v-html="md(r.text)" />
                 </div>
+                <!-- Files written by THIS AI land on its own card -->
+                <div v-if="r.files?.length" class="msg-files" style="margin-top:6px">
+                  <button v-for="f in r.files" :key="f.id" class="msg-file-chip" @click="openFile(f.id)">
+                    <Icon name="paperclip" :size="11" /> {{ f.name }}
+                  </button>
+                </div>
                 <!-- vote buttons -->
                 <div v-if="r.status !== 'streaming'" class="rt-vote">
                   <button :class="{ chosen: isChosen(chat.messages[row.index].id, idx) }" @click="toggleChosen(chat.messages[row.index].id, idx)">
                     <Icon name="check" :size="10" /> 采纳
                   </button>
-                  <button @click="followUp(r.agent_id, r.profile_id)">
+                  <button @click="followUp(r.agent_id, r.profile_id, r.text)">
                     <Icon name="chat" :size="10" /> 追问
                   </button>
                   <button @click="copyMessage(r.text)">
@@ -1381,6 +1411,7 @@ onUnmounted(() => {
           :group-agents="groupAgents"
           :group-members="groupMembers"
           :reply-to="replyTarget"
+          :initial-mentions="pendingMentions"
           @send="onSend"
           @typing="onComposerTyping"
           @cancel-reply="clearReply"

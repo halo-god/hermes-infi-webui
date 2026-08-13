@@ -549,13 +549,18 @@ _NO_CLARIFY_ROUNDTABLE = (
 )
 
 
-def _clarify_directives(is_first_turn: bool, text: str) -> str:
+def _clarify_directives(is_first_turn: bool, text: str, *, group: bool = False) -> str:
     """Clarify preamble for the FIRST turn of a conversation only.
 
     Follow-up turns get the anti-clarify line via the system prompt instead;
     injecting both used to hand the model contradictory instructions on every
     short reply ("必须 clarify" vs "不要 clarify").
+
+    Group chats never get the preamble: no interactive modal exists there, and
+    the runner auto-declines clarify requests anyway (hard backstop).
     """
+    if group:
+        return ""
     if (settings.clarify_strategy or "").strip().lower() == "disabled":
         return ""
     if not is_first_turn:
@@ -951,7 +956,7 @@ async def send_message(
 
     # Text block: preambles + user message + inline file references
     prompt_text = _build_attached_prompt(text, attached)
-    full_text = f"{_FILE_WRITE_PREAMBLE}{_clarify_directives(is_first_turn, text)}\n\n{prompt_text}"
+    full_text = f"{_FILE_WRITE_PREAMBLE}{_clarify_directives(is_first_turn, text, group=convo.type == 'group')}\n\n{prompt_text}"
     prompt_blocks.append({"type": "text", "text": full_text})
 
     # Resource Link blocks (agent reads from workspace) + ImageContentBlocks —
@@ -1777,13 +1782,24 @@ async def dispatch(
     task_id: uuid.UUID | None = None,
     agent_id_override: str | None = None,
     stage: str | None = None,
+    mentions: list[str] | None = None,
 ) -> tuple[Message, Message | None]:
     """Route to single or roundtable based on the conversation's active agents.
 
     When agent_id_override is set (group chat @-mention targeting a specific
     agent), force single-agent mode with that agent - do NOT fall into the
     roundtable branch based on the conversation's full active_agent_ids.
+
+    Personal chats can also carry mentions (the "追问" follow-up button): a
+    single target resolves to that agent/profile and answers alone; multiple
+    or unresolvable targets fall back to the normal route.
     """
+    if agent_id_override is None and mentions:
+        m_agent, m_profile = await _resolve_personal_mentions(db, mentions)
+        if m_agent:
+            agent_id_override = m_agent
+            if m_profile:
+                profile_id_override = m_profile
     if agent_id_override:
         agents = [agent_id_override]
     else:
@@ -1967,6 +1983,7 @@ async def dispatch(
         system_prompt=system_prompt, profile_dir=profile_dir, mcp_servers=mcp_servers,
         task_id=task_id, profile_id=effective_profile_id, matched_skill_ids=matched_skill_ids,
         max_iterations=profile.max_iterations if profile else None,
+        agent_id_override=agent_id_override,
         rag_refs=rag_refs if knowledge_prompt else None,
         stage=convo.staged_stage if (profile and getattr(profile, "staged_enabled", False)) else None,
     )
@@ -2465,6 +2482,40 @@ class ResolvedMentions:
     all_agents: bool = False
 
 
+async def _resolve_personal_mentions(
+    db: AsyncSession, mentions: list[str],
+) -> tuple[str | None, str | None]:
+    """Resolve single-target mentions for PERSONAL chats (the follow-up
+    button). Looser than resolve_mentions: there is no membership to verify.
+
+    Returns (agent_id, profile_id); both None when the mentions resolve to
+    multiple distinct targets (caller falls back to the normal route) or to
+    nothing usable.
+    """
+    agent_id: str | None = None
+    profile_id: str | None = None
+    for m in mentions or []:
+        if m in ("__all_agents__", "__all_humans__"):
+            return None, None  # multi-target pseudo-mentions are not personal
+        if m.startswith("profile:"):
+            pid = m.split(":", 1)[1]
+            try:
+                p = await db.get(Profile, uuid.UUID(pid))
+            except (ValueError, TypeError):
+                continue
+            if p is None or not p.is_active:
+                continue
+            if agent_id is not None and agent_id != p.default_agent_id:
+                return None, None  # multiple distinct targets
+            agent_id = p.default_agent_id
+            profile_id = pid
+        else:
+            if agent_id is not None and agent_id != m:
+                return None, None  # multiple distinct targets
+            agent_id = m
+    return agent_id, profile_id
+
+
 async def resolve_mentions(
     db: AsyncSession,
     conversation_id: uuid.UUID,
@@ -2762,7 +2813,12 @@ async def dispatch_group(
                 system_prompt = (
                     f"{system_prompt}\n\n{request_knowledge_prompt}" if system_prompt else request_knowledge_prompt
                 )
-        if convo.acp_session_id:
+        # Group chats never show the clarify modal (runner auto-declines),
+        # so every group turn — first or follow-up — carries the anti-clarify
+        # directive. The old `convo.acp_session_id` check was always false
+        # here: group chats store session ids in Redis, never on the row, so
+        # the preamble was injected every turn while this line never fired.
+        if convo.type == "group":
             system_prompt = f"{system_prompt}\n\n{_ANTI_CLARIFY}" if system_prompt else _ANTI_CLARIFY
 
         # Attribute the reply to the @-mentioned agent/profile without mutating

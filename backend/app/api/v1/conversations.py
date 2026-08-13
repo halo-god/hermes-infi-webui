@@ -586,6 +586,7 @@ async def send_message(
                 owner_id=user.id,
                 skip_agent=payload.skip_agent,
                 profile_id_override=payload.profile_id,
+                mentions=payload.mentions,
                 task_id=payload.task_id,
             )
     finally:
@@ -724,7 +725,7 @@ async def _ws_dispatch(
             await svc.dispatch(
                 msg_db, c, text, attached_file_ids=file_ids,
                 knowledge_ids=knowledge_ids, owner_id=user_id,
-                profile_id_override=p_id, task_id=task_id,
+                profile_id_override=p_id, mentions=mentions, task_id=task_id,
             )
 
 

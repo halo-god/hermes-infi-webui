@@ -818,11 +818,18 @@ class Runner:
 
         acp_session_id = None
         session_mode = None
+        is_group = False
         async with async_session_maker() as db:
             convo = await db.get(Conversation, uuid.UUID(conversation_id))
             if convo:
                 acp_session_id = convo.acp_session_id
                 session_mode = convo.session_mode
+                is_group = convo.type == "group"
+
+        # Group-chat turns are never interactive: nobody can answer a clarify
+        # modal mid-chat, so every clarify request is auto-declined (the
+        # agent's callback unblocks with an empty answer and continues).
+        is_group = is_group or bool(task.get("group_turn"))
 
         # Use profile-specific session namespace so that different agents in a
         # group chat don't share the same ACP history.
@@ -1108,30 +1115,46 @@ class Runner:
                     "context_used": used,
                 })
             elif kind == "confirmation_request":
-                request_id = update.get("request_id", str(uuid.uuid4()))
-                question = update.get("question", "需要你的确认")
-                options = update.get("options", ["继续", "跳过"])
-                req_payload = {
-                    "id": request_id,
-                    "conversation_id": conversation_id,
-                    "message_id": acc["current_msg_id"],
-                    "question": question,
-                    "questions": [{"question": question, "options": options, "allow_free_text": True}],
-                    "options": options,
-                }
-                await R.publish_event(
-                    conversation_id,
-                    {"type": "confirmation_request", "message_id": acc["current_msg_id"], "request": req_payload},
-                )
-                logger.info("Native confirmation_request, sent SSE: %s", request_id)
-                t = asyncio.create_task(
-                    self._wait_and_unblock_clarify_native(
-                        conversation_id, request_id, sid=conversation_id,
-                        message_id=acc["current_msg_id"], acc=acc,
+                if is_group:
+                    # Group chat: no interactive confirm — auto-decline by
+                    # answering the native request channel with an empty choice
+                    # (mirrors the Redis-bridge guard below).
+                    from agent_runner.runner_clarify import deliver_clarify_response
+                    logger.debug(
+                        "Group turn: auto-declined native confirmation_request %s",
+                        update.get("request_id", "?"),
                     )
-                )
-                self._bg_tasks.add(t)
-                t.add_done_callback(self._bg_tasks.discard)
+                    try:
+                        await deliver_clarify_response(
+                            conversation_id, update.get("request_id", ""), "",
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                else:
+                    request_id = update.get("request_id", str(uuid.uuid4()))
+                    question = update.get("question", "需要你的确认")
+                    options = update.get("options", ["继续", "跳过"])
+                    req_payload = {
+                        "id": request_id,
+                        "conversation_id": conversation_id,
+                        "message_id": acc["current_msg_id"],
+                        "question": question,
+                        "questions": [{"question": question, "options": options, "allow_free_text": True}],
+                        "options": options,
+                    }
+                    await R.publish_event(
+                        conversation_id,
+                        {"type": "confirmation_request", "message_id": acc["current_msg_id"], "request": req_payload},
+                    )
+                    logger.info("Native confirmation_request, sent SSE: %s", request_id)
+                    t = asyncio.create_task(
+                        self._wait_and_unblock_clarify_native(
+                            conversation_id, request_id, sid=conversation_id,
+                            message_id=acc["current_msg_id"], acc=acc,
+                        )
+                    )
+                    self._bg_tasks.add(t)
+                    t.add_done_callback(self._bg_tasks.discard)
             # Cancel check: standalone, runs for ALL event types.
             if not acc["cancelled"] and await R.is_cancelled(conversation_id):
                 acc["cancelled"] = True
@@ -1347,10 +1370,19 @@ class Runner:
                 try:
                     data = await pop_clarify_request(clarify_session_id)
                     if data:
-                        await handle_clarify_request(
-                            conversation_id, acc["current_msg_id"], acc,
-                            clarify_session_id, data, self._bg_tasks,
-                        )
+                        if is_group:
+                            # Group chat: nobody can answer the modal — drain
+                            # the request and unblock the agent with an empty
+                            # answer instead of popping a confirm dialog.
+                            from agent_runner.runner_clarify import deliver_clarify_response
+                            await deliver_clarify_response(
+                                clarify_session_id, data.get("clarify_id", ""), "",
+                            )
+                        else:
+                            await handle_clarify_request(
+                                conversation_id, acc["current_msg_id"], acc,
+                                clarify_session_id, data, self._bg_tasks,
+                            )
                 except Exception:
                     logger.debug("clarify poll failed", exc_info=True)
             stop_reason = prompt_task.result()
