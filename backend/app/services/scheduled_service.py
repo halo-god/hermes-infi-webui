@@ -187,6 +187,10 @@ async def tick(db: AsyncSession) -> int:
         )
         t.last_status = "failed"
         t.fail_count = (t.fail_count or 0) + 1
+        # Push next_run_at forward: the same tick's due query would otherwise
+        # re-select this just-reclaimed task (its next_run_at is still in the
+        # past) and immediately re-fire it — the reclaim would never stick.
+        t.next_run_at = compute_next_run(t.cron, tz_base)
 
     due = (
         await db.execute(

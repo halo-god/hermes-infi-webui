@@ -65,6 +65,8 @@ test.describe("文件版本", () => {
     const v1 = versions.filter({ hasText: "v1" }).first();
     await v1.locator("button", { hasText: "预览" }).click();
     await expect(page.locator(".ws-ver-preview-banner")).toContainText("预览 v1", { timeout: 15_000 });
+    // 预览默认进 Diff 视图（showPreviewDiff 默认 true）——点「Diff 对比」切回内容视图
+    await page.locator(".ws-ver-preview-banner button", { hasText: "Diff 对比" }).click();
     await expect(page.locator(".md-preview, .ws-content, pre").first()).toContainText("版本 1 内容", {
       timeout: 15_000,
     });

@@ -276,6 +276,8 @@ async def sync_skill_to_hermes(skill_id, name: str, description: str, content: s
         )
 
     # Record the hash the FS now mirrors so Direction B skips this row.
+    # Warning (not debug): a silent failure here silently disables the
+    # A→B→A loop breaker while the sync still reports success.
     try:
         from app.db.base import async_session_maker
         from app.db.models.memory import AgentSkill
@@ -286,7 +288,7 @@ async def sync_skill_to_hermes(skill_id, name: str, description: str, content: s
                 row.last_synced_at = datetime.now(timezone.utc)
                 await db.commit()
     except Exception:  # noqa: BLE001
-        logger.debug("Failed to record content_hash for skill %s", sid, exc_info=True)
+        logger.warning("Failed to record content_hash for skill %s", sid, exc_info=True)
 
 
 async def remove_skill_from_hermes(name: str, skill_id=None) -> None:

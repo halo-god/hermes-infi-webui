@@ -497,7 +497,7 @@ export const useChatStore = defineStore("chat", () => {
           body: opts.stagedFiles.map((f) => f.name).join(", ") + " 未成功上传，请重试",
           kind: "warn",
         });
-        return; // abort the send — don't send a message referencing a file the AI can't see
+        return false; // abort the send — don't send a message referencing a file the AI can't see
       }
     }
     // attachedFileIds: previously-uploaded files referenced in this turn
@@ -799,6 +799,7 @@ export const useChatStore = defineStore("chat", () => {
     profiles,
     teams,
     activeId,
+    activeAgents,
     activeProfiles,
     messages,
     files,

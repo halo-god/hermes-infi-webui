@@ -26,6 +26,26 @@ export default defineConfig(({ mode }) => {
       environment: "jsdom",
       globals: true,
       include: ["src/**/*.{test,spec}.{ts,tsx}"],
+      coverage: {
+        provider: "v8",
+        include: ["src/**/*.{ts,vue}"],
+        // views/components 组件由 E2E 覆盖——单元层聚焦逻辑（stores/api/composables/utils）
+        exclude: [
+          "src/views/**",
+          "src/components/**",
+          "src/main.ts",
+          "src/router/**",
+          "src/styles/**",
+          "src/types/**",
+          "**/__tests__/**",
+        ],
+        thresholds: {
+          lines: 40,
+          functions: 40,
+          statements: 40,
+          branches: 30,
+        },
+      },
     },
     build: {
       rollupOptions: {

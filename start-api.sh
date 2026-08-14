@@ -20,6 +20,10 @@ source "${VENV_DIR}/bin/activate"
 
 export PYTHONUNBUFFERED=1
 export HERMES_HOME="${HERMES_HOME:-${HOME}/.hermes}"
+# Dev convenience: the default per-IP login rate limit (10/min) is a
+# production guard; local E2E suites log in repeatedly (auth specs, member
+# users) and trip 429s mid-run. Production deployments override via .env.
+export LOGIN_RATE_LIMIT_PER_MIN="${LOGIN_RATE_LIMIT_PER_MIN:-1000}"
 
 # Run alembic migrations if requested (HERMES_AUTO_MIGRATE=1)
 if [[ "${HERMES_AUTO_MIGRATE:-0}" == "1" ]]; then

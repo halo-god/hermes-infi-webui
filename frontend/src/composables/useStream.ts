@@ -115,8 +115,11 @@ export function useStream(onGiveUp?: () => void) {
       if (epoch !== myEpoch) return;  // superseded by a newer open/close
       consecutiveErrors += 1;
       if (consecutiveErrors >= SSE_MAX_ERRORS) {
-        error.value = "SSE 连接断开";
+        // close() clears error.value — set the banner AFTER it so the user
+        // actually sees why the stream died (previously the give-up message
+        // was swallowed by close's error reset).
         close();
+        error.value = "SSE 连接断开";
         // The caller (chat store) must clear streamingConvoId here —
         // otherwise the conversation is stuck in "生成中" forever and the
         // composer refuses to send (no done/error event will ever arrive).

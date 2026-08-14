@@ -39,3 +39,10 @@ Hermes-AI发布前讨论会资料汇总.md
 LED显示屏物料编码手册.md
 docs/深圳视爵光旭_部门目录.xlsx
 docs/wecom_departments.csv
+
+# 覆盖率产物（CI 上传 artifact，不入仓）
+.coverage
+coverage.json
+backend/.coverage
+backend/coverage.json
+frontend/coverage/

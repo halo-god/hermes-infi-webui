@@ -30,21 +30,28 @@ test.describe("历史会话", () => {
     const firstRow = page.locator(".hi-row").first();
     const rowTitle = (await firstRow.locator(".hi-title").innerText()).trim();
 
+    // 删除前：API 定位该标题的会话 id（标题搜索验证删除在大量同名 E2E
+    // 会话堆积时不可靠——搜索分页/同名会互相干扰）
+    const token = adminTokenFromState();
+    const searchRes = await page.request.get("/api/v1/conversations", {
+      headers: { Authorization: `Bearer ${token}` },
+      params: { q: rowTitle },
+    });
+    expect(searchRes.status()).toBe(200);
+    const items = (await searchRes.json()) as { id: string; title?: string }[];
+    const target = items.find((c) => c.title === rowTitle);
+    expect(target, `会话「${rowTitle}」应存在于 API`).toBeTruthy();
+
     page.on("dialog", (d) => d.accept());
     await firstRow.locator('button[title="删除"]').click();
-    // 用 API 验证删除生效（标题搜索为空即删除成功，绕过前端列表上限/渲染竞态）
-    const token = adminTokenFromState();
+    // 验证：该会话 ID 查询变为 404 即删除成功（不依赖标题唯一性）
     await expect
       .poll(
         async () => {
-          const res = await page.request.get("/api/v1/conversations", {
+          const res = await page.request.get(`/api/v1/conversations/${target!.id}`, {
             headers: { Authorization: `Bearer ${token}` },
-            params: { q: rowTitle },
           });
-          if (res.status() !== 200) return false;
-          const items = (await res.json()) as { title?: string }[];
-          // 精确标题消失即删除成功（容忍同前缀的其它测试会话）
-          return !items.some((c) => c.title === rowTitle);
+          return res.status() === 404;
         },
         { timeout: 30_000 },
       )

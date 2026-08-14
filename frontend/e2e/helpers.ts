@@ -4,6 +4,14 @@ import { readFileSync } from "node:fs";
 export const ADMIN_EMAIL = "admin@hermes.io";
 export const ADMIN_PASSWORD = "Hermes@2026";
 
+/**
+ * Environment-driven endpoints (defaults match the local dev stack:
+ * vite dev on :5173 proxying uvicorn on :8001). CI and alternate stacks
+ * override via E2E_BASE_URL / E2E_API_URL.
+ */
+export const E2E_BASE_URL = process.env.E2E_BASE_URL || "http://localhost:5173";
+export const E2E_API_URL = process.env.E2E_API_URL || "http://localhost:8001";
+
 /** UI login through the real login page. */
 export async function login(page: Page, username = ADMIN_EMAIL, password = ADMIN_PASSWORD) {
   await page.goto("/login");
