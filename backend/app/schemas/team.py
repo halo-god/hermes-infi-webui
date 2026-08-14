@@ -27,7 +27,7 @@ class MemberOut(BaseModel):
     user_id: uuid.UUID
     role: str
     status: str
-    joined_at: datetime
+    joined_at: datetime | None = None
     name: str | None = None
     email: str | None = None
     initials: str | None = None
