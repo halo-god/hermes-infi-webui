@@ -255,6 +255,13 @@ class Settings(BaseSettings):
     summary_msg_chars: int = 400
     summary_input_chars: int = 12000       # total input budget across messages
 
+    # ── First-turn title summary ──
+    # After a conversation's FIRST turn completes, generate a concise LLM
+    # title from the exchange (instead of leaving the truncated first
+    # message as the title). Async + fail-silent: on any error the truncated
+    # placeholder title stays.
+    title_summary_enabled: bool = True
+
     # ── Uploads ──
     max_upload_mb: int = 25  # reject uploads larger than this (per file)
     # P2-file: archive extraction limits (zip bomb defense).

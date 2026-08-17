@@ -85,3 +85,56 @@ def build_messages_text(transcript: list[tuple[str, str]]) -> str:
     """
     lines = [f"{role}：{text}" for role, text in transcript if text and text.strip()]
     return "\n".join(lines)
+
+
+def summarize_title_sync(user_text: str, reply_text: str) -> str | None:
+    """Generate a concise conversation title from the first exchange.
+
+    Synchronous LLM call — must be run off the event loop (asyncio.to_thread).
+    Returns None on any failure (not configured, API error, empty output) —
+    the caller keeps the truncated-placeholder title in that case.
+    """
+    if not settings.auxiliary_llm_model or not settings.auxiliary_llm_api_key:
+        logger.debug("Auxiliary LLM not configured — skipping title summary")
+        return None
+    try:
+        import dspy
+    except ImportError:
+        logger.warning("dspy not installed — cannot summarise title")
+        return None
+
+    user_excerpt = (user_text or "").strip()[:600]
+    reply_excerpt = (reply_text or "").strip()[:600]
+    if not user_excerpt:
+        return None
+
+    class TitleConversation(dspy.Signature):
+        """根据对话的首轮交流，生成一个简短的会话标题。
+        要求：中文；不超过 16 个字；概括用户的核心诉求或话题；
+        不使用引号、书名号或句末标点；不要以"关于"开头。"""
+        user_message: str = dspy.InputField(desc="用户的首条消息")
+        assistant_reply: str = dspy.InputField(desc="助手的首条回复（可能为空）")
+        title: str = dspy.OutputField(desc="不超过 16 字的简短中文标题")
+
+    try:
+        lm = dspy.LM(
+            settings.auxiliary_llm_model,
+            api_key=settings.auxiliary_llm_api_key,
+            api_base=settings.auxiliary_llm_api_base or None,
+        )
+        predictor = dspy.Predict(TitleConversation)
+        with dspy.context(lm=lm):
+            result = predictor(
+                user_message=user_excerpt,
+                assistant_reply=reply_excerpt,
+            )
+        title = (getattr(result, "title", "") or "").strip()
+        if not title:
+            return None
+        # Hard cleanup: the LLM sometimes ignores the no-quotes rule.
+        title = title.strip("\"'“”‘’《》「」。.！!？? \t")
+        # Keep it inside the column limit even if the model rambles.
+        return title[:40] or None
+    except Exception:  # noqa: BLE001 — never crash the caller's turn flow
+        logger.warning("Title summarisation LLM call failed", exc_info=True)
+        return None

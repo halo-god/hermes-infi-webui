@@ -28,6 +28,7 @@ from app.core.files import (
     read_upload_capped,
     process_upload,
     is_text_extractable,
+    is_legacy_spreadsheet_html,
     OFFICE_EXTRACTORS,
     PLAIN_TEXT_EXTS,
 )
@@ -878,7 +879,7 @@ async def get_file(
     f = await db.get(WorkspaceFile, file_id)
     if f is None or f.conversation_id != conversation_id:
         raise HTTPException(status_code=404, detail="文件不存在")
-    content = f.content
+    content = f.content if not is_legacy_spreadsheet_html(f.kind, f.content) else None
     if content is None and f.storage_key:
         data = await asyncio.to_thread(object_storage.get, f.storage_key)
         if f.kind in OFFICE_EXTRACTORS:
@@ -888,6 +889,14 @@ async def get_file(
             content = data.decode("utf-8", "ignore")
         else:
             content = None
+        # Self-heal pre-styling xlsx/csv previews once (see files_browser).
+        if (
+            content
+            and is_legacy_spreadsheet_html(f.kind, f.content)
+            and not is_legacy_spreadsheet_html(f.kind, content)
+        ):
+            f.content = content
+            await db.commit()
     return WorkspaceFileDetail(
         **WorkspaceFileOut.model_validate(f).model_dump(), content=content
     )

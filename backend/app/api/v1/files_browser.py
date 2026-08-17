@@ -22,6 +22,7 @@ from app.core.files import (
     process_upload,
     extract_pdf_text,
     is_text_extractable,
+    is_legacy_spreadsheet_html,
     safe_download_headers,
     OFFICE_EXTRACTORS,
 )
@@ -585,9 +586,9 @@ async def get_file_content(
     wf = await _require_file_owner(db, file_id, user)
 
     content = None
-    if wf.content:
+    if wf.content and not is_legacy_spreadsheet_html(wf.kind, wf.content):
         content = wf.content
-    elif wf.storage_key:
+    if content is None and wf.storage_key:
         try:
             raw = await asyncio.to_thread(object_storage.get, wf.storage_key)
             if wf.kind in OFFICE_EXTRACTORS:
@@ -603,6 +604,16 @@ async def get_file_content(
                 content = None
         except Exception:
             content = None
+        # Self-heal: xlsx/csv previews stored before the styled-document
+        # format get upgraded once and persisted, so later reads skip the
+        # re-extraction entirely.
+        if (
+            content
+            and is_legacy_spreadsheet_html(wf.kind, wf.content)
+            and not is_legacy_spreadsheet_html(wf.kind, content)
+        ):
+            wf.content = content
+            await db.commit()
 
     return {"id": str(wf.id), "name": wf.name, "kind": wf.kind, "content": content, "size": wf.size_bytes}
 

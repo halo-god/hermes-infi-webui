@@ -404,6 +404,17 @@ describe("stores/chatStream handlers", () => {
     expect(deps.conversations.value[0].title).toBe("周报");
   });
 
+  it("session_info updates any title (backend guards placeholder-only writes)", () => {
+    // The DB-side guard (_update_conv_title_guarded) already refuses to
+    // overwrite user-renamed conversations — the frontend applies whatever
+    // the runner sends (the old localized-新会话 guard never matched for
+    // en-locale users).
+    deps.conversations.value = [{ id: "c1", title: "已截断的首条消息占位" }];
+    register();
+    stream.emit({ type: "session_info", title: "销售数据分析" });
+    expect(deps.conversations.value[0].title).toBe("销售数据分析");
+  });
+
   describe("file events", () => {
     it("patches the processing_status on the workspace row", () => {
       deps.files.value = [{ id: "f1", processing_status: "processing" }];

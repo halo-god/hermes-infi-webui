@@ -100,10 +100,227 @@ def extract_docx_html(raw: bytes) -> str | None:
 
 _XLSX_MAX_ROWS = 500
 _XLSX_MAX_COLS = 50
+# Workbooks below this size are loaded in full-fidelity mode (column widths,
+# merges, fills, fonts, number formats, freeze panes). Larger ones fall back
+# to streaming read_only mode: plain grid + header row only.
+_XLSX_RICH_MAX_BYTES = 5 * 1024 * 1024
+
+# Spreadsheet preview styling. The extractor output is rendered inside a
+# sandboxed srcdoc iframe which CANNOT see app CSS — so the styles must be
+# inlined in a complete HTML document for xlsx/csv previews to look like a
+# spreadsheet instead of a bare unstyled table.
+_SPREADSHEET_CSS = """
+body { margin: 0; padding: 14px 16px; background: #fff; color: #1f2328;
+       font: 13px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+h3.sheet { font-size: 14px; margin: 14px 0 8px; padding-bottom: 4px;
+           border-bottom: 2px solid #b8852a; color: #444; }
+h3.sheet:first-child { margin-top: 0; }
+table { border-collapse: collapse; margin: 0 0 12px; }
+th, td { border: 1px solid #e2e4e8; padding: 5px 10px; text-align: left;
+         white-space: nowrap; min-width: 48px; }
+th { background: #f5f6f7; font-weight: 600; position: sticky; top: 0;
+     box-shadow: inset 0 -1px 0 #d8dade; }
+tbody tr:nth-child(even) { background: #fafbfc; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.fc, th.fc { position: sticky; left: 0; background: #fff; z-index: 1;
+               box-shadow: inset -1px 0 0 #e2e4e8; }
+th.fc { z-index: 2; }
+tbody tr:nth-child(even) td.fc { background: #fafbfc; }
+p.note { color: #8a8f98; font-size: 12px; margin: 4px 0 12px; }
+"""
+
+
+def _spreadsheet_doc(body_html: str) -> str:
+    """Wrap extracted table markup in a complete styled HTML document."""
+    return (
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+        f"<style>{_SPREADSHEET_CSS}</style></head><body>{body_html}</body></html>"
+    )
+
+
+def is_legacy_spreadsheet_html(kind: str, content: str | None) -> bool:
+    """True when a stored xlsx/csv preview predates the styled-document
+    format (bare table fragment, no DOCTYPE) and should be re-extracted."""
+    return kind in ("xlsx", "csv") and bool(content) and "<!DOCTYPE" not in content[:200]
+
+
+def _xlsx_fmt_value(value, fmt: str | None) -> str:
+    """Render a cell value the way Excel's number format intends."""
+    import datetime
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, datetime.datetime):
+        return value.strftime("%Y-%m-%d %H:%M")
+    if isinstance(value, datetime.date):
+        return value.strftime("%Y-%m-%d")
+    if isinstance(value, (int, float)):
+        f = fmt or ""
+        if "%" in f:
+            decimals = len(f.split(".")[1].rstrip("%")) if "." in f else 0
+            return f"{value * 100:.{decimals}f}%"
+        if "#,##0" in f:
+            decimals = len(f.split(".")[1]) if "." in f else 0
+            return f"{value:,.{decimals}f}"
+        if f in ("0.00", "0.000"):
+            return f"{value:.{len(f) - 2}f}"
+        # General / integers: drop float artifacts from data_only values.
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value)
+    return str(value)
+
+
+def _xlsx_inline_style(cell) -> str:
+    """Translate openpyxl cell styling to inline CSS (best effort)."""
+    styles: list[str] = []
+    try:
+        fill = cell.fill
+        if fill is not None and fill.patternType == "solid":
+            rgb = getattr(fill.fgColor, "rgb", None)
+            if isinstance(rgb, str) and len(rgb) >= 6:
+                styles.append(f"background:#{rgb[-6:]}")
+    except Exception:
+        pass
+    try:
+        font = cell.font
+        if font is not None:
+            if font.bold:
+                styles.append("font-weight:700")
+            if font.italic:
+                styles.append("font-style:italic")
+            color = getattr(font.color, "rgb", None) if font.color else None
+            if isinstance(color, str) and len(color) >= 6 and color[-6:] != "000000":
+                styles.append(f"color:#{color[-6:]}")
+    except Exception:
+        pass
+    try:
+        align = cell.alignment
+        if align is not None:
+            if align.horizontal == "center":
+                styles.append("text-align:center")
+            elif align.horizontal == "right":
+                styles.append("text-align:right")
+            if align.wrap_text:
+                styles.append("white-space:normal")
+    except Exception:
+        pass
+    return ";".join(styles)
+
+
+def _xlsx_rich_sheet_html(ws) -> str:
+    """Full-fidelity sheet render: widths, heights, merges, fills, fonts,
+    number formats, freeze panes, alignment."""
+    from html import escape
+    from openpyxl.utils import get_column_letter
+
+    # Merged ranges: anchor -> (rowspan, colspan); covered coords get skipped.
+    anchors: dict[tuple[int, int], tuple[int, int]] = {}
+    covered: set[tuple[int, int]] = set()
+    try:
+        for rng in ws.merged_cells.ranges:
+            anchors[(rng.min_row, rng.min_col)] = (rng.max_row - rng.min_row + 1,
+                                                   rng.max_col - rng.min_col + 1)
+            for r in range(rng.min_row, rng.max_row + 1):
+                for c in range(rng.min_col, rng.max_col + 1):
+                    if (r, c) != (rng.min_row, rng.min_col):
+                        covered.add((r, c))
+    except Exception:
+        pass
+
+    # Column widths (Excel width unit ≈ 7px per char + padding).
+    col_tags: list[str] = []
+    try:
+        for idx in range(1, min(ws.max_column, _XLSX_MAX_COLS) + 1):
+            dim = ws.column_dimensions.get(get_column_letter(idx))
+            w = dim.width if dim is not None and dim.width else None
+            if w:
+                col_tags.append(f'<col style="width:{round(w * 7 + 5)}px">')
+            else:
+                col_tags.append("<col>")
+    except Exception:
+        col_tags = []
+    colgroup = f"<colgroup>{''.join(col_tags)}</colgroup>" if col_tags else ""
+
+    # Freeze panes: sticky first column when frozen at column ≥ 2. (A frozen
+    # first row is equivalent to the sticky <thead> already in the base CSS.)
+    frozen_col = False
+    try:
+        if ws.freeze_panes and ws.freeze_panes not in ("A1", None):
+            from openpyxl.utils.cell import coordinate_from_string
+            _c, _r = coordinate_from_string(ws.freeze_panes)
+            from openpyxl.utils import column_index_from_string
+            frozen_col = column_index_from_string(_c) >= 2
+    except Exception:
+        pass
+
+    thead_rows: list[str] = []
+    body_rows: list[str] = []
+    row_count = 0
+    truncated_cols = False
+    for row in ws.iter_rows(min_row=1, max_row=min(ws.max_row, _XLSX_MAX_ROWS),
+                            max_col=min(ws.max_column, _XLSX_MAX_COLS)):
+        if ws.max_column > _XLSX_MAX_COLS:
+            truncated_cols = True
+        row_idx = row[0].row if row else row_count + 1
+        cells_html: list[str] = []
+        height = None
+        try:
+            rd = ws.row_dimensions.get(row_idx)
+            if rd is not None and rd.height:
+                height = round(rd.height)
+        except Exception:
+            pass
+        tr_style = f' style="height:{height}px"' if height else ""
+        for cell in row:
+            pos = (cell.row, cell.column)
+            if pos in covered:
+                continue
+            span = anchors.get(pos)
+            span_attr = ""
+            if span:
+                rs, cs = span
+                span_attr = (f' rowspan="{rs}" colspan="{cs}"' if rs > 1 or cs > 1 else "")
+            tag = "th" if row_idx == 1 else "td"
+            classes: list[str] = []
+            if frozen_col and cell.column == 1:
+                classes.append("fc")
+            if (isinstance(cell.value, (int, float)) and not isinstance(cell.value, bool)
+                    and not (cell.alignment and cell.alignment.horizontal)):
+                classes.append("num")
+            cls = f' class="{" ".join(classes)}"' if classes else ""
+            style = _xlsx_inline_style(cell)
+            style_attr = f' style="{style}"' if style else ""
+            text = _xlsx_fmt_value(cell.value, cell.number_format) if cell.value is not None else ""
+            cells_html.append(f"<{tag}{cls}{style_attr}{span_attr}>{escape(text)}</{tag}>")
+        tr = f'<tr{tr_style}>{"".join(cells_html)}</tr>'
+        if row_idx == 1:
+            thead_rows.append(tr)
+        else:
+            body_rows.append(tr)
+        row_count += 1
+
+    if ws.max_row > _XLSX_MAX_ROWS:
+        truncated_note = f'<p class="note">(仅显示前 {_XLSX_MAX_ROWS} 行，已截断)</p>'
+    else:
+        truncated_note = ""
+    col_note = f'<p class="note">(仅显示前 {_XLSX_MAX_COLS} 列，已截断)</p>' if truncated_cols else ""
+    table = (
+        "<table>" + colgroup
+        + (f'<thead>{"".join(thead_rows)}</thead>' if thead_rows else "")
+        + f'<tbody>{"".join(body_rows)}</tbody>'
+        + "</table>" + truncated_note + col_note
+    )
+    return table
 
 
 def extract_xlsx_html(raw: bytes) -> str | None:
-    """Convert an .xlsx workbook to sanitized per-sheet preview HTML tables."""
+    """Convert an .xlsx workbook to a styled spreadsheet-like preview.
+
+    Workbooks under _XLSX_RICH_MAX_BYTES are rendered in full fidelity
+    (column widths, row heights, merged cells, fills, font colors, number
+    formats, freeze panes, alignment); larger ones stream in read_only mode
+    with the base grid styling.
+    """
     try:
         import io
         from html import escape
@@ -116,41 +333,64 @@ def extract_xlsx_html(raw: bytes) -> str | None:
             # into a .xlsx filename instead of the real binary. Surface this
             # clearly so the user / agent knows what went wrong.
             preview = raw[:200].decode("utf-8", "ignore").strip()
-            return (
+            return _spreadsheet_doc(
                 '<p><em style="color:#c0392b">⚠ 文件格式错误：该文件不是有效的 .xlsx 工作簿。</em></p>'
                 '<p>可能原因：AI 助手在生成文件时将 HTML 预览写入了 <code>.xlsx</code> 扩展名，'
                 '而非真正的 Excel 二进制内容。</p>'
                 '<p>解决方法：请使用 <code>write_file</code> 工具生成 <code>.md</code> 或 <code>.txt</code> 文件，'
                 '或者上传真实的 .xlsx 文件。</p>'
-                f'<pre style="background:#f8f9fa;padding:8px;border-radius:4px;font-size:12px">{escape(preview)}</pre>'
+                f'<pre style="background:#f8f9fa;padding:8px;border-radius:4px;font-size:12px;white-space:pre-wrap">{escape(preview)}</pre>'
             )
 
-        wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        rich = len(raw) <= _XLSX_RICH_MAX_BYTES
+        wb = load_workbook(io.BytesIO(raw), read_only=not rich, data_only=True)
         parts: list[str] = []
         for ws in wb.worksheets:
-            parts.append(f"<h3>{escape(ws.title)}</h3>")
-            rows_html = []
-            truncated_cols = False
-            row_count = 0
-            for row in ws.iter_rows():
-                if row_count >= _XLSX_MAX_ROWS:
-                    parts.append(f"<p><em>(仅显示前 {_XLSX_MAX_ROWS} 行，已截断)</em></p>")
-                    break
-                cells = row[:_XLSX_MAX_COLS]
-                if len(row) > _XLSX_MAX_COLS:
-                    truncated_cols = True
-                cell_html = "".join(
-                    f"<td>{escape(str(c.value)) if c.value is not None else ''}</td>" for c in cells
-                )
-                rows_html.append(f"<tr>{cell_html}</tr>")
-                row_count += 1
-            parts.append("<table>" + "".join(rows_html) + "</table>")
-            if truncated_cols:
-                parts.append(f"<p><em>(仅显示前 {_XLSX_MAX_COLS} 列，已截断)</em></p>")
+            parts.append(f'<h3 class="sheet">{escape(ws.title)}</h3>')
+            if rich:
+                parts.append(_xlsx_rich_sheet_html(ws))
+            else:
+                parts.append(_xlsx_stream_sheet_html(ws))
         wb.close()
-        return "\n".join(parts) if parts else "<p><em>(空工作簿)</em></p>"
+        return _spreadsheet_doc("\n".join(parts)) if parts else _spreadsheet_doc("<p><em>(空工作簿)</em></p>")
     except Exception:
         return None
+
+
+def _xlsx_stream_sheet_html(ws) -> str:
+    """Streaming (read_only) sheet render: plain grid + header row."""
+    from html import escape
+
+    rows_html: list[str] = []
+    header_done = False
+    truncated_cols = False
+    row_count = 0
+    for row in ws.iter_rows():
+        if row_count >= _XLSX_MAX_ROWS:
+            rows_html.append(f'</tbody><p class="note">(仅显示前 {_XLSX_MAX_ROWS} 行，已截断)</p>')
+            break
+        cells = row[:_XLSX_MAX_COLS]
+        if len(row) > _XLSX_MAX_COLS:
+            truncated_cols = True
+        if not header_done:
+            cell_html = "".join(
+                f"<th>{escape(str(c.value)) if c.value is not None else ''}</th>" for c in cells
+            )
+            rows_html.append(f"<thead><tr>{cell_html}</tr></thead><tbody>")
+            header_done = True
+        else:
+            cell_html = "".join(
+                (
+                    '<td class="num">' if isinstance(c.value, (int, float)) else "<td>"
+                ) + (escape(str(c.value)) if c.value is not None else "") + "</td>"
+                for c in cells
+            )
+            rows_html.append(f"<tr>{cell_html}</tr>")
+        row_count += 1
+    table = "<table>" + "".join(rows_html) + ("</tbody>" if header_done else "") + "</table>"
+    if truncated_cols:
+        table += f'<p class="note">(仅显示前 {_XLSX_MAX_COLS} 列，已截断)</p>'
+    return table
 
 
 def extract_pptx_html(raw: bytes) -> str | None:
@@ -276,7 +516,7 @@ def _pptx_shape_image_b64(shape) -> tuple[str, str] | tuple[None, str]:
 
 
 def extract_csv_html(raw: bytes) -> str | None:
-    """Convert CSV bytes to an HTML table preview (first 200 rows)."""
+    """Convert CSV bytes to a styled HTML table preview (first 200 rows)."""
     try:
         import io
         import csv
@@ -288,14 +528,14 @@ def extract_csv_html(raw: bytes) -> str | None:
         row_count = 0
         for row in reader:
             if row_count >= 200:
-                parts.append("<p><em>(仅显示前 200 行，已截断)</em></p>")
+                parts.append('<p class="note">(仅显示前 200 行，已截断)</p>')
                 break
             tag = "th" if row_count == 0 else "td"
             cells = "".join(f"<{tag}>{escape(c)}</{tag}>" for c in row)
             parts.append(f"<tr>{cells}</tr>")
             row_count += 1
         parts.append("</table>")
-        return "\n".join(parts) if row_count > 0 else None
+        return _spreadsheet_doc("\n".join(parts)) if row_count > 0 else None
     except Exception:
         return None
 

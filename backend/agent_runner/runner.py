@@ -1555,6 +1555,19 @@ class Runner:
             acc.get("thinking") or "", acc.get("plan"), acc.get("files"),
             acc.get("clarifies"), acc.get("usage"), call_collector.records(),
         )
+        # First-turn title summary: replace the truncated-placeholder title
+        # with a concise LLM title generated from the exchange. Async +
+        # fail-silent — the placeholder stays if anything goes wrong.
+        if (
+            status == "complete"
+            and task.get("first_turn")
+            and settings.title_summary_enabled
+        ):
+            self._spawn_title_summary(
+                conversation_id,
+                user_excerpt=skill_firing_excerpt,
+                reply_text=acc.get("text") or "",
+            )
         if status == "complete" and matched_skill_ids:
             await self._record_skill_firings(
                 conversation_id, acc["current_msg_id"], matched_skill_ids, skill_firing_excerpt,
@@ -1960,6 +1973,55 @@ class Runner:
                 .values(title=title)
             )
             await db.commit()
+
+    def _spawn_title_summary(
+        self, conversation_id: str, *, user_excerpt: str, reply_text: str,
+    ) -> None:
+        """Fire-and-forget first-turn title generation (never blocks the turn)."""
+        async def _run() -> None:
+            try:
+                from app.services.summarizer import summarize_title_sync
+                title = await asyncio.to_thread(
+                    summarize_title_sync, user_excerpt, reply_text,
+                )
+                if not title:
+                    return
+                # The placeholder dispatch wrote = first user message[:40].
+                placeholder = (user_excerpt or "")[:40]
+                updated = await self._update_conv_title_guarded(
+                    conversation_id, title, placeholder,
+                )
+                if updated:
+                    await R.publish_event(
+                        conversation_id, {"type": "session_info", "title": title},
+                    )
+            except Exception:  # noqa: BLE001 — title is best-effort
+                logger.debug("first-turn title summary failed", exc_info=True)
+
+        t = asyncio.create_task(_run())
+        self._active_tasks.add(t)
+        t.add_done_callback(self._on_task_done)
+
+    async def _update_conv_title_guarded(
+        self, conversation_id: str, title: str, placeholder: str,
+    ) -> bool:
+        """Update the title ONLY while it is still an auto placeholder ('新会话'
+        or the truncated first message) — a user-renamed conversation is never
+        overwritten by the summariser. Returns True when the row was updated
+        (only then should a session_info event be published)."""
+        from sqlalchemy import or_, update as sa_upd
+        async with async_session_maker() as db:
+            res = await db.execute(
+                sa_upd(Conversation)
+                .where(Conversation.id == uuid.UUID(conversation_id))
+                .where(or_(
+                    Conversation.title == "新会话",
+                    Conversation.title == placeholder,
+                ))
+                .values(title=title)
+            )
+            await db.commit()
+            return bool(res.rowcount)
 
     async def _fail(
         self, conversation_id: str, message_id: str, detail: str,

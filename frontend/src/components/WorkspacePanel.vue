@@ -150,10 +150,13 @@ function fileMode(f: FileItem | null): string {
     if (f.created_by_agent) return "md";
     return f.preview_pdf_key ? "pdf" : "office";
   }
-  // Office family (docx/xlsx/pptx + legacy OLE2 + OpenDocument): unified PDF
-  // preview when LibreOffice produced one (preview_pdf_key); HTML fallback
-  // for pre-0086 rows or when soffice is unavailable.
-  if (e === "xlsx" || e === "pptx" || e === "rtf"
+  // xlsx: the backend's openpyxl HTML table (styled as a spreadsheet) reads
+  // better than the LibreOffice PDF conversion — always prefer the HTML view.
+  if (e === "xlsx") return "office";
+  // Office family (pptx + legacy OLE2 + OpenDocument): unified PDF preview
+  // when LibreOffice produced one (preview_pdf_key); HTML fallback for
+  // pre-0086 rows or when soffice is unavailable.
+  if (e === "pptx" || e === "rtf"
     || e === "doc" || e === "xls" || e === "ppt"
     || e === "odt" || e === "ods" || e === "odp") {
     return f.preview_pdf_key ? "pdf" : "office";
@@ -1079,6 +1082,11 @@ function fmtDate(s: string) {
 
 /* Markdown */
 .md-preview { max-width: 680px; margin: 0 auto; color: var(--ink); font-size: 13.5px; line-height: 1.7; }
+/* Office/CSV HTML preview: needs a definite height, else the sandbox iframe's
+   height:100% can't resolve and collapses to the browser-default 150px. The
+   max-width:none opts out of the markdown column — tables want full width.
+   (.ws-preview is a definite-height flex child, same as .pdf-preview.) */
+.md-preview.office-preview { max-width: none; height: 100%; }
 .md-preview :deep(p) { margin: 0 0 8px; }
 .md-preview :deep(h1) { font-family: var(--font-serif); font-size: 24px; margin: 0 0 10px; }
 .md-preview :deep(h2) { font-family: var(--font-serif); font-size: 18px; margin: 16px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--rule); }

@@ -1019,6 +1019,9 @@ async def send_message(
                 "skill_firing_excerpt": text[:500],
                 "max_iterations": max_iterations,
                 "stage": stage,
+                # First-turn flag for the runner's async title summary (the
+                # truncated first message stays as placeholder until then).
+                "first_turn": is_first_turn,
             }
         )
     except Exception as exc:
