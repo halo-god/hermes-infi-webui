@@ -453,7 +453,8 @@ export interface GroupMember {
   agent_id: string | null;
   role: "admin" | "member";
   auto_reply?: boolean;
-  joined_at: string;
+  // 后端 server_default 不回填实例，可能为 null（bfca9b4）
+  joined_at: string | null;
   last_read_at?: string | null;
   presence?: string | null;
 }
@@ -596,7 +597,7 @@ export interface Member {
   user_id: string;
   role: string;
   status: string;
-  joined_at: string;
+  joined_at: string | null;
   name: string | null;
   email: string | null;
   initials: string | null;
