@@ -183,14 +183,22 @@ async def test_a_b_sync_loop_converges_via_content_hash(tmp_path, monkeypatch):
         res = await sss.ingest_hermes_skills(s, owner.id)
     assert res["new"] == 0 and res["updated"] == 0, res
 
-    # Genuine external edit on the hermes side → ingested.
+    # External edit of a PLATFORM skill's projection → NOT ingested.
+    # Platform rows are DB-owned (AGENTS.md invariant: "平台技能永不受扫描
+    # 影响"); a drifted FS copy is ignored so platform edits can never be
+    # silently rolled back by a scan.
     path.write_text(
         path.read_text(encoding="utf-8").replace("v1 内容", "v2 外部修改"),
         encoding="utf-8",
     )
     async with async_session_maker() as s:
         res = await sss.ingest_hermes_skills(s, owner.id)
-    assert res["updated"] == 1, res
+    assert res["updated"] == 0, res
+    async with async_session_maker() as s:
+        row = (await s.execute(
+            select(AgentSkill).where(AgentSkill.id == skill_id)
+        )).scalar_one()
+        assert row.content == "v1 内容"  # DB stays the source of truth
 
     # Platform edit (evolution approval): DB content updated first, then
     # projected to FS → next scan must converge (no bounce back to v2).
@@ -214,3 +222,57 @@ async def test_a_b_sync_loop_converges_via_content_hash(tmp_path, monkeypatch):
         )).scalar_one()
         assert row.content == "v3 演化内容"
         assert row.content_hash == sss._hash_content("v3 演化内容")
+
+
+@pytest.mark.asyncio
+async def test_agent_origin_skill_external_edit_is_ingested(tmp_path, monkeypatch):
+    """FS wins for AGENT-origin rows: an external edit of a hermes-side skill
+    file is absorbed back into the DB (only platform rows are scan-immune)."""
+    from app.db.base import async_session_maker
+    from app.db.models.agent import Profile  # noqa: F401 (schema graph)
+    from app.db.models.memory import AgentSkill
+    from app.db.models.user import User
+    from app.core.security import hash_password
+    from sqlalchemy import select
+
+    monkeypatch.setattr(settings, "hermes_skills_sync_enabled", True)
+    global_home = tmp_path / "home"
+    global_home.mkdir()
+    monkeypatch.setattr(sss, "_get_hermes_home", lambda: str(global_home))
+    monkeypatch.setattr(sss, "_skill_profile_id", mock.AsyncMock(return_value=None))
+
+    async with async_session_maker() as s:
+        owner = User(
+            id=uuid.uuid4(), email="agented@h.io", name="agented",
+            password_hash=hash_password("Test@1234"), is_active=True, role="member",
+        )
+        s.add(owner)
+        await s.commit()
+    # Simulate a hermes-side skill a previous scan ingested.
+    async with async_session_maker() as s:
+        skill = AgentSkill(
+            owner_id=owner.id, name="HermesSide", description="d",
+            content="hermes v1", enabled=True, origin="agent",
+            content_hash=sss._hash_content("hermes v1"),
+        )
+        s.add(skill)
+        await s.commit()
+        skill_id = skill.id
+
+    # The file drifted on the hermes side (real edit, not a projection).
+    skill_dir = global_home / "skills" / "hermesside"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: HermesSide\ndescription: d\n---\nhermes v2 编辑", encoding="utf-8",
+    )
+
+    async with async_session_maker() as s:
+        res = await sss.ingest_hermes_skills(s, owner.id)
+    assert res["updated"] == 1, res
+    assert res["new"] == 0, res
+
+    async with async_session_maker() as s:
+        row = (await s.execute(
+            select(AgentSkill).where(AgentSkill.id == skill_id)
+        )).scalar_one()
+        assert "v2 编辑" in row.content

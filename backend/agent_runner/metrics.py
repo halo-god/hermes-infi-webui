@@ -4,9 +4,12 @@ from __future__ import annotations
 from prometheus_client import Counter, Histogram, Gauge
 
 # Task metrics
-TASKS_ENQUEUED = Counter(
-    "hermes_runner_tasks_enqueued_total",
-    "Tasks enqueued to runner",
+# NOTE: incremented when the runner STARTS executing a task (the runner never
+# sees the enqueue — that happens in the API process). If you need a true
+# enqueue counter, instrument enqueue_prompt() in app/core/redis.py instead.
+TASKS_STARTED = Counter(
+    "hermes_runner_tasks_started_total",
+    "Tasks started by the runner",
     ["type"],
 )
 

@@ -45,8 +45,17 @@ function cycleAtmos() {
   const next = ATMOS_CYCLE[(ATMOS_CYCLE.indexOf(cur) + 1) % ATMOS_CYCLE.length];
   document.body.dataset.atmos = next;
   isNight.value = ["night", "ink"].includes(next);
-  const saved = JSON.parse(localStorage.getItem("hermes.tweaks") || "{}");
+  // Guarded read: a corrupted "hermes.tweaks" entry must not brick the theme
+  // button (savedAtmos above guards for the same reason).
+  let saved: Record<string, unknown> = {};
+  try {
+    saved = JSON.parse(localStorage.getItem("hermes.tweaks") || "{}");
+  } catch { /* ignore */ }
   localStorage.setItem("hermes.tweaks", JSON.stringify({ ...saved, atmos: next }));
+  // Notify the (always-mounted) TweaksPanel so its internal tweaks.atmos
+  // doesn't go stale — otherwise its next watch→apply() would roll the theme
+  // back to the old value.
+  window.dispatchEvent(new CustomEvent("hermes:atmos", { detail: next }));
 }
 function onAtmos(e: Event) {
   isNight.value = ["night", "ink"].includes((e as CustomEvent<string>).detail || "");

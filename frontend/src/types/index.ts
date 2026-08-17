@@ -739,6 +739,7 @@ export interface ScheduledTask {
   last_status: string | null;
   success_count: number;
   fail_count: number;
+  conversation_id: string | null;
   created_at: string;
   updated_at: string;
 }

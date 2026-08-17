@@ -7,7 +7,7 @@ import uuid
 
 import pytest
 
-from app.db.models.conversation import Conversation, Message
+from app.db.models.conversation import Message
 from app.db.models.user import User
 from app.core.security import hash_password
 

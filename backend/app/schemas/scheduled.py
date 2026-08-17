@@ -41,5 +41,8 @@ class ScheduledTaskOut(BaseModel):
     last_status: str | None = None
     success_count: int = 0
     fail_count: int = 0
+    # The auto-created ⏰ conversation the runner writes results into — the
+    # ScheduledView "查看执行结果" button navigates there.
+    conversation_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime

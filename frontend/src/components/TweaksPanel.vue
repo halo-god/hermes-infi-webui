@@ -2,7 +2,7 @@
 /* 1:1 port of the prototype Tweaks panel (氣質 Atmosphere / 密度 Density /
    语气 Voice). Atmosphere + density drive body[data-atmos]/[data-density],
    which prototype.css already styles for all 5 themes. Persisted to localStorage. */
-import { reactive, watch } from "vue";
+import { onUnmounted, reactive, watch } from "vue";
 import Icon from "@/components/Icon.vue";
 
 defineProps<{ open: boolean }>();
@@ -30,6 +30,16 @@ function apply() {
   window.dispatchEvent(new CustomEvent("hermes:atmos", { detail: tweaks.atmos }));
 }
 watch(tweaks, apply, { deep: true });
+
+// The AppLayout topbar can also cycle the atmos; without this listener the
+// panel's internal tweaks.atmos goes stale and its next watch→apply() would
+// silently roll the theme back to the pre-cycle value.
+function onExternalAtmos(e: Event) {
+  const v = (e as CustomEvent<string>).detail;
+  if (typeof v === "string" && v && tweaks.atmos !== v) tweaks.atmos = v;
+}
+window.addEventListener("hermes:atmos", onExternalAtmos);
+onUnmounted(() => window.removeEventListener("hermes:atmos", onExternalAtmos));
 
 const densityHint: Record<string, string> = { loose: "从容铺开", normal: "正合适", tight: "不浪费每一寸" };
 const voiceHint: Record<string, string> = { classical: "简练有古意", warm: "像同事在说话", engineering: "只说事实" };
