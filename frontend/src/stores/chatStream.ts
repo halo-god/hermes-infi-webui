@@ -301,9 +301,14 @@ export function registerStreamHandlers(
   }, activeId));
 
   stream.on("session_info", scoped((ev) => {
+    // Title updates come from the runner's first-turn summary, which only
+    // fires while the title is still an auto placeholder (DB-side guard) —
+    // so a user-renamed conversation is never overwritten. The old guard
+    // compared against the localized "新会话" string and never matched for
+    // en-locale users (the backend sentinel is always the literal zh string).
     if (ev.title) {
       const c = conversations.value.find((c) => c.id === activeId.value);
-      if (c && c.title === t("stream.newConversation")) c.title = ev.title;
+      if (c) c.title = ev.title;
     }
   }, activeId));
 

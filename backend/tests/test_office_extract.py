@@ -81,7 +81,9 @@ def test_extract_xlsx_html_basic():
     assert html is not None
     assert "&lt;script&gt;" in html  # sheet name escaped
     assert "<script>" not in html
-    assert "<table>" in html and "<td>r1c1</td>" in html
+    # First row renders as the table header (spreadsheet-style preview).
+    assert "<table>" in html and "<th>r1c1</th>" in html and "<td>r2c1</td>" in html
+    assert "<!DOCTYPE html>" in html and "<style>" in html
 
 
 def test_extract_xlsx_html_truncates_oversized_sheets():

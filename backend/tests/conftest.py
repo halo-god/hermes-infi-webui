@@ -21,6 +21,25 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 os.environ.setdefault(
     "DATABASE_URL", "postgresql+asyncpg://hermes:hermes@127.0.0.1:5432/hermes_test"
 )
+# ── Hard guard: NEVER let the suite touch a non-test database ──
+# The session-scoped _create_tables fixture runs DROP SCHEMA public CASCADE
+# against DATABASE_URL — pointing it at a real database (e.g. the local dev
+# "hermes" db) wipes it. The Redis guard below has this belt-and-suspenders;
+# DATABASE_URL needs it just as badly (2026-08-17 incident: an explicitly
+# exported DATABASE_URL=...hermes destroyed the local dev database).
+from urllib.parse import urlparse as _urlparse  # noqa: E402 (guard-time import)
+
+_db_url = os.environ.get("DATABASE_URL", "")
+_db_name = (_urlparse(_db_url).path or "").lstrip("/").lower() if "://" in _db_url else ""
+if "test" not in _db_name:
+    raise RuntimeError(
+        f"DATABASE_URL points at an unapproved database ('{_db_name}'). Tests "
+        "recreate the whole schema (DROP SCHEMA public CASCADE) — they MUST "
+        "target a throwaway database whose name contains 'test' (e.g. "
+        "hermes_test). CI sets DATABASE_URL=...hermes_test explicitly. Never "
+        "point the suite at a real/dev database." if _db_name else
+        "DATABASE_URL is not a parseable URL."
+    )
 # Same for Redis: pin to the loopback IP so an intermittent mDNS resolver
 # stall can't hang the suite's connections.
 # WARNING: production hermes-redis listens on 127.0.0.1:1979 (docker compose map).
@@ -40,7 +59,6 @@ os.environ.setdefault(
 # exporting REDIS_URL, a future edit, a stale env) points the suite at the
 # production instance (127.0.0.1:1979, db0), fail loudly at import instead of
 # silently enqueueing real ACP tasks / deleting production rate-limit keys.
-from urllib.parse import urlparse as _urlparse
 # Whitelist semantics, NOT a blocklist: any host:port that is not a
 # dedicated test instance is rejected. The old guard only blocked
 # localhost/127.0.0.1:1979, so container-name variants (redis:1979,
