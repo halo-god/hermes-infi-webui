@@ -246,6 +246,13 @@ const rawUrl = computed(() =>
 const pdfUrl = computed(() =>
   activeFile.value ? props.adapter.getPdfUrl(activeFile.value.id) : ""
 );
+// In fullscreen, ask the browser PDF viewer for 100% zoom — its default
+// fit-to-width shrinks pages, which reads badly on a big canvas. Chrome/
+// Edge honour the #zoom hash; Safari ignores it (harmless no-op). The key
+// forces a clean iframe reload when the fullscreen state flips.
+const pdfFrameUrl = computed(() =>
+  pdfUrl.value ? (fullscreen.value ? `${pdfUrl.value}#zoom=100` : pdfUrl.value) : ""
+);
 
 function highlightCode(code: string, language: string): string {
   const escaped = code
@@ -551,8 +558,8 @@ function fmtDate(s: string) {
           title="版本历史"
           @click="toggleVersions"
         ><Icon name="refresh" :size="14" /> 版本历史</button>
-        <button class="ws-btn" :class="{ active: fullscreen }" title="全屏" @click="fullscreen = !fullscreen">
-          <Icon name="share" :size="14" />
+        <button class="ws-btn" :class="{ active: fullscreen }" :title="fullscreen ? '退出全屏' : '全屏'" @click="fullscreen = !fullscreen">
+          <Icon :name="fullscreen ? 'minimize' : 'expand'" :size="14" />
         </button>
         <button class="ws-x" @click="emit('close')">×</button>
       </div>
@@ -808,7 +815,7 @@ function fmtDate(s: string) {
             </div>
             <!-- PDF (native + LibreOffice-converted Office previews) -->
             <div v-else-if="fileMode(activeFile) === 'pdf'" class="pdf-preview">
-              <iframe :src="pdfUrl" frameborder="0" style="width:100%;height:calc(100% - 36px);border:none" />
+              <iframe :key="fullscreen ? 'fs' : 'normal'" :src="pdfFrameUrl" frameborder="0" style="width:100%;height:calc(100% - 36px);border:none" />
               <div style="height:36px;display:flex;align-items:center;justify-content:center;border-top:1px solid var(--rule-soft);gap:8px">
                 <a :href="pdfUrl" target="_blank" class="btn" style="font-size:12px;padding:4px 12px">在新标签页打开</a>
               </div>
