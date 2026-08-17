@@ -77,7 +77,6 @@ async def test_stage_suffix_isolation():
 async def test_redis_hickup_falls_back_to_first_turn():
     """On Redis failure the probe must return False (first-turn semantics) —
     never crash the send path with an unhandled exception."""
-    import app.services.conversation_service as cs
 
     class _Boom:
         async def exists(self, key):

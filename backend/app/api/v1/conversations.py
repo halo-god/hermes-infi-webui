@@ -783,10 +783,14 @@ async def conversation_ws(
                 continue
             if action == "typing":
                 # Ephemeral presence ping — broadcast to other members, not persisted.
+                # Cap the display name: it fans out to every member and lands
+                # on the durable event stream (replayed to late joiners), so
+                # an unbounded field is an amplification vector.
+                name = str(payload.get("name") or "")[:64]
                 await redis_core.publish_event(cid, {
                     "type": "typing",
                     "user_id": str(user_id),
-                    "name": payload.get("name") or "",
+                    "name": name,
                 })
                 continue
             if action == "send":
@@ -825,6 +829,21 @@ async def conversation_ws(
                             websocket, conversation_id, user_id,
                             text, payload, msg_db_provider=async_session_maker,
                         )
+                    except Exception:
+                        # Enqueue/DB failure (e.g. Redis down) must NOT crash
+                        # the socket handler — the while-loop only catches
+                        # WebSocketDisconnect, so an unhandled exception would
+                        # drop the connection (1011) with zero feedback and
+                        # leave streamingConvoId latched on the client.
+                        # _fail_message_on_enqueue already marked the DB row
+                        # error before re-raising.
+                        logger.exception("WS send dispatch failed")
+                        try:
+                            await websocket.send_text(
+                                json.dumps({"type": "error", "message_id": "", "detail": "消息发送失败，请重试"})
+                            )
+                        except Exception:
+                            pass
                     finally:
                         try:
                             await redis_core.get_redis().delete(turn_lock_key)

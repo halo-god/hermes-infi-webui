@@ -45,7 +45,7 @@ from agent_runner.session_pool import SessionPool
 from agent_runner.subagent_pool import SubagentPool
 from agent_runner.workspace_watcher import WorkspaceWatcher
 from agent_runner.metrics import (
-    TASKS_ENQUEUED,
+    TASKS_STARTED,
     TASKS_COMPLETED,
     TASKS_FAILED,
     TASK_DURATION,
@@ -673,7 +673,7 @@ class Runner:
                 task_type = task_data.get("type", "unknown")
                 attempt = task_data.get("_attempt", 0)
                 start_time = time.monotonic()
-                TASKS_ENQUEUED.labels(type=task_type).inc()
+                TASKS_STARTED.labels(type=task_type).inc()
                 logger.info("Starting task %s (attempt %d, active=%d/%d)",
                             entry_id, attempt + 1, len(self._active_tasks), MAX_CONCURRENT)
                 try:
@@ -1985,6 +1985,21 @@ class Runner:
 
 
 async def _amain() -> None:
+    # Expose Prometheus metrics — docker/prometheus/prometheus.yml scrapes
+    # agent-runner:8000/metrics. Without this endpoint every metric defined
+    # in agent_runner/metrics.py (incl. the ACTIVE_SESSIONS/SESSION_POOL_SIZE
+    # gauges) is dead code: nothing can ever read them.
+    from prometheus_client import start_http_server
+
+    metrics_port = int(os.environ.get("RUNNER_METRICS_PORT", "8000"))
+    try:
+        start_http_server(metrics_port)
+        logger.info("Prometheus /metrics listening on :%d", metrics_port)
+    except OSError as exc:
+        # Port already taken (e.g. a second runner instance on the same host)
+        # must not kill the process — metrics are best-effort.
+        logger.warning("metrics server not started on :%d: %s", metrics_port, exc)
+
     runner = Runner()
     try:
         await runner.run()

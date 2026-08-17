@@ -467,10 +467,19 @@ async def ingest_hermes_skills(db: AsyncSession, owner_id) -> dict:
     def _ingest(fs_skill: HermesSkillInfo, profile_id: uuid.UUID | None) -> None:
         nonlocal new_count, updated_count, total
         total += 1
-        existing_skill = (
+        by_id_hit = (
             existing_by_id.get(fs_skill.platform_skill_id)
             if fs_skill.platform_skill_id else None
-        ) or existing_by_slug.get(_slugify(fs_skill.name))
+        )
+        if by_id_hit is not None and by_id_hit.profile_id != profile_id:
+            # The file carries the platform_skill_id of a row in ANOTHER
+            # scope — it is a Direction-A projection (DB→FS) of e.g. a global
+            # skill into a profile home. Never re-ingest it: a duplicate row
+            # created here gets a fresh id the projection file doesn't know,
+            # so the next scan can't match it by id — it tombstones and yet
+            # another duplicate is created, growing the table without bound.
+            return
+        existing_skill = by_id_hit or existing_by_slug.get(_slugify(fs_skill.name))
         if existing_skill is not None and existing_skill.profile_id != profile_id:
             # Slug matched a row in ANOTHER scope (global vs profile, or two
             # profiles): adopting it would silently merge distinct skills
@@ -502,9 +511,16 @@ async def ingest_hermes_skills(db: AsyncSession, owner_id) -> dict:
             # whitespace normalisation can't cause a false "changed" either.
             if existing_skill.content_hash and existing_skill.content_hash == fs_hash:
                 return
-            if existing_skill.profile_id == profile_id:
+            if (
+                existing_skill.profile_id == profile_id
+                and existing_skill.origin == "agent"
+            ):
                 # Content changed on the hermes side (or first sync since
-                # 0092, hash was NULL) — FS wins for agent-origin rows.
+                # 0092, hash was NULL) — FS wins, but ONLY for agent-origin
+                # rows. A hash mismatch on a platform row means the FS copy
+                # drifted (failed write / manual edit); the DB stays the
+                # source of truth for platform skills (AGENTS.md invariant) —
+                # leave it alone and let Direction A re-project.
                 existing_skill.content = fs_skill.content
                 existing_skill.description = fs_skill.description
                 existing_skill.content_hash = fs_hash
@@ -512,6 +528,12 @@ async def ingest_hermes_skills(db: AsyncSession, owner_id) -> dict:
                 if fs_skill.tags:
                     existing_skill.trigger_conditions = {"keywords": fs_skill.tags}
                 updated_count += 1
+            elif existing_skill.origin == "platform":
+                logger.warning(
+                    "Skill scan: FS copy of platform skill %r drifted "
+                    "(hash mismatch) — keeping DB content",
+                    existing_skill.name,
+                )
 
     # 1. Global skills dir.
     for fs_skill in await asyncio.to_thread(list_hermes_fs_skills):

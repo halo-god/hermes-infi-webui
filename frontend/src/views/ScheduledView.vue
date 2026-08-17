@@ -43,7 +43,9 @@ function buildCron(): string {
     case "daily": return `${m || 0} ${h || 0} * * *`;
     case "weekly": return `${m || 0} ${h || 0} * * ${scheduleWeekdays.value.join(",") || "*"}`;
     case "monthly": return `${m || 0} ${h || 0} ${scheduleDayOfMonth.value} * *`;
-    case "hourly": return `0 */${Math.max(1, scheduleEveryNHours.value)} * * *`;
+    // Keep the minute from scheduleTime so editing `30 */2 * * *` round-trips
+    // instead of silently rewriting it to `0 */2 * * *`.
+    case "hourly": return `${m || 0} */${Math.max(1, scheduleEveryNHours.value)} * * *`;
     default: return form.value.cron;
   }
 }
@@ -52,7 +54,14 @@ function parseCron(cron: string) {
   if (parts.length < 5) { scheduleType.value = "custom"; return; }
   // 5-field: min hour dom month dow
   const [m, h, dom, , dow] = parts;
-  if (m === "0" && h.startsWith("*/")) { scheduleType.value = "hourly"; scheduleEveryNHours.value = parseInt(h.slice(2)) || 1; return; }
+  // Any minute is valid for hourly (`30 */2 * * *` is hourly too) — the m==="0"
+  // requirement used to misparse it as daily and silently rewrite the schedule.
+  if (h.startsWith("*/")) {
+    scheduleType.value = "hourly";
+    scheduleEveryNHours.value = parseInt(h.slice(2)) || 1;
+    scheduleTime.value = `${String(parseInt(h) || 0).padStart(2, "0")}:${String(parseInt(m) || 0).padStart(2, "0")}`;
+    return;
+  }
   if (dom === "*" && dow !== "*" && !dow.includes("/")) { scheduleType.value = "weekly"; scheduleTime.value = `${String(parseInt(h)).padStart(2,"0")}:${String(parseInt(m)).padStart(2,"0")}`; scheduleWeekdays.value = dow.split(",").map(Number).filter((n) => !isNaN(n)); return; }
   if (dom !== "*" && dow === "*") { scheduleType.value = "monthly"; scheduleTime.value = `${String(parseInt(h)).padStart(2,"0")}:${String(parseInt(m)).padStart(2,"0")}`; scheduleDayOfMonth.value = parseInt(dom) || 1; return; }
   if (dom === "*" && dow === "*") { scheduleType.value = "daily"; scheduleTime.value = `${String(parseInt(h)).padStart(2,"0")}:${String(parseInt(m)).padStart(2,"0")}`; return; }
@@ -264,7 +273,7 @@ onMounted(() => {
               </div>
             </div>
             <div class="sched-actions" style="display: flex; gap: 6px" @click.stop>
-              <button v-if="(t as any).conversation_id" class="icon-btn" title="查看执行结果" @click="viewResults((t as any).conversation_id)">
+              <button v-if="t.conversation_id" class="icon-btn" title="查看执行结果" @click="viewResults(t.conversation_id!)">
                 <Icon name="chat" :size="14" />
               </button>
               <button class="icon-btn" :title="t.enabled ? '暂停' : '启用'" @click="toggle(t)">
