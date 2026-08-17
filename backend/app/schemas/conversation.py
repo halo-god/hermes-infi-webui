@@ -22,7 +22,7 @@ class GroupCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     member_user_ids: list[uuid.UUID] = Field(default_factory=list)
     member_agent_ids: list[str] = Field(default_factory=list)
-    team_id: uuid.UUID
+    team_id: uuid.UUID | None = None
 
 
 class GroupMemberOut(BaseModel):
@@ -34,7 +34,7 @@ class GroupMemberOut(BaseModel):
     agent_id: str | None = None
     role: str
     auto_reply: bool = False
-    joined_at: datetime
+    joined_at: datetime | None = None
     user_name: str | None = None
     profile_name: str | None = None  # resolved from Profile
     profile_icon: str | None = None
