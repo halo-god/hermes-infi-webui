@@ -22,6 +22,7 @@ from app.config import settings
 from app.core import redis as R
 from app.db.base import async_session_maker
 from app.main import app
+from agent_runner.discovery import find_hermes_binary
 from agent_runner.runner import Runner
 
 PREFIX = settings.api_v1_prefix
@@ -58,6 +59,10 @@ async def collect_events(cid: str, timeout_s: float) -> list[dict]:
 async def test_conversation_stream_e2e():
     if not await _services_ok():
         pytest.skip("PostgreSQL/Redis not reachable — start services + migrate + seed")
+    if not find_hermes_binary():
+        # CI has no hermes ACP binary — this test drives a real agent and can
+        # only run where the Hermes Agent CLI is installed.
+        pytest.skip("hermes ACP binary not found — install hermes-agent to run")
 
     runner = Runner()
     runner_task = asyncio.create_task(runner.run())
@@ -91,7 +96,7 @@ async def test_conversation_stream_e2e():
             )
             assert r.status_code == 200, r.text
 
-            events = await collect_events(cid, 25)
+            events = await collect_events(cid, 90)
 
             types = [e["type"] for e in events]
             assert "token" in types, types

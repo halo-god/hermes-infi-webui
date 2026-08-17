@@ -28,6 +28,10 @@ const props = defineProps<{
   groupAgents?: { agent_id: string; profile_id?: string | null; name: string; color: string; icon: string }[];
   groupMembers?: { id: string; user_id: string | null; user_name?: string; agent_id: string | null }[];
   replyTo?: { id: string; label: string; snippet: string } | null;
+  /** Mentions pre-seeded by the parent (e.g. the roundtable "追问" button):
+   * `{ key: "profile:{id}" | agentId, name: displayName }`. Survives until
+   * the user deletes the "@name" text from the draft (doSend filters). */
+  initialMentions?: { key: string; name: string }[];
 }>();
 export interface SendOptions {
   profileId?: string;
@@ -157,6 +161,21 @@ const showMentionPicker = ref(false);
 const mentionQuery = ref("");
 const mentionIdx = ref(0); // keyboard-highlighted row in the mention picker
 const mentionMentions = ref<{ key: string; name: string }[]>([]); // collected mentions, keyed by stable id + the display name inserted into the text
+
+// Seed mentions from the parent (roundtable "追问" button) without
+// duplicating on re-render; doSend keeps only those still present as "@name".
+watch(
+  () => props.initialMentions,
+  (list) => {
+    if (!list || !list.length) return;
+    for (const m of list) {
+      if (!mentionMentions.value.some((x) => x.key === m.key)) {
+        mentionMentions.value.push(m);
+      }
+    }
+  },
+  { immediate: true },
+);
 
 const filteredAgents = computed(() => {
   if (!props.groupAgents && !props.groupMembers) return [];

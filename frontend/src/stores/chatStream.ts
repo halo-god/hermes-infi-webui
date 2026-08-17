@@ -316,13 +316,26 @@ export function registerStreamHandlers(
     }
     const m = find(ev.message_id);
     if (m) {
-      if (!m.content.files) m.content = { ...m.content, files: [] };
-      const existing = m.content.files!.find((f) => f.id === ev.file_id);
-      if (!existing) {
-        // Guard against null file_id chips (db storage backend emits file
-        // events without a row id) — a null-id chip is a dead link.
-        if (ev.file_id) {
-          m.content.files!.push({ id: ev.file_id, name: ev.name, kind: ev.kind, diff: ev.diff });
+      // Roundtable: a file belongs to the specific AI card that wrote it
+      // (the runner tags file events with the slot). Personal turns attach
+      // files at message level.
+      const slot = ev.slot as number | undefined;
+      const replies = m.content?.replies;
+      if (typeof slot === "number" && Array.isArray(replies) && replies[slot]) {
+        const r = replies[slot] as { files?: { id: string; name: string; kind?: string }[] };
+        if (!r.files) r.files = [];
+        if (ev.file_id && !r.files.some((f) => f.id === ev.file_id)) {
+          r.files.push({ id: ev.file_id, name: ev.name, kind: ev.kind });
+        }
+      } else {
+        if (!m.content.files) m.content = { ...m.content, files: [] };
+        const existing = m.content.files!.find((f) => f.id === ev.file_id);
+        if (!existing) {
+          // Guard against null file_id chips (db storage backend emits file
+          // events without a row id) — a null-id chip is a dead link.
+          if (ev.file_id) {
+            m.content.files!.push({ id: ev.file_id, name: ev.name, kind: ev.kind, diff: ev.diff });
+          }
         }
       }
       triggerMessages();

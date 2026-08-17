@@ -22,8 +22,10 @@ import logging
 import os
 import re
 import signal
+import socket
 import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timezone
 
 from redis.exceptions import ResponseError
@@ -48,6 +50,7 @@ from agent_runner.metrics import (
     TASKS_FAILED,
     TASK_DURATION,
     DLQ_MESSAGES,
+    REDIS_OPS_FAILED,
 )
 
 logger = logging.getLogger("hermes.runner")
@@ -117,6 +120,12 @@ MAX_CONCURRENT = 10     # max tasks processed in parallel
 MAX_RETRIES = 3         # max retries before sending to DLQ
 DLQ_STREAM = "acp:dlq"  # dead letter queue stream
 RETRY_BACKOFF_BASE = 2  # exponential backoff base: 2^attempt seconds, capped at 60
+# Cross-instance per-conversation lock (acp:run:{conv}): serializes turns on
+# one conversation across runner instances. TTL must comfortably exceed one
+# turn's execution; the lock is released when the turn finishes.
+CONV_LOCK_TTL = 900 + 300
+# Cap on the in-process per-conversation lock dict (LRU eviction).
+CONV_LOCK_MAX = 1024
 
 
 class Runner:
@@ -126,12 +135,19 @@ class Runner:
         self.agents: dict[str, discovery.DiscoveredAgent] = {}
         self._shutdown = False
         self._lock_token: str | None = None
+        # True when this instance holds hermes:runner:lock — only the primary
+        # runs reclaim/scan/control duties; every instance still consumes.
+        self._is_primary = False
+        # Unique consumer name per instance: multiple runners may join the
+        # same consumer group and the stream fan-outs entries across them.
+        self.consumer_name = f"{settings.acp_consumer}-{socket.gethostname()}-{os.getpid()}"
         self._sem = asyncio.Semaphore(MAX_CONCURRENT)
         self._active_tasks: set[asyncio.Task] = set()
         self._bg_tasks: set[asyncio.Task] = set()
         self._watchers: dict[str, WorkspaceWatcher] = {}  # conversation_id -> watcher
         # Per-conversation turn serialization (see _run_task docstring).
-        self._conv_locks: dict[str, asyncio.Lock] = {}
+        # OrderedDict: LRU-evicted once it outgrows CONV_LOCK_MAX.
+        self._conv_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
 
     # ── Singleton lock ──
     async def _acquire_lock(self) -> bool:
@@ -498,36 +514,45 @@ class Runner:
                 raise RuntimeError(f"Redis unreachable at startup: {exc}") from exc
             logger.warning("Redis not reachable at startup: %s", exc)
 
-        if not await self._acquire_lock():
-            return
+        self._is_primary = await self._acquire_lock()
+        if not self._is_primary:
+            logger.warning(
+                "Runner lock held by another instance — running as secondary: "
+                "consuming acp:prompt only, no reclaim/scan/control duties",
+            )
 
         await self.register_agents()
         await self.ensure_group()
-        # Direction B auto-sync: ingest agent-created skills from the hermes
-        # filesystem once per day (cooldown tracked in Redis). Without this
-        # the loop only closes when an admin manually hits /memory/skills/scan.
-        try:
-            await self._maybe_ingest_hermes_skills()
-        except Exception:
-            logger.exception("Failed to auto-ingest hermes skills at startup")
-        try:
-            from agent_runner.runner_subagent import reconcile_background_subagents
-            await reconcile_background_subagents()
-        except Exception:
-            logger.exception("Failed to reconcile background subagents at startup")
-        # C2: reclaim messages left in "streaming" by a crashed runner — no
-        # task is executing at startup, so any streaming message is a leftover
-        # that would otherwise pin the UI spinner forever.
-        try:
-            await self._reclaim_stuck_streaming()
-        except Exception:
-            logger.exception("Failed to reclaim stuck streaming messages at startup")
-        logger.info("Runner consuming %s as %s/%s (max_concurrent=%d)",
-                    settings.acp_stream, settings.acp_group, settings.acp_consumer, MAX_CONCURRENT)
 
-        heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-        control_task = asyncio.create_task(self._control_loop())
-        skills_scan_task = asyncio.create_task(self._daily_skills_scan_loop())
+        heartbeat_task: asyncio.Task | None = None
+        control_task: asyncio.Task | None = None
+        skills_scan_task: asyncio.Task | None = None
+        if self._is_primary:
+            # Direction B auto-sync: ingest agent-created skills from the hermes
+            # filesystem once per day (cooldown tracked in Redis). Without this
+            # the loop only closes when an admin manually hits /memory/skills/scan.
+            try:
+                await self._maybe_ingest_hermes_skills()
+            except Exception:
+                logger.exception("Failed to auto-ingest hermes skills at startup")
+            try:
+                from agent_runner.runner_subagent import reconcile_background_subagents
+                await reconcile_background_subagents()
+            except Exception:
+                logger.exception("Failed to reconcile background subagents at startup")
+            # C2: reclaim messages left in "streaming" by a crashed runner — no
+            # task is executing at startup, so any streaming message is a leftover
+            # that would otherwise pin the UI spinner forever.
+            try:
+                await self._reclaim_stuck_streaming()
+            except Exception:
+                logger.exception("Failed to reclaim stuck streaming messages at startup")
+            heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+            control_task = asyncio.create_task(self._control_loop())
+            skills_scan_task = asyncio.create_task(self._daily_skills_scan_loop())
+        logger.info("Runner consuming %s as %s/%s (primary=%s, max_concurrent=%d)",
+                    settings.acp_stream, settings.acp_group, self.consumer_name,
+                    self._is_primary, MAX_CONCURRENT)
 
         _xread_backoff = 2.0
         try:
@@ -535,13 +560,14 @@ class Runner:
                 try:
                     resp = await R.get_redis().xreadgroup(
                         settings.acp_group,
-                        settings.acp_consumer,
+                        self.consumer_name,
                         {settings.acp_stream: ">"},
                         count=1,
                         block=3000,
                     )
                     _xread_backoff = 2.0
                 except Exception:
+                    REDIS_OPS_FAILED.labels(operation="xreadgroup").inc()
                     logger.exception("xreadgroup failed; backing off %.0fs", _xread_backoff)
                     await asyncio.sleep(_xread_backoff)
                     _xread_backoff = min(_xread_backoff * 1.5, 30.0)
@@ -558,6 +584,7 @@ class Runner:
                                 settings.acp_stream, settings.acp_group, entry_id
                             )
                         except Exception:
+                            REDIS_OPS_FAILED.labels(operation="xack").inc()
                             logger.warning("Failed to ACK %s", entry_id)
 
                         task_data = json.loads(fields["data"])
@@ -567,15 +594,20 @@ class Runner:
                         self._active_tasks.add(task)
                         task.add_done_callback(self._on_task_done)
         finally:
-            control_task.cancel()
-            heartbeat_task.cancel()
-            skills_scan_task.cancel()
+            if control_task:
+                control_task.cancel()
+            if heartbeat_task:
+                heartbeat_task.cancel()
+            if skills_scan_task:
+                skills_scan_task.cancel()
             try:
-                await heartbeat_task
+                if heartbeat_task:
+                    await heartbeat_task
             except asyncio.CancelledError:
                 pass
             try:
-                await skills_scan_task
+                if skills_scan_task:
+                    await skills_scan_task
             except asyncio.CancelledError:
                 pass
             if self._active_tasks:
@@ -612,12 +644,30 @@ class Runner:
         conv_lock = self._get_conv_lock(conv_id) if conv_id else None
         lock_acquired = False
         retry_delay: float | None = None
+        redis_lock_token: str | None = None
         if conv_lock:
             try:
                 await conv_lock.acquire()
                 lock_acquired = True
             except asyncio.CancelledError:
                 return  # cancelled while queued behind another turn
+        # Cross-instance serialization: with multiple runners sharing the
+        # consumer group, the in-process lock alone cannot stop two instances
+        # from handling the same conversation at once. Wait on the Redis lock;
+        # on timeout (holder still working or TTL lapsed) requeue the entry —
+        # it will wait for the lock again on its next read.
+        if conv_id:
+            redis_lock_token = await self._acquire_conv_redis_lock(conv_id)
+            if redis_lock_token is None:
+                try:
+                    await R.get_redis().xadd(
+                        settings.acp_stream, {"data": json.dumps(task_data)}
+                    )
+                except Exception:
+                    logger.exception("Failed to requeue conv-locked task %s", entry_id)
+                if lock_acquired:
+                    conv_lock.release()
+                return
         try:
             async with self._sem:
                 task_type = task_data.get("type", "unknown")
@@ -673,18 +723,66 @@ class Runner:
                         # (which locks the conversation against new messages).
                         await self._mark_task_failed(task_data, exc)
         finally:
+            if redis_lock_token and conv_id:
+                await self._release_conv_redis_lock(conv_id, redis_lock_token)
             if lock_acquired:
                 conv_lock.release()
             if retry_delay:
                 await asyncio.sleep(retry_delay)
 
     def _get_conv_lock(self, conv_id: str) -> asyncio.Lock:
-        """Per-conversation turn lock (see _run_task docstring)."""
+        """Per-conversation turn lock (see _run_task docstring).
+
+        LRU-bounded: an idle, unlocked entry past CONV_LOCK_MAX is dropped
+        (locked entries are never evicted — waiters would break)."""
         lock = self._conv_locks.get(conv_id)
         if lock is None:
             lock = asyncio.Lock()
             self._conv_locks[conv_id] = lock
+        else:
+            self._conv_locks.move_to_end(conv_id)
+        while len(self._conv_locks) > CONV_LOCK_MAX:
+            _cid, cand = next(iter(self._conv_locks.items()))
+            if cand.locked():
+                break  # everything ahead is locked; stop evicting
+            self._conv_locks.popitem(last=False)
         return lock
+
+    async def _acquire_conv_redis_lock(self, conv_id: str) -> str | None:
+        """Cross-instance per-conversation lock (SET NX on acp:run:{conv}).
+
+        Multiple runner instances share one consumer group, so the in-process
+        lock alone cannot serialize turns on the same conversation. Polls until
+        acquired or the current holder's TTL lapses; returns the token to
+        release with, or None on shutdown/timeout (caller must requeue)."""
+        key = f"acp:run:{conv_id}"
+        token = str(uuid.uuid4())
+        redis = R.get_redis()
+        deadline = time.monotonic() + CONV_LOCK_TTL
+        while not self._shutdown:
+            try:
+                if await redis.set(key, token, nx=True, ex=CONV_LOCK_TTL):
+                    return token
+            except Exception:
+                logger.warning("per-conversation lock SET failed (conv=%s)", conv_id, exc_info=True)
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(1)
+        return None
+
+    async def _release_conv_redis_lock(self, conv_id: str, token: str) -> None:
+        """Release acp:run:{conv} only if we still own it (Lua CAS)."""
+        try:
+            lua = """
+            if redis.call("get", KEYS[1]) == ARGV[1] then
+                return redis.call("del", KEYS[1])
+            else
+                return 0
+            end
+            """
+            await R.get_redis().eval(lua, 1, f"acp:run:{conv_id}", token)
+        except Exception:
+            logger.warning("Failed to release per-conversation lock (conv=%s)", conv_id, exc_info=True)
 
     async def _mark_task_failed(self, task_data: dict, exc: Exception) -> None:
         """Idempotently close out a conversation message left in "streaming"
@@ -818,11 +916,18 @@ class Runner:
 
         acp_session_id = None
         session_mode = None
+        is_group = False
         async with async_session_maker() as db:
             convo = await db.get(Conversation, uuid.UUID(conversation_id))
             if convo:
                 acp_session_id = convo.acp_session_id
                 session_mode = convo.session_mode
+                is_group = convo.type == "group"
+
+        # Group-chat turns are never interactive: nobody can answer a clarify
+        # modal mid-chat, so every clarify request is auto-declined (the
+        # agent's callback unblocks with an empty answer and continues).
+        is_group = is_group or bool(task.get("group_turn"))
 
         # Use profile-specific session namespace so that different agents in a
         # group chat don't share the same ACP history.
@@ -1108,37 +1213,61 @@ class Runner:
                     "context_used": used,
                 })
             elif kind == "confirmation_request":
-                request_id = update.get("request_id", str(uuid.uuid4()))
-                question = update.get("question", "需要你的确认")
-                options = update.get("options", ["继续", "跳过"])
-                req_payload = {
-                    "id": request_id,
-                    "conversation_id": conversation_id,
-                    "message_id": acc["current_msg_id"],
-                    "question": question,
-                    "questions": [{"question": question, "options": options, "allow_free_text": True}],
-                    "options": options,
-                }
-                await R.publish_event(
-                    conversation_id,
-                    {"type": "confirmation_request", "message_id": acc["current_msg_id"], "request": req_payload},
-                )
-                logger.info("Native confirmation_request, sent SSE: %s", request_id)
-                t = asyncio.create_task(
-                    self._wait_and_unblock_clarify_native(
-                        conversation_id, request_id, sid=conversation_id,
-                        message_id=acc["current_msg_id"], acc=acc,
+                if is_group:
+                    # Group chat: no interactive confirm — auto-decline by
+                    # answering the native request channel with an empty choice
+                    # (mirrors the Redis-bridge guard below).
+                    from agent_runner.runner_clarify import deliver_clarify_response
+                    logger.debug(
+                        "Group turn: auto-declined native confirmation_request %s",
+                        update.get("request_id", "?"),
                     )
-                )
-                self._bg_tasks.add(t)
-                t.add_done_callback(self._bg_tasks.discard)
-            # Cancel check: standalone, runs for ALL event types.
-            if not acc["cancelled"] and await R.is_cancelled(conversation_id):
-                acc["cancelled"] = True
-                try:
-                    await client.cancel()
-                except Exception:  # noqa: BLE001
-                    pass
+                    try:
+                        await deliver_clarify_response(
+                            conversation_id, update.get("request_id", ""), "",
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                else:
+                    request_id = update.get("request_id", str(uuid.uuid4()))
+                    question = update.get("question", "需要你的确认")
+                    options = update.get("options", ["继续", "跳过"])
+                    req_payload = {
+                        "id": request_id,
+                        "conversation_id": conversation_id,
+                        "message_id": acc["current_msg_id"],
+                        "question": question,
+                        "questions": [{"question": question, "options": options, "allow_free_text": True}],
+                        "options": options,
+                    }
+                    await R.publish_event(
+                        conversation_id,
+                        {"type": "confirmation_request", "message_id": acc["current_msg_id"], "request": req_payload},
+                    )
+                    logger.info("Native confirmation_request, sent SSE: %s", request_id)
+                    t = asyncio.create_task(
+                        self._wait_and_unblock_clarify_native(
+                            conversation_id, request_id, sid=conversation_id,
+                            message_id=acc["current_msg_id"], acc=acc,
+                        )
+                    )
+                    self._bg_tasks.add(t)
+                    t.add_done_callback(self._bg_tasks.discard)
+            # Cancel check: standalone, runs for ALL event types. Throttled to
+            # ~1/s — the 1s prompt-poll loop is the backstop, so a per-token
+            # Redis round trip here would double the hot path's RTTs (each
+            # token chunk already costs one publish_event round trip).
+            if (
+                not acc["cancelled"]
+                and time.monotonic() - acc.get("last_cancel_check", 0.0) >= 1.0
+            ):
+                acc["last_cancel_check"] = time.monotonic()
+                if await R.is_cancelled(conversation_id):
+                    acc["cancelled"] = True
+                    try:
+                        await client.cancel()
+                    except Exception:  # noqa: BLE001
+                        pass
             elif kind in ("tool_call_begin", "tool_call_end"):
                 title = update.get("title", "")
                 status = "running" if kind == "tool_call_begin" else (update.get("status") or "completed")
@@ -1347,10 +1476,19 @@ class Runner:
                 try:
                     data = await pop_clarify_request(clarify_session_id)
                     if data:
-                        await handle_clarify_request(
-                            conversation_id, acc["current_msg_id"], acc,
-                            clarify_session_id, data, self._bg_tasks,
-                        )
+                        if is_group:
+                            # Group chat: nobody can answer the modal — drain
+                            # the request and unblock the agent with an empty
+                            # answer instead of popping a confirm dialog.
+                            from agent_runner.runner_clarify import deliver_clarify_response
+                            await deliver_clarify_response(
+                                clarify_session_id, data.get("clarify_id", ""), "",
+                            )
+                        else:
+                            await handle_clarify_request(
+                                conversation_id, acc["current_msg_id"], acc,
+                                clarify_session_id, data, self._bg_tasks,
+                            )
                 except Exception:
                     logger.debug("clarify poll failed", exc_info=True)
             stop_reason = prompt_task.result()

@@ -17,6 +17,7 @@ from app.db.models.agent import Agent, Profile
 from app.db.models.user import User
 from app.deps import get_current_user
 from app.core.guards import require_permission
+from app.core.rbac import has_at_least
 from app.schemas.agent import (
     AgentOut,
     ProfileCreate,
@@ -180,8 +181,11 @@ async def scan_agents(
 
 # ── Profiles ──
 
-@router.get("/profiles", response_model=list[ProfileOut], dependencies=[Depends(get_current_user)])
-async def list_profiles(db: AsyncSession = Depends(get_db)) -> list[ProfileOut]:
+@router.get("/profiles", response_model=list[ProfileOut])
+async def list_profiles(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[ProfileOut]:
     res = await db.execute(
         select(Profile).where(Profile.is_active.is_(True)).order_by(Profile.created_at)
     )
@@ -195,7 +199,24 @@ async def list_profiles(db: AsyncSession = Depends(get_db)) -> list[ProfileOut]:
                 default_agent_id="hermes", default_model="hermes-4",
             ),
         ]
-    return [ProfileOut.model_validate(p) for p in profiles]
+    is_admin = has_at_least(user.role, "admin")
+    if not is_admin:
+        # Team-scoped profiles are visible only to that team's members.
+        from app.db.models.team import TeamMember
+        team_ids = set((await db.execute(
+            select(TeamMember.team_id).where(TeamMember.user_id == user.id)
+        )).scalars().all())
+        profiles = [
+            p for p in profiles
+            if not (p.scope == "team" and p.team_id and p.team_id not in team_ids)
+        ]
+    outs = [ProfileOut.model_validate(p) for p in profiles]
+    if not is_admin:
+        # system_prompt carries the assistant's persona + knowledge bindings —
+        # the frontend only reads it in AdminView, so strip it for everyone else.
+        for out in outs:
+            out.system_prompt = None
+    return outs
 
 
 def _serialize_skills(data: dict) -> dict:
@@ -355,7 +376,7 @@ async def clone_profile(
 @router.get("/profiles/{profile_id}/export", response_model=ProfileExport)
 async def export_profile(
     profile_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("agent.manage")),
     db: AsyncSession = Depends(get_db),
 ):
     """Export a profile as a portable JSON object (no team_id, no path)."""

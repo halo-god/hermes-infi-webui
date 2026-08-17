@@ -21,7 +21,10 @@ export PYTHONUNBUFFERED=1
 
 # All vars below are overridable. Defaults match docker-compose.yml.
 export DATABASE_URL="${DATABASE_URL:-postgresql+asyncpg://hermes:hermes@localhost:5432/hermes}"
-export REDIS_URL="${REDIS_URL:-redis://localhost:6379/0}"
+# NOTE: backend/.env points at the docker hermes-redis on 1979 (with auth).
+# The runner MUST consume the same stream the API enqueues to, or every
+# message stays "streaming" forever. CI passes its own REDIS_URL explicitly.
+export REDIS_URL="${REDIS_URL:-redis://:InfiLed%40Hermes_redis@localhost:1979/0}"
 export SECRET_KEY="${SECRET_KEY:-change-me-in-production-please-use-a-long-random-string}"
 export WORKSPACE_ROOT="${WORKSPACE_ROOT:-${HOME}/hermes-data/workspaces}"
 export HERMES_HOME="${HERMES_HOME:-${HOME}/.hermes}"

@@ -41,7 +41,6 @@ os.environ.setdefault(
 # production instance (127.0.0.1:1979, db0), fail loudly at import instead of
 # silently enqueueing real ACP tasks / deleting production rate-limit keys.
 from urllib.parse import urlparse as _urlparse
-_ru = _urlparse(os.environ["REDIS_URL"])
 # Whitelist semantics, NOT a blocklist: any host:port that is not a
 # dedicated test instance is rejected. The old guard only blocked
 # localhost/127.0.0.1:1979, so container-name variants (redis:1979,
@@ -53,25 +52,62 @@ _ALLOWED_REDIS = (
     ("localhost", 6379),  # CI (.github/workflows/ci.yml sets this explicitly)
     ("127.0.0.1", 6379),  # CI variant
 )
-if (_ru.hostname, _ru.port) not in _ALLOWED_REDIS:
-    raise RuntimeError(
-        f"REDIS_URL points at an unapproved Redis ({_ru.hostname}:{_ru.port}). "
-        "Tests MUST use the dedicated instance (127.0.0.1:6380); CI sets "
-        "REDIS_URL=redis://localhost:6379 explicitly. Never run tests against "
-        "the production instance (127.0.0.1:1979)."
-    )
 
 
-# Tests assume the 'db' storage backend (small files inline in Postgres);
-# minio-offload tests switch to moto themselves. The repo's backend/.env sets
-# STORAGE_BACKEND=minio for production — override it so it can't leak in
-# (env vars take precedence over .env in pydantic-settings).
+def _assert_approved_redis(label: str, raw_url: str) -> None:
+    """Fail loudly if the URL the suite would actually use is unapproved.
+
+    CRITICAL: validate the pydantic settings singleton (settings.redis_url),
+    NOT just os.environ. app/core/redis.py connects via settings.redis_url
+    (redis.py:14-15). The singleton is lru_cache'd at first app import; if it
+    was instantiated BEFORE this conftest's setdefault ran (e.g. by a plugin
+    or a script importing app modules directly), it holds the backend/.env
+    production value (127.0.0.1:1979) even though os.environ was patched to
+    6380. Checking os.environ alone passes while the suite still hits
+    production Redis — the 2026-08-12 recurrence.
+    """
+    _ru = _urlparse(raw_url)
+    if (_ru.hostname, _ru.port) not in _ALLOWED_REDIS:
+        raise RuntimeError(
+            f"{label} points at an unapproved Redis ({_ru.hostname}:{_ru.port}). "
+            "Tests MUST use the dedicated instance (127.0.0.1:6380); CI sets "
+            "REDIS_URL=redis://localhost:6379 explicitly. Never run tests against "
+            "the production instance (127.0.0.1:1979)."
+        )
+
+
+# Belt: env-level value must be approved...
+_assert_approved_redis("REDIS_URL", os.environ["REDIS_URL"])
+
+# Pin storage backend BEFORE the pydantic singleton can be constructed:
+# backend/.env sets STORAGE_BACKEND=minio (production); env beats .env in
+# pydantic-settings, so setting it before ANY settings import keeps every
+# test on the 'db' backend.
 os.environ["STORAGE_BACKEND"] = "db"
+
+# Skill evolution: backend/.env ships a REAL LLM key + enabled flag
+# (production). Tests must never reach the dspy optimizer — it would spend
+# money and needs a real eval dataset — so pin to the free Stage D1 stub
+# before the settings singleton is built (same pattern as STORAGE_BACKEND).
+os.environ["SKILL_EVOLUTION_ENABLED"] = "false"
+os.environ["SKILL_EVOLUTION_LLM_API_KEY"] = ""
 
 # Tests must never depend on the network: force HF Hub offline so embedding
 # model loads use the local cache only (an unreachable huggingface.co would
 # otherwise stall real-model tests for 30s+ per DNS timeout).
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
+# ...and suspenders: the value the app ACTUALLY uses must be approved too.
+# Importing app.config here forces the Settings singleton to resolve NOW
+# (after the setdefaults/pins above), so the guard sees whatever the suite
+# would connect to — app/core/redis.py dials settings.redis_url, and
+# agent_runner/acp_client.py copies it into the ACP subprocess env. If a
+# stale singleton was already constructed before this module ran (a plugin
+# or early app import reading backend/.env: production 127.0.0.1:1979),
+# this raises instead of dispatching real ACP roundtable tasks to
+# production Redis (the 2026-08-04..12 recurrence).
+from app.config import settings as _settings  # noqa: E402
+_assert_approved_redis("settings.redis_url", _settings.redis_url)
 
 from app.core.security import create_token  # noqa: E402
 from app.db import base as db_base  # noqa: E402

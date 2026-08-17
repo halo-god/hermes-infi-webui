@@ -1,6 +1,7 @@
 import { request as pwRequest } from "@playwright/test";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { ADMIN_EMAIL, ADMIN_PASSWORD } from "./helpers";
+import { ADMIN_EMAIL, ADMIN_PASSWORD, E2E_API_URL, E2E_BASE_URL } from "./helpers";
+import { cleanupE2EData } from "./cleanup";
 
 /**
  * One admin login per suite run → storageState for all tests that don't
@@ -8,7 +9,7 @@ import { ADMIN_EMAIL, ADMIN_PASSWORD } from "./helpers";
  * (10/min) when the suite logs in repeatedly.
  */
 export default async function globalSetup(): Promise<void> {
-  const ctx = await pwRequest.newContext({ baseURL: "http://localhost:8001" });
+  const ctx = await pwRequest.newContext({ baseURL: E2E_API_URL });
   const res = await ctx.post("/api/v1/auth/login", {
     data: { method: "local", username: ADMIN_EMAIL, password: ADMIN_PASSWORD },
   });
@@ -19,6 +20,11 @@ export default async function globalSetup(): Promise<void> {
   }
   const body = (await res.json()) as { access_token: string; refresh_token: string };
   await ctx.dispose();
+
+  // Wipe leftovers from previous runs (E2E-prefixed teams + scheduled tasks)
+  // so `.first()` selectors don't hit stale duplicates.
+  await cleanupE2EData(E2E_API_URL, body.access_token);
+
   mkdirSync("e2e/.auth", { recursive: true });
   writeFileSync(
     "e2e/.auth/state.json",
@@ -26,7 +32,7 @@ export default async function globalSetup(): Promise<void> {
       cookies: [],
       origins: [
         {
-          origin: "http://localhost:5173",
+          origin: E2E_BASE_URL,
           localStorage: [
             { name: "hermes.access", value: body.access_token },
             { name: "hermes.refresh", value: body.refresh_token },

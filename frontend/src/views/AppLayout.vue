@@ -2,7 +2,7 @@
 /* Persistent app shell — matches the prototype structure: a fixed left sidebar
    and a main area whose content swaps. Hosts the global Tweaks panel + ⌘K
    search palette. */
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { onBeforeUnmount, onMounted, ref } from "vue";
 import Icon from "@/components/Icon.vue";
 import Sidebar from "@/components/Sidebar.vue";
 import TweaksPanel from "@/components/TweaksPanel.vue";
@@ -11,6 +11,7 @@ import NotificationPanel from "@/components/NotificationPanel.vue";
 import FeedbackPanel from "@/components/FeedbackPanel.vue";
 import HelpPanel from "@/components/HelpPanel.vue";
 import ToastContainer from "@/components/ToastContainer.vue";
+import PromptModalHost from "@/components/PromptModalHost.vue";
 import { useChatStore } from "@/stores/chat";
 import { useAuthStore } from "@/stores/auth";
 import { useNotificationStore } from "@/stores/notifications";
@@ -24,12 +25,31 @@ const showTweaks = ref(false);
 const showSearch = ref(false);
 
 const ATMOS_CYCLE = ["letter", "cinnabar", "celadon", "night", "ink"];
+// DOM dataset is not reactive — keep the night/day flag in a ref so the
+// topbar icon actually updates when the atmosphere cycles (incl. TweaksPanel,
+// which dispatches "hermes:atmos" after writing body[data-atmos]).
+// Init from localStorage, NOT body[data-atmos]: TweaksPanel applies the saved
+// theme in its own setup, which runs AFTER this parent's setup — so the dataset
+// is still empty here and reading it would show "day" for a saved night/ink
+// theme on every refresh (P1 fix).
+function savedAtmos(): string {
+  try {
+    const t = JSON.parse(localStorage.getItem("hermes.tweaks") || "{}");
+    if (typeof t?.atmos === "string" && t.atmos) return t.atmos;
+  } catch { /* ignore */ }
+  return document.body.dataset.atmos || "";
+}
+const isNight = ref(["night", "ink"].includes(savedAtmos()));
 function cycleAtmos() {
   const cur = document.body.dataset.atmos || "letter";
   const next = ATMOS_CYCLE[(ATMOS_CYCLE.indexOf(cur) + 1) % ATMOS_CYCLE.length];
   document.body.dataset.atmos = next;
+  isNight.value = ["night", "ink"].includes(next);
   const saved = JSON.parse(localStorage.getItem("hermes.tweaks") || "{}");
   localStorage.setItem("hermes.tweaks", JSON.stringify({ ...saved, atmos: next }));
+}
+function onAtmos(e: Event) {
+  isNight.value = ["night", "ink"].includes((e as CustomEvent<string>).detail || "");
 }
 
 function onKey(e: KeyboardEvent) {
@@ -77,6 +97,7 @@ onMounted(async () => {
   startHeartbeat();
   window.addEventListener("keydown", onKey);
   window.addEventListener("hermes:search", openSearch);
+  window.addEventListener("hermes:atmos", onAtmos);
   // P2-1: surface API errors globally (the axios client only dispatches the
   // event — this is the single listener that turns it into a toast).
   onApiError = (e: Event) => {
@@ -89,14 +110,13 @@ onBeforeUnmount(() => {
   stopHeartbeat();
   window.removeEventListener("keydown", onKey);
   window.removeEventListener("hermes:search", openSearch);
+  window.removeEventListener("hermes:atmos", onAtmos);
   if (onApiError) window.removeEventListener("hermes:api-error", onApiError);
 });
 let onApiError: ((e: Event) => void) | null = null;
 function openSearch() {
   showSearch.value = true;
 }
-
-const isNight = computed(() => ["night", "ink"].includes(document.body.dataset.atmos || ""));
 </script>
 
 <template>
@@ -117,6 +137,7 @@ const isNight = computed(() => ["night", "ink"].includes(document.body.dataset.a
     </main>
 
     <TweaksPanel :open="showTweaks" @close="showTweaks = false" />
+    <PromptModalHost />
     <SearchPalette v-if="showSearch" @close="showSearch = false" />
     <ToastContainer />
   </div>

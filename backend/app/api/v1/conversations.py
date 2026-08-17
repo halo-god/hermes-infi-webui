@@ -586,6 +586,7 @@ async def send_message(
                 owner_id=user.id,
                 skip_agent=payload.skip_agent,
                 profile_id_override=payload.profile_id,
+                mentions=payload.mentions,
                 task_id=payload.task_id,
             )
     finally:
@@ -724,7 +725,7 @@ async def _ws_dispatch(
             await svc.dispatch(
                 msg_db, c, text, attached_file_ids=file_ids,
                 knowledge_ids=knowledge_ids, owner_id=user_id,
-                profile_id_override=p_id, task_id=task_id,
+                profile_id_override=p_id, mentions=mentions, task_id=task_id,
             )
 
 
@@ -791,6 +792,14 @@ async def conversation_ws(
             if action == "send":
                 text = (payload.get("text") or "").strip()
                 if text:
+                    # Parity with the HTTP path (Pydantic max_length=100000):
+                    # the WS path has no schema validation, so reject
+                    # oversized payloads explicitly.
+                    if len(text) > 100000:
+                        await websocket.send_text(
+                            json.dumps({"type": "error", "message_id": "", "detail": "消息过长，请分段发送"})
+                        )
+                        continue
                     if not await ratelimit.allow_send(str(user_id)):
                         await websocket.send_text(
                             json.dumps({"type": "error", "message_id": "", "detail": "发送过于频繁"})
@@ -1584,12 +1593,39 @@ async def add_member(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """添加群聊成员。"""
+    """添加群聊成员。添加他人（用户或 AI）需群管理员权限；本人可自行加入。
+
+    Without the admin gate a plain member could pull arbitrary users (and
+    agents) into the group — they'd then see the entire group history via
+    get_conversation, which is fully open to members.
+    """
     convo = await _require_convo(db, conversation_id, user)
     if convo.type != "group":
         raise HTTPException(status_code=400, detail="该会话不是群聊")
     if not payload.user_id and not payload.agent_id:
         raise HTTPException(status_code=422, detail="必须指定 user_id 或 agent_id")
+
+    adds_other = (payload.user_id is not None and payload.user_id != user.id) or payload.agent_id is not None
+    if adds_other:
+        is_admin = await svc.is_group_admin(db, conversation_id, user.id)
+        if not is_admin:
+            raise HTTPException(status_code=403, detail="只有群管理员可以添加其他成员")
+    if payload.user_id is not None and payload.user_id != user.id:
+        # Fail with 404 instead of a raw FK error (missing user row).
+        target = await db.get(User, payload.user_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="被添加的用户不存在")
+        # Team channel: only team members may be pulled into the group.
+        if convo.team_id:
+            from app.db.models.team import TeamMember
+            membership = await db.execute(
+                select(TeamMember).where(
+                    TeamMember.team_id == convo.team_id,
+                    TeamMember.user_id == payload.user_id,
+                )
+            )
+            if membership.scalar_one_or_none() is None:
+                raise HTTPException(status_code=403, detail="只能添加本团队成员")
     await svc.add_group_member(
         db, conversation_id,
         user_id=payload.user_id,

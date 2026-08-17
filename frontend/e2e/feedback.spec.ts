@@ -13,7 +13,8 @@ test.describe("反馈", () => {
     await submitBtn.click();
     await page.locator('input[placeholder*="反馈标题"]').fill(`E2E 反馈-${stamp}`);
     await page.locator('textarea[placeholder*="详细描述"]').fill("这是 Playwright 自动化测试提交的反馈内容。");
-    await page.locator(".fb-cat-pill").first().click();
+    // 表单内分类是 select（.fb-cat-pill 属于反馈列表，依赖历史数据，不能用作表单选择）
+    await page.locator(".section-card .fb-select").first().selectOption("bug");
     // 表单内的提交按钮（文本恰为「提交」）
     await page.locator("button.btn.primary", { hasText: /^提交$/ }).first().click();
 

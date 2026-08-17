@@ -20,8 +20,35 @@ from agent_runner.acp_persona import (
     start_persona_session,
     wrap_persona_prompt,
 )
+from agent_runner.call_log import CallCollector
 
 logger = logging.getLogger("hermes.runner")
+
+
+def _strip_ansi(s: str) -> str:
+    """Strip ANSI escape codes (terminal colors) from thought text."""
+    import re
+    return re.sub(r"\x1b\[[0-9;]*m", "", s)
+
+
+async def _persist_slot_calls(
+    conversation_id: str, message_id: str, agent_id: str, calls: list[dict],
+) -> None:
+    """Persist one slot's model/tool call records to session_call_logs."""
+    if not calls:
+        return
+    from app.db.models.session_log import SessionCallLog
+    async with async_session_maker() as db:
+        db.add_all([
+            SessionCallLog(
+                conversation_id=uuid.UUID(conversation_id),
+                message_id=uuid.UUID(message_id),
+                agent_id=agent_id,
+                **c,
+            )
+            for c in calls
+        ])
+        await db.commit()
 
 
 async def handle_roundtable(task: dict, agents: dict) -> None:
@@ -61,15 +88,22 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
         conversation_id, {"type": "rt_start", "message_id": message_id, "agents": slots}
     )
 
-    async def run_one(slot: int, target: dict) -> tuple[str, str]:
-        """Run one roundtable reply. Returns (text, status) where status is
-        complete | timeout | error | cancelled. Partial text is preserved on
-        failure. In research_mode, slots poll is_cancelled so they early-exit
-        once another slot has produced a usable answer."""
+    async def run_one(slot: int, target: dict) -> tuple[str, str, str, list[dict], list[dict]]:
+        """Run one roundtable reply. Returns
+        (text, status, thinking, calls, files) where status is complete |
+        timeout | error | cancelled. Partial text is preserved on failure. In
+        research_mode, slots poll is_cancelled so they early-exit once another
+        slot has produced a usable answer."""
         aid = target["agent_id"]
         agent = agents.get(aid) or agents.get("hermes")
-        buf = {"text": ""}
+        buf = {"text": "", "thinking": ""}
         reply_status = "complete"
+        # Per-slot call collector: every slot shares the roundtable message_id,
+        # so calls are attributed per AI via agent_id when persisted.
+        call_collector = CallCollector(
+            model_name=aid or "hermes",
+            turn_started_at=datetime.now(tz=timezone.utc),
+        )
         prompt_text = wrap_persona_prompt(text, target.get("system_prompt"))
         # Each target keeps its own persona-wrapped text block but shares the
         # same attachment blocks (a file doesn't change per-participant).
@@ -79,11 +113,13 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
         )
         # P2-2 research cascade: if a sibling already answered, skip this slot.
         if research_mode and await R.is_cancelled(conversation_id):
-            return buf["text"], "cancelled"
+            return buf["text"], "cancelled", "", [], []
 
         async def on_update(update: dict) -> None:
-            if update.get("sessionUpdate") == "agent_message_chunk":
-                d = (update.get("content") or {}).get("text", "")
+            kind = update.get("sessionUpdate")
+            content = update.get("content") or {}
+            if kind == "agent_message_chunk":
+                d = content.get("text", "")
                 if d:
                     buf["text"] += d
                     await R.publish_event(conversation_id, {
@@ -98,6 +134,36 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
                             await R.request_cancel(conversation_id)
                         except Exception:  # noqa: BLE001
                             pass
+            elif kind in ("agent_thought_chunk", "agent_thought"):
+                # ACP v1 uses agent_thought_chunk; keep agent_thought as a
+                # fallback for older hermes-agent versions.
+                delta = content.get("text", "") or update.get("delta", "")
+                if delta:
+                    buf["thinking"] += _strip_ansi(delta)
+                    await R.publish_event(conversation_id, {
+                        "type": "rt_thought", "message_id": message_id,
+                        "slot": slot, "delta": _strip_ansi(delta),
+                    })
+            elif kind in ("usage", "usage_update"):
+                # Model-call accounting for the admin session log (same
+                # estimation split single-agent turns use: usage_update has no
+                # token detail, so estimate 80/20 from context_used).
+                if kind == "usage":
+                    tin = content.get("input_tokens", 0) or 0
+                    tout = content.get("output_tokens", 0) or 0
+                else:
+                    used = content.get("used", 0) or 0
+                    tin = int(used * 0.8)
+                    tout = used - tin
+                if tin + tout > 0:
+                    call_collector.on_usage(input_tokens=tin, output_tokens=tout)
+            elif kind in ("tool_call", "tool_call_begin", "tool_call_end"):
+                call_collector.on_tool_call(
+                    title=update.get("title"),
+                    status=update.get("status") or "completed",
+                    tool_kind=content.get("tool_kind") or update.get("tool_kind"),
+                    tool_call_id=update.get("toolCallId") or update.get("tool_call_id"),
+                )
 
         async def on_fs(path: str, content: str) -> None:
             f = await storage.save_file(uuid.UUID(conversation_id), path, content, aid, uuid.UUID(message_id))
@@ -107,8 +173,14 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
             os.makedirs(os.path.dirname(disk_path), exist_ok=True)
             with open(disk_path, "w", encoding="utf-8") as fh:
                 fh.write(content)
+            file_entry = {
+                "id": str(f.id), "name": f.name, "kind": f.kind,
+                "version": f.current_version,
+            }
+            buf.setdefault("files", []).append(file_entry)
             await R.publish_event(conversation_id, {
-                "type": "file", "message_id": message_id, "file_id": str(f.id),
+                "type": "file", "message_id": message_id, "slot": slot,
+                "file_id": str(f.id),
                 "name": f.name, "kind": f.kind, "version": f.current_version,
             })
 
@@ -139,16 +211,30 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
             conversation_id,
             {"type": "rt_reply_done", "message_id": message_id, "slot": slot, "status": reply_status},
         )
-        return buf["text"], reply_status
+        return buf["text"], reply_status, buf["thinking"], call_collector.records(), buf.get("files", [])
 
     results = await asyncio.gather(
         *[run_one(i, t) for i, t in enumerate(targets)], return_exceptions=True
     )
     texts = [r[0] if isinstance(r, tuple) else "（作答失败）" for r in results]
     statuses = [r[1] if isinstance(r, tuple) else "error" for r in results]
+    thinkings = [r[2] if isinstance(r, tuple) else "" for r in results]
+    call_lists = [r[3] if isinstance(r, tuple) else [] for r in results]
+    file_lists = [r[4] if isinstance(r, tuple) else [] for r in results]
+
+    # Persist each slot's model/tool calls (roundtable shares one message_id,
+    # so agent_id disambiguates) before any terminal finalize path.
+    for i, t in enumerate(targets):
+        if call_lists[i]:
+            try:
+                await _persist_slot_calls(
+                    conversation_id, message_id, t["agent_id"], call_lists[i],
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("Failed to persist slot call log for %s", t["agent_id"], exc_info=True)
 
     if await R.is_cancelled(conversation_id):
-        await _finalize_roundtable(message_id, targets, texts, statuses, "", "cancelled", moa)
+        await _finalize_roundtable(message_id, targets, texts, statuses, thinkings, file_lists, "", "cancelled", moa)
         await R.clear_cancel(conversation_id)
         await R.publish_event(conversation_id, {
             "type": "done", "message_id": message_id, "status": "cancelled"
@@ -168,14 +254,16 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
             await R.publish_event(conversation_id, {
                 "type": "merge_token", "message_id": message_id, "delta": merged_text
             })
-            await _finalize_roundtable(message_id, targets, texts, statuses, merged_text, "complete", moa)
+            await _finalize_roundtable(
+                message_id, targets, texts, statuses, thinkings, file_lists, merged_text, "complete", moa,
+            )
             await R.publish_event(conversation_id, {
                 "type": "done", "message_id": message_id, "status": "complete", "text": merged_text,
             })
             return
         # No slot produced text — fall through to the error path below.
     if not ok_slots:
-        await _finalize_roundtable(message_id, targets, texts, statuses, "", "error", moa)
+        await _finalize_roundtable(message_id, targets, texts, statuses, thinkings, file_lists, "", "error", moa)
         await R.clear_cancel(conversation_id)
         await R.publish_event(conversation_id, {
             "type": "error", "message_id": message_id, "detail": "所有助手均作答失败",
@@ -186,7 +274,7 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
         return
 
     await R.publish_event(conversation_id, {"type": "merge_start", "message_id": message_id})
-    merged = {"text": ""}
+    merged = {"text": "", "thinking": ""}
     if len(ok_slots) == 1:
         merged["text"] = texts[ok_slots[0]]
         await R.publish_event(conversation_id, {
@@ -197,15 +285,42 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
             f"【{targets[i]['agent_id']}】{texts[i]}" for i in ok_slots
         )
         hermes = agents.get("hermes") or agents.get(targets[0]["agent_id"])
+        merge_collector = CallCollector(
+            model_name=getattr(hermes, "id", "hermes") or "hermes",
+            turn_started_at=datetime.now(tz=timezone.utc),
+        )
 
         async def on_merge(update: dict) -> None:
-            if update.get("sessionUpdate") == "agent_message_chunk":
-                d = (update.get("content") or {}).get("text", "")
+            kind = update.get("sessionUpdate")
+            content = update.get("content") or {}
+            if kind == "agent_message_chunk":
+                d = content.get("text", "")
                 if d:
                     merged["text"] += d
                     await R.publish_event(conversation_id, {
                         "type": "merge_token", "message_id": message_id, "delta": d
                     })
+            elif kind in ("agent_thought_chunk", "agent_thought"):
+                delta = content.get("text", "") or update.get("delta", "")
+                if delta:
+                    merged["thinking"] += _strip_ansi(delta)
+            elif kind in ("usage", "usage_update"):
+                if kind == "usage":
+                    tin = content.get("input_tokens", 0) or 0
+                    tout = content.get("output_tokens", 0) or 0
+                else:
+                    used = content.get("used", 0) or 0
+                    tin = int(used * 0.8)
+                    tout = used - tin
+                if tin + tout > 0:
+                    merge_collector.on_usage(input_tokens=tin, output_tokens=tout)
+            elif kind in ("tool_call", "tool_call_begin", "tool_call_end"):
+                merge_collector.on_tool_call(
+                    title=update.get("title"),
+                    status=update.get("status") or "completed",
+                    tool_kind=content.get("tool_kind") or update.get("tool_kind"),
+                    tool_call_id=update.get("toolCallId") or update.get("tool_call_id"),
+                )
 
         async def _noop(_p: str, _c: str) -> None:
             return None
@@ -218,16 +333,29 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
         try:
             await mclient.start()
             await mclient.initialize()
-            await mclient.new_session(cwd)
-            await mclient.prompt(merge_prompt)
+            merge_sid = await mclient.new_session(cwd)
+            # Merge runs unattended — drain + auto-decline clarify requests the
+            # same way slots do, so a clarify call can't block for 300s.
+            await run_prompt_with_clarify_guard(
+                mclient, merge_sid or conversation_id, merge_prompt, "hermes",
+            )
         except ACPTimeout:
             logger.error("roundtable merge timed out")
         except Exception:  # noqa: BLE001
             logger.exception("roundtable merge failed")
         finally:
             await mclient.stop()
+        try:
+            await _persist_slot_calls(
+                conversation_id, message_id, "hermes", merge_collector.records(),
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to persist merge call log", exc_info=True)
 
-    await _finalize_roundtable(message_id, targets, texts, statuses, merged["text"], "complete", moa)
+    await _finalize_roundtable(
+        message_id, targets, texts, statuses, thinkings, file_lists, merged["text"], "complete", moa,
+        merged_thinking=merged["thinking"],
+    )
     await R.clear_cancel(conversation_id)
     await R.publish_event(
         conversation_id, {"type": "done", "message_id": message_id, "status": "complete"}
@@ -236,7 +364,9 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
 
 async def _finalize_roundtable(
     message_id: str, targets: list[dict], texts: list[str],
-    statuses: list[str], merged: str, status: str, moa: bool = False,
+    statuses: list[str], thinkings: list[str], file_lists: list[list[dict]],
+    merged: str, status: str, moa: bool = False,
+    merged_thinking: str = "",
 ) -> None:
     async with async_session_maker() as db:
         msg = await db.get(Message, uuid.UUID(message_id))
@@ -248,10 +378,16 @@ async def _finalize_roundtable(
                         "profile_id": targets[i].get("profile_id"),
                         "text": texts[i],
                         "status": statuses[i],
+                        "thinking": thinkings[i] if i < len(thinkings) else "",
+                        "files": file_lists[i] if i < len(file_lists) else [],
                     }
                     for i in range(len(targets))
                 ],
-                "merged": {"text": merged, "status": status},
+                "merged": {
+                    "text": merged,
+                    "thinking": merged_thinking,
+                    "status": status,
+                },
                 "moa": moa,
             }
             msg.status = status

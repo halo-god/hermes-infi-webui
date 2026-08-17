@@ -183,16 +183,31 @@ class SessionCallOut(BaseModel):
     ended_at: datetime | None = None
 
 
+class RoundtableReplyOut(BaseModel):
+    """One AI's reply inside a roundtable turn (group chat / MoA)."""
+    agent_id: str
+    profile_id: str | None = None
+    text: str = ""
+    status: str = "complete"
+    thinking: str | None = None
+    calls: list[SessionCallOut] = []
+
+
 class SessionExecutionOut(BaseModel):
     """One turn in the conversation: user input + assistant reply + calls."""
     index: int
     user_text: str | None = None
+    # Sender of this turn's user message (group chats: who actually typed it).
+    user_name: str | None = None
     agent_text: str | None = None
     thinking: str | None = None
     status: str
     duration_ms: int | None = None
     message_id: str | None = None
     calls: list[SessionCallOut] = []
+    # Roundtable (group chat) turns carry per-AI replies; agent_text is the
+    # merged summary.
+    replies: list[RoundtableReplyOut] | None = None
 
 
 class SessionLogDetail(BaseModel):

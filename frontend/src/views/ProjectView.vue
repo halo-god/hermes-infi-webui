@@ -12,12 +12,14 @@ import { teamsApi } from "@/api/teams";
 import { agentsApi } from "@/api/agents";
 import { useChatStore } from "@/stores/chat";
 import { useNotificationStore } from "@/stores/notifications";
+import { usePromptModal } from "@/composables/usePromptModal";
 import type { Agent, Member, Project, ProjectActivity, Task, WsAdapter } from "@/types";
 
 const route = useRoute();
 const router = useRouter();
 const chat = useChatStore();
 const ns = useNotificationStore();
+const { promptModal } = usePromptModal();
 const projectId = computed(() => route.params.id as string);
 
 const project = ref<(Project & import("@/types").ProjectDetail) | null>(null);
@@ -240,17 +242,21 @@ async function applyStatus(t: Task, next: string) {
 }
 
 async function executeTaskWithProfile(t: Task) {
-  // Prompt user to select a profile
-  const profileNames = chat.profiles.filter((p) => p.is_active).map((p) => `${p.name} (${p.default_agent_id})`).join("\n");
-  const choice = window.prompt(`选择助手执行任务「${t.title}」：\n\n${profileNames}\n\n输入助手序号（从1开始）：`);
-  if (!choice) return;
-  const idx = parseInt(choice, 10) - 1;
   const activeProfiles = chat.profiles.filter((p) => p.is_active);
-  if (isNaN(idx) || idx < 0 || idx >= activeProfiles.length) {
-    ns.toast("无效的选择", "error");
-    return;
-  }
-  const profile = activeProfiles[idx];
+  if (!activeProfiles.length) { ns.toast("没有可用助手", "error"); return; }
+  const profileNames = activeProfiles.map((p, i) => `${i + 1}. ${p.name} (${p.default_agent_id})`).join("\n");
+  const choice = await promptModal({
+    title: `选择助手执行任务「${t.title}」`,
+    label: profileNames + "\n\n输入助手序号（从 1 开始）：",
+    placeholder: "1",
+    validate: (v) => {
+      const idx = parseInt(v, 10) - 1;
+      if (isNaN(idx) || idx < 0 || idx >= activeProfiles.length) return "无效的序号";
+      return null;
+    },
+  });
+  if (!choice) return;
+  const profile = activeProfiles[parseInt(choice, 10) - 1];
   try {
     ns.toast(`正在用 ${profile.name} 执行任务…`);
     await projectsApi.executeTask(t.id, profile.id);

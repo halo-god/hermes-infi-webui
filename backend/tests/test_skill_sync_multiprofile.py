@@ -131,3 +131,86 @@ async def test_ingest_binds_profile_home_skills_to_profile(db, tmp_path, monkeyp
     assert row is not None
     assert row.profile_id == profile.id, "profile-home skill must bind to the profile"
     assert "性能优化内容" in row.content
+
+
+@pytest.mark.asyncio
+async def test_a_b_sync_loop_converges_via_content_hash(tmp_path, monkeypatch):
+    """The A→B→A sync loop must converge instead of bouncing the DB.
+
+    Direction A writes the frontmatter content_hash and records it on the row;
+    Direction B then recognises the file as a projection of the DB and skips
+    it — so a platform/evolution edit is NOT rolled back by the next scan,
+    while a genuine external edit is still ingested.
+    """
+    from app.core.security import hash_password
+    from app.db.base import async_session_maker
+    from app.db.models.memory import AgentSkill
+    from app.db.models.user import User
+    from sqlalchemy import select
+
+    monkeypatch.setattr(settings, "hermes_skills_sync_enabled", True)
+    global_home = tmp_path / "home"
+    global_home.mkdir()
+    monkeypatch.setattr(sss, "_get_hermes_home", lambda: str(global_home))
+    monkeypatch.setattr(sss, "_skill_profile_id", mock.AsyncMock(return_value=None))
+
+    async with async_session_maker() as s:
+        owner = User(
+            id=uuid.uuid4(), email="loop1@h.io", name="loop1",
+            password_hash=hash_password("Test@1234"), is_active=True, role="member",
+        )
+        s.add(owner)
+        await s.commit()
+        skill = AgentSkill(
+            owner_id=owner.id, name="LoopSkill", description="d",
+            content="v1 内容", enabled=True, origin="platform",
+        )
+        s.add(skill)
+        await s.commit()
+        skill_id = skill.id
+
+    # Direction A: project to FS (writes content_hash into frontmatter + row).
+    await sss.sync_skill_to_hermes(
+        skill_id, "LoopSkill", "d", "v1 内容", True, None,
+    )
+    path = global_home / "skills" / "loopskill" / "SKILL.md"
+    assert path.exists()
+
+    # Direction B: the file is a projection — DB must NOT be touched.
+    # (ingest runs in its own session: the db fixture's outer transaction
+    # would hold a row lock that deadlocks the next sync's UPDATE)
+    async with async_session_maker() as s:
+        res = await sss.ingest_hermes_skills(s, owner.id)
+    assert res["new"] == 0 and res["updated"] == 0, res
+
+    # Genuine external edit on the hermes side → ingested.
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("v1 内容", "v2 外部修改"),
+        encoding="utf-8",
+    )
+    async with async_session_maker() as s:
+        res = await sss.ingest_hermes_skills(s, owner.id)
+    assert res["updated"] == 1, res
+
+    # Platform edit (evolution approval): DB content updated first, then
+    # projected to FS → next scan must converge (no bounce back to v2).
+    async with async_session_maker() as s:
+        row = (await s.execute(
+            select(AgentSkill).where(AgentSkill.id == skill_id)
+        )).scalar_one()
+        row.content = "v3 演化内容"
+        await s.commit()
+    await sss.sync_skill_to_hermes(
+        skill_id, "LoopSkill", "d", "v3 演化内容", True, None,
+    )
+    async with async_session_maker() as s:
+        res = await sss.ingest_hermes_skills(s, owner.id)
+    assert res["new"] == 0 and res["updated"] == 0, res
+
+    # The DB row survived both scans with the evolution content — no bounce.
+    async with async_session_maker() as s:
+        row = (await s.execute(
+            select(AgentSkill).where(AgentSkill.id == skill_id)
+        )).scalar_one()
+        assert row.content == "v3 演化内容"
+        assert row.content_hash == sss._hash_content("v3 演化内容")

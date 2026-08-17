@@ -27,6 +27,9 @@ class SessionCallLog(Base):
     message_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("messages.id", ondelete="CASCADE"), index=True
     )
+    # Roundtable: all slots share the same roundtable message_id, so calls are
+    # attributed per AI via agent_id. NULL for personal (single-agent) turns.
+    agent_id: Mapped[str | None] = mapped_column(String(64), index=True)
     kind: Mapped[str] = mapped_column(String(16), nullable=False)  # model | tool
     name: Mapped[str | None] = mapped_column(String(255))
     tool_kind: Mapped[str | None] = mapped_column(String(32))

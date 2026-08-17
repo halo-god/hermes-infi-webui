@@ -187,6 +187,10 @@ async def tick(db: AsyncSession) -> int:
         )
         t.last_status = "failed"
         t.fail_count = (t.fail_count or 0) + 1
+        # Push next_run_at forward: the same tick's due query would otherwise
+        # re-select this just-reclaimed task (its next_run_at is still in the
+        # past) and immediately re-fire it — the reclaim would never stick.
+        t.next_run_at = compute_next_run(t.cron, tz_base)
 
     due = (
         await db.execute(
@@ -233,16 +237,33 @@ async def tick(db: AsyncSession) -> int:
 async def scheduler_loop():
     """Background loop — call tick() every TICK_INTERVAL seconds.
 
-    Started in main.py lifespan; cancelled on shutdown.
+    Started in main.py lifespan; cancelled on shutdown. A Redis NX lock
+    (TTL > interval) serializes tick across API workers: without it, N
+    uvicorn workers each select + enqueue the same due tasks — duplicate
+    firings, and stale-reclaim would flag the other worker's in-flight
+    task as stuck.
     """
     from app.db.base import async_session_maker
     logger.info("Scheduled task loop started (interval=%ss)", TICK_INTERVAL)
+    lock_key = "hermes:scheduler:tick"
     while True:
         try:
-            async with async_session_maker() as db:
-                n = await tick(db)
-                if n:
-                    logger.info("Scheduler triggered %d task(s)", n)
+            got = await redis_core.get_redis().set(
+                lock_key, "1", nx=True, ex=TICK_INTERVAL + 5,
+            )
+            if got:
+                try:
+                    async with async_session_maker() as db:
+                        n = await tick(db)
+                        if n:
+                            logger.info("Scheduler triggered %d task(s)", n)
+                finally:
+                    try:
+                        await redis_core.get_redis().delete(lock_key)
+                    except Exception:
+                        pass
+            else:
+                logger.debug("Scheduler tick skipped — another worker holds the lock")
         except asyncio.CancelledError:
             logger.info("Scheduled task loop cancelled")
             raise

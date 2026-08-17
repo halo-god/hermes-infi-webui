@@ -26,6 +26,8 @@ function apply() {
   document.body.dataset.density = tweaks.density;
   document.body.dataset.voice = tweaks.voice;
   localStorage.setItem(KEY, JSON.stringify(tweaks));
+  // Keep the AppLayout topbar icon in sync (DOM dataset is not reactive).
+  window.dispatchEvent(new CustomEvent("hermes:atmos", { detail: tweaks.atmos }));
 }
 watch(tweaks, apply, { deep: true });
 

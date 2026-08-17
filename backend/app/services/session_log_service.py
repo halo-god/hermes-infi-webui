@@ -81,7 +81,13 @@ def _last_output_expr():
 
 
 def _base_stmt():
-    """Conversation rows with aggregated rollup columns, newest first."""
+    """Conversation rows with aggregated rollup columns, newest first.
+
+    user_name resolves to the conversation owner for personal chats and to
+    the TEAM name for group chats (the header summarizes the group, not who
+    opened the chat).
+    """
+    from app.db.models.team import Team
     return (
         select(
             Conversation.id,
@@ -93,6 +99,7 @@ def _base_stmt():
             Conversation.created_at,
             User.name.label("user_name"),
             User.email.label("user_email"),
+            Team.name.label("team_name"),
             _first_input_expr().label("first_input"),
             _last_output_expr().label("last_output"),
             func.count(Message.id).filter(Message.role == "user").label("turn_count"),
@@ -102,7 +109,8 @@ def _base_stmt():
         )
         .join(User, User.id == Conversation.owner_id)
         .join(Message, Message.conversation_id == Conversation.id)
-        .group_by(Conversation.id, User.name, User.email)
+        .outerjoin(Team, Team.id == Conversation.team_id)
+        .group_by(Conversation.id, User.name, User.email, Team.name)
         .order_by(func.max(Message.updated_at).desc())
     )
 
@@ -158,7 +166,8 @@ def _row_to_item(row, counts: dict[uuid.UUID, tuple[int, int]]) -> dict:
         "id": str(row.id),
         "title": row.title,
         "source": row.type,  # personal=对话 | group=工作
-        "user_name": row.user_name,
+        # Group rows summarize the team; personal rows the owner.
+        "user_name": (row.team_name or row.title) if row.type == "group" else row.user_name,
         "user_email": row.user_email,
         "first_input": _trunc(row.first_input),
         "last_output": _trunc(row.last_output),
@@ -234,6 +243,17 @@ async def session_detail(db: AsyncSession, conversation_id: uuid.UUID) -> dict |
         return None
     owner = await db.get(User, convo.owner_id)
 
+    # Group chats: the header summarizes the TEAM/GROUP, not the conversation
+    # owner — the person who opened the chat is rarely who typed the messages.
+    group_name: str | None = None
+    if convo.type == "group":
+        if convo.team_id:
+            from app.db.models.team import Team
+            team = await db.get(Team, convo.team_id)
+            if team:
+                group_name = team.name or None
+        group_name = group_name or convo.title or None
+
     msgs = (
         await db.execute(
             select(Message)
@@ -241,6 +261,21 @@ async def session_detail(db: AsyncSession, conversation_id: uuid.UUID) -> dict |
             .order_by(Message.created_at)
         )
     ).scalars().all()
+
+    # Batch-load sender names for every user message (group chats have many
+    # distinct senders — N+1 prevention).
+    sender_ids = {
+        m.owner_id for m in msgs
+        if m.role == "user" and m.owner_id is not None
+    }
+    sender_names: dict[uuid.UUID, str] = {}
+    if sender_ids:
+        sender_rows = (
+            await db.execute(
+                select(User.id, User.name).where(User.id.in_(list(sender_ids)))
+            )
+        ).all()
+        sender_names = {r[0]: r[1] for r in sender_rows}
 
     def _msg_text(m: Message) -> str | None:
         content = m.content or {}
@@ -272,6 +307,7 @@ async def session_detail(db: AsyncSession, conversation_id: uuid.UUID) -> dict |
             cur = {
                 "index": len(turns) + 1,
                 "user_text": (m.content or {}).get("text"),
+                "user_name": sender_names.get(m.owner_id) if m.owner_id else None,
                 "agent_text": None,
                 "thinking": None,
                 "status": "complete",
@@ -280,6 +316,7 @@ async def session_detail(db: AsyncSession, conversation_id: uuid.UUID) -> dict |
                 "user_ts": m.created_at,
                 "agent_updated": None,
                 "calls": [],
+                "replies": None,
             }
             turn_count += 1
             if first_input is None:
@@ -293,15 +330,40 @@ async def session_detail(db: AsyncSession, conversation_id: uuid.UUID) -> dict |
                 # task) — open its own turn.
                 cur = {
                     "index": len(turns) + 1,
-                    "user_text": None, "agent_text": None, "thinking": None,
+                    "user_text": None, "user_name": None, "agent_text": None, "thinking": None,
                     "status": m.status, "message_id": None, "duration_ms": None,
                     "user_ts": None, "agent_updated": None, "calls": [],
+                    "replies": None,
                 }
             cur["agent_text"] = out
             cur["thinking"] = (m.content or {}).get("thinking")
             cur["status"] = m.status
             cur["message_id"] = str(m.id)
             cur["agent_updated"] = m.updated_at or m.created_at
+            # Roundtable: expose each AI's reply (text + thinking) so the
+            # admin log shows the full parallel discussion, not just merged.
+            content = m.content or {}
+            replies_raw = content.get("replies")
+            if isinstance(replies_raw, list) and replies_raw:
+                merged_meta = content.get("merged") or {}
+                cur["replies"] = [
+                    {
+                        "agent_id": r.get("agent_id", ""),
+                        "profile_id": r.get("profile_id"),
+                        "text": r.get("text", ""),
+                        "status": r.get("status", "complete"),
+                        "thinking": r.get("thinking") or None,
+                        "calls": [],
+                    }
+                    for r in replies_raw
+                    if isinstance(r, dict)
+                ]
+                # Merge summary thinking (captured from the merge agent).
+                if cur["thinking"] is None:
+                    merged_thinking = (
+                        merged_meta.get("thinking") if isinstance(merged_meta, dict) else None
+                    )
+                    cur["thinking"] = merged_thinking or None
     if cur is not None:
         turns.append(cur)
 
@@ -339,13 +401,25 @@ async def session_detail(db: AsyncSession, conversation_id: uuid.UUID) -> dict |
 
     # Attach calls to their turn (keyed by the agent reply message) and derive
     # the per-turn total duration: call span when calls exist, otherwise the
-    # user-message → agent-reply timestamps.
+    # user-message → agent-reply timestamps. Roundtable calls are additionally
+    # split per AI (agent_id) for the per-reply cards.
     calls_by_msg: dict[str, list[dict]] = {}
+    calls_by_msg_agent: dict[tuple[str, str], list[dict]] = {}
     for c in calls:
-        calls_by_msg.setdefault(str(c.message_id), []).append(_call_to_dict(c))
+        c_dict = _call_to_dict(c)
+        calls_by_msg.setdefault(str(c.message_id), []).append(c_dict)
+        if c.agent_id:
+            calls_by_msg_agent.setdefault((str(c.message_id), c.agent_id), []).append(c_dict)
     for t in turns:
         if t["message_id"]:
             t["calls"] = calls_by_msg.get(t["message_id"], [])
+        if t["replies"]:
+            # Per-AI call overview inside each reply card.
+            for r in t["replies"]:
+                if t["message_id"]:
+                    r["calls"] = calls_by_msg_agent.get(
+                        (t["message_id"], r["agent_id"]), [],
+                    )
         if t["calls"]:
             t_started = min(c["started_at"] for c in t["calls"] if c["started_at"])
             t_ended = max(c["ended_at"] for c in t["calls"] if c["ended_at"])
@@ -372,7 +446,8 @@ async def session_detail(db: AsyncSession, conversation_id: uuid.UUID) -> dict |
         "id": str(convo.id),
         "title": convo.title,
         "source": convo.type,
-        "user_name": owner.name if owner else None,
+        # Group chats show the team/group name instead of the chat owner.
+        "user_name": group_name or (owner.name if owner else None),
         "user_email": owner.email if owner else None,
         "first_input": first_input,
         "last_output": last_output,

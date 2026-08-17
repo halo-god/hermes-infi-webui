@@ -62,6 +62,21 @@ target-version = "py311"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+addopts = [
+  "--cov=app",
+  "--cov=agent_runner",
+  "--cov-report=term-missing",
+  "--cov-config=pyproject.toml",
+  # NOTE: --cov-fail-under lives in CI (ci.yml) so a single-file local run
+  # doesn't trip the global threshold.
+]
+
+[tool.coverage.run]
+# wait_for_services is a startup bootstrap script, not business logic.
+omit = ["app/wait_for_services.py"]
+
+[tool.coverage.report]
+show_missing = true
 
 [build-system]
 requires = ["setuptools>=68"]

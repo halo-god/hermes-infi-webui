@@ -549,18 +549,41 @@ _NO_CLARIFY_ROUNDTABLE = (
 )
 
 
-def _clarify_directives(is_first_turn: bool, text: str) -> str:
+def _clarify_directives(is_first_turn: bool, text: str, *, group: bool = False) -> str:
     """Clarify preamble for the FIRST turn of a conversation only.
 
     Follow-up turns get the anti-clarify line via the system prompt instead;
     injecting both used to hand the model contradictory instructions on every
     short reply ("必须 clarify" vs "不要 clarify").
+
+    Group chats never get the preamble: no interactive modal exists there, and
+    the runner auto-declines clarify requests anyway (hard backstop).
     """
+    if group:
+        return ""
     if (settings.clarify_strategy or "").strip().lower() == "disabled":
         return ""
     if not is_first_turn:
         return ""
     return _CLARIFY_PREAMBLE
+
+
+async def _has_acp_session(conversation_id: uuid.UUID, profile_id, stage: str | None) -> bool:
+    """True when the runner already holds an ACP session for this turn's
+    (conversation, profile, stage). Profile-scoped sessions live in Redis
+    (acp_session:{conv}:{profile}[:stage] — runner._set_session_id) rather
+    than on the Conversation row, so the acp_session_id column alone is not a
+    sufficient first-turn probe."""
+    if not profile_id:
+        return False
+    suffix = f":{stage}" if stage else ""
+    key = f"acp_session:{conversation_id}:{str(profile_id)}{suffix}"
+    try:
+        return bool(await redis_core.get_redis().exists(key))
+    except Exception:
+        # Redis hiccup: fall back to first-turn semantics (the preamble is
+        # advisory — the runner's clarify handling is the real guard).
+        return False
 
 
 async def send_user_only(
@@ -856,6 +879,21 @@ def _build_attachment_content_blocks(convo: Conversation, attached: list[dict]) 
     return blocks
 
 
+async def _fail_message_on_enqueue(db: AsyncSession, msg: Message, exc: Exception) -> None:
+    """Flip a committed streaming placeholder to error when enqueue failed.
+
+    send_message / send_roundtable / send_chain commit the placeholder BEFORE
+    enqueuing, so a Redis blip would 500 the request yet leave a permanently
+    "streaming" row the runner never picks up — the UI would spin forever
+    (runner._mark_task_failed only covers failures AFTER enqueue).
+    """
+    msg.status = "error"
+    content = dict(msg.content or {})
+    content["error"] = "消息发送失败（服务暂不可用），请重试"
+    msg.content = content
+    await db.commit()
+
+
 async def send_message(
     db: AsyncSession,
     convo: Conversation,
@@ -886,8 +924,12 @@ async def send_message(
     when multiple Profiles share one agent_id).
     """
     # NOTE: read acp_session_id before any commit expires the instance —
-    # _clarify_directives needs it to detect first-turn vs follow-up.
-    is_first_turn = convo.acp_session_id is None
+    # _clarify_directives needs it to detect first-turn vs follow-up. A
+    # profile-bound session is stored in Redis, not on the row, so probe
+    # that too (otherwise every profile turn looks like the first).
+    is_first_turn = convo.acp_session_id is None and not await _has_acp_session(
+        convo.id, profile_id, stage,
+    )
     reply_agent_id = agent_id_override or convo.primary_agent_id
 
     attached = await _resolve_attached_files(db, attached_file_ids or [], conversation_id=str(convo.id), owner_id=owner_id)
@@ -951,7 +993,7 @@ async def send_message(
 
     # Text block: preambles + user message + inline file references
     prompt_text = _build_attached_prompt(text, attached)
-    full_text = f"{_FILE_WRITE_PREAMBLE}{_clarify_directives(is_first_turn, text)}\n\n{prompt_text}"
+    full_text = f"{_FILE_WRITE_PREAMBLE}{_clarify_directives(is_first_turn, text, group=convo.type == 'group')}\n\n{prompt_text}"
     prompt_blocks.append({"type": "text", "text": full_text})
 
     # Resource Link blocks (agent reads from workspace) + ImageContentBlocks —
@@ -960,24 +1002,28 @@ async def send_message(
     prompt_blocks.extend(_build_attachment_content_blocks(convo, attached))
 
     await redis_core.clear_cancel(str(convo.id))
-    await redis_core.enqueue_prompt(
-        {
-            "type": "single",
-            "conversation_id": str(convo.id),
-            "message_id": str(agent_msg.id),
-            "agent_id": reply_agent_id,
-            "profile_id": str(parsed_profile_id) if parsed_profile_id else None,
-            "text": full_text,
-            "content_blocks": prompt_blocks if len(prompt_blocks) > 1 else None,
-            "system_prompt": system_prompt,
-            "profile_dir": profile_dir,
-            "mcp_servers": mcp_servers or [],
-            "matched_skill_ids": [str(sid) for sid in (matched_skill_ids or [])],
-            "skill_firing_excerpt": text[:500],
-            "max_iterations": max_iterations,
-            "stage": stage,
-        }
-    )
+    try:
+        await redis_core.enqueue_prompt(
+            {
+                "type": "single",
+                "conversation_id": str(convo.id),
+                "message_id": str(agent_msg.id),
+                "agent_id": reply_agent_id,
+                "profile_id": str(parsed_profile_id) if parsed_profile_id else None,
+                "text": full_text,
+                "content_blocks": prompt_blocks if len(prompt_blocks) > 1 else None,
+                "system_prompt": system_prompt,
+                "profile_dir": profile_dir,
+                "mcp_servers": mcp_servers or [],
+                "matched_skill_ids": [str(sid) for sid in (matched_skill_ids or [])],
+                "skill_firing_excerpt": text[:500],
+                "max_iterations": max_iterations,
+                "stage": stage,
+            }
+        )
+    except Exception as exc:
+        await _fail_message_on_enqueue(db, agent_msg, exc)
+        raise
     return user_msg, agent_msg
 
 
@@ -1078,18 +1124,22 @@ async def send_roundtable(
     attachment_blocks = _build_attachment_content_blocks(convo, attached)
 
     await redis_core.clear_cancel(str(convo.id))
-    await redis_core.enqueue_prompt(
-        {
-            "type": "roundtable",
-            "conversation_id": str(convo.id),
-            "message_id": str(rt_msg.id),
-            "targets": targets,
-            "text": prompt_text,
-            "content_blocks": attachment_blocks or None,
-            "moa": moa,
-            "research_mode": research_mode,
-        }
-    )
+    try:
+        await redis_core.enqueue_prompt(
+            {
+                "type": "roundtable",
+                "conversation_id": str(convo.id),
+                "message_id": str(rt_msg.id),
+                "targets": targets,
+                "text": prompt_text,
+                "content_blocks": attachment_blocks or None,
+                "moa": moa,
+                "research_mode": research_mode,
+            }
+        )
+    except Exception as exc:
+        await _fail_message_on_enqueue(db, rt_msg, exc)
+        raise
     return user_msg, rt_msg
 
 
@@ -1170,16 +1220,20 @@ async def send_chain(
     attachment_blocks = _build_attachment_content_blocks(convo, attached)
 
     await redis_core.clear_cancel(str(convo.id))
-    await redis_core.enqueue_prompt(
-        {
-            "type": "chain",
-            "conversation_id": str(convo.id),
-            "message_id": str(chain_msg.id),
-            "targets": targets,
-            "text": prompt_text,
-            "content_blocks": attachment_blocks or None,
-        }
-    )
+    try:
+        await redis_core.enqueue_prompt(
+            {
+                "type": "chain",
+                "conversation_id": str(convo.id),
+                "message_id": str(chain_msg.id),
+                "targets": targets,
+                "text": prompt_text,
+                "content_blocks": attachment_blocks or None,
+            }
+        )
+    except Exception as exc:
+        await _fail_message_on_enqueue(db, chain_msg, exc)
+        raise
     return user_msg, chain_msg
 
 
@@ -1777,13 +1831,24 @@ async def dispatch(
     task_id: uuid.UUID | None = None,
     agent_id_override: str | None = None,
     stage: str | None = None,
+    mentions: list[str] | None = None,
 ) -> tuple[Message, Message | None]:
     """Route to single or roundtable based on the conversation's active agents.
 
     When agent_id_override is set (group chat @-mention targeting a specific
     agent), force single-agent mode with that agent - do NOT fall into the
     roundtable branch based on the conversation's full active_agent_ids.
+
+    Personal chats can also carry mentions (the "追问" follow-up button): a
+    single target resolves to that agent/profile and answers alone; multiple
+    or unresolvable targets fall back to the normal route.
     """
+    if agent_id_override is None and mentions:
+        m_agent, m_profile = await _resolve_personal_mentions(db, mentions)
+        if m_agent:
+            agent_id_override = m_agent
+            if m_profile:
+                profile_id_override = m_profile
     if agent_id_override:
         agents = [agent_id_override]
     else:
@@ -1934,8 +1999,13 @@ async def dispatch(
         )
 
     # Anti-clarify guidance only on follow-up turns — the first turn carries the
-    # clarify preamble, and sending both contradicted each other.
-    if convo.acp_session_id and len(agents) == 1:
+    # clarify preamble, and sending both contradicted each other. Profile-bound
+    # sessions live in Redis, so probe that as well as the row column.
+    turn_stage = convo.staged_stage if (profile and getattr(profile, "staged_enabled", False)) else None
+    first_turn = convo.acp_session_id is None and not await _has_acp_session(
+        convo.id, effective_profile_id, turn_stage,
+    )
+    if not first_turn and len(agents) == 1:
         system_prompt = f"{system_prompt}\n\n{_ANTI_CLARIFY}" if system_prompt else _ANTI_CLARIFY
 
     if len(agents) > 1:
@@ -1967,8 +2037,9 @@ async def dispatch(
         system_prompt=system_prompt, profile_dir=profile_dir, mcp_servers=mcp_servers,
         task_id=task_id, profile_id=effective_profile_id, matched_skill_ids=matched_skill_ids,
         max_iterations=profile.max_iterations if profile else None,
+        agent_id_override=agent_id_override,
         rag_refs=rag_refs if knowledge_prompt else None,
-        stage=convo.staged_stage if (profile and getattr(profile, "staged_enabled", False)) else None,
+        stage=turn_stage,
     )
 
 
@@ -2465,6 +2536,40 @@ class ResolvedMentions:
     all_agents: bool = False
 
 
+async def _resolve_personal_mentions(
+    db: AsyncSession, mentions: list[str],
+) -> tuple[str | None, str | None]:
+    """Resolve single-target mentions for PERSONAL chats (the follow-up
+    button). Looser than resolve_mentions: there is no membership to verify.
+
+    Returns (agent_id, profile_id); both None when the mentions resolve to
+    multiple distinct targets (caller falls back to the normal route) or to
+    nothing usable.
+    """
+    agent_id: str | None = None
+    profile_id: str | None = None
+    for m in mentions or []:
+        if m in ("__all_agents__", "__all_humans__"):
+            return None, None  # multi-target pseudo-mentions are not personal
+        if m.startswith("profile:"):
+            pid = m.split(":", 1)[1]
+            try:
+                p = await db.get(Profile, uuid.UUID(pid))
+            except (ValueError, TypeError):
+                continue
+            if p is None or not p.is_active:
+                continue
+            if agent_id is not None and agent_id != p.default_agent_id:
+                return None, None  # multiple distinct targets
+            agent_id = p.default_agent_id
+            profile_id = pid
+        else:
+            if agent_id is not None and agent_id != m:
+                return None, None  # multiple distinct targets
+            agent_id = m
+    return agent_id, profile_id
+
+
 async def resolve_mentions(
     db: AsyncSession,
     conversation_id: uuid.UUID,
@@ -2762,7 +2867,12 @@ async def dispatch_group(
                 system_prompt = (
                     f"{system_prompt}\n\n{request_knowledge_prompt}" if system_prompt else request_knowledge_prompt
                 )
-        if convo.acp_session_id:
+        # Group chats never show the clarify modal (runner auto-declines),
+        # so every group turn — first or follow-up — carries the anti-clarify
+        # directive. The old `convo.acp_session_id` check was always false
+        # here: group chats store session ids in Redis, never on the row, so
+        # the preamble was injected every turn while this line never fired.
+        if convo.type == "group":
             system_prompt = f"{system_prompt}\n\n{_ANTI_CLARIFY}" if system_prompt else _ANTI_CLARIFY
 
         # Attribute the reply to the @-mentioned agent/profile without mutating

@@ -128,12 +128,16 @@ export interface SessionExecution {
   /** One turn: user input + assistant reply (incl. thinking) + calls. */
   index: number;
   user_text: string | null;
+  /** Sender of this turn's user message (group chats: who typed it). */
+  user_name: string | null;
   agent_text: string | null;
   thinking: string | null;
   status: string;
   duration_ms: number | null;
   message_id: string | null;
   calls: SessionCallEntry[];
+  /** Roundtable turns carry per-AI replies; agent_text is the merged summary. */
+  replies: RoundtableReply[] | null;
 }
 
 export interface SessionLogDetail {
@@ -343,6 +347,11 @@ export interface RoundtableReply {
   profile_id?: string | null;
   text: string;
   status: "streaming" | "complete" | "error" | "timeout";
+  /** Present in persisted/session-log replies (admin 会话日志 detail). */
+  thinking?: string | null;
+  calls?: SessionCallEntry[];
+  /** Files written by this AI, shown as chips on its own card. */
+  files?: { id: string; name: string; kind?: string }[];
 }
 
 export interface RoundtableContent {
@@ -541,7 +550,7 @@ export type StreamEvent = (
   | { type: "start"; message_id: string; agent_id?: string; profile_id?: string }
   | { type: "token"; message_id: string; delta: string }
   | { type: "tool_call"; message_id: string; title?: string; status?: string; raw_input?: unknown; tool_kind?: string }
-  | { type: "file"; message_id: string; file_id: string; name: string; kind: string; version: number; diff?: string | null; status?: string }
+  | { type: "file"; message_id: string; file_id: string; name: string; kind: string; version: number; diff?: string | null; status?: string; slot?: number }
   | { type: "done"; message_id: string; status: string; stop_reason?: string; text?: string }
   | { type: "error"; message_id: string; detail: string }
   | { type: "rt_start"; message_id: string; agents: RtAgentMeta[] }

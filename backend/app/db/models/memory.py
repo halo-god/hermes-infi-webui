@@ -77,3 +77,12 @@ class AgentSkill(UUIDPrimaryKey, Timestamps, Base):
     # Direction B). Only agent-origin rows are tombstoned when their FS dir
     # disappears — platform skills are the DB source of truth.
     origin: Mapped[str] = mapped_column(String(16), default="platform", nullable=False)
+    # sha256 of `content` as last synced to/from the hermes filesystem. Written
+    # into the SKILL.md frontmatter by Direction A; Direction B skips rows
+    # whose FS hash equals this value (the file is a projection of the DB —
+    # prevents the A→B→A loop). NULL for legacy rows before 0092.
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # When Direction B last accepted FS content into the DB.
+    last_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )

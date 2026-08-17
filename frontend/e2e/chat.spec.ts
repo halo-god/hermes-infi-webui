@@ -24,6 +24,8 @@ async function sendMessage(page: Page, text: string) {
 }
 
 test.describe("聊天主流程", () => {
+  // @real-agent: needs the ACP runner to stream a real reply — skipped in CI
+  // (the runner is not part of the CI stack); run locally with the agent up.
   test("新建会话并发送消息，助手流式回复", async ({ page }) => {
     // storageState 已登录，直接进入工作区
     await page.goto("/");
@@ -42,6 +44,7 @@ test.describe("聊天主流程", () => {
     await expect(page.locator(".side .convo-item, .side .side-row").first()).toBeVisible();
   });
 
+  // @real-agent: needs the ACP runner to stream a real reply.
   test("多轮对话：追问后助手继续回复", async ({ page }) => {
     await page.goto("/");
     await expect(page.locator(".side")).toBeVisible({ timeout: 20_000 });

@@ -21,11 +21,11 @@ test.describe("文件管理", () => {
     // 列表出现该文件
     await expect(page.locator("tr", { hasText: fileName }).first()).toBeVisible({ timeout: 20_000 });
 
-    // 删除（确认弹窗）
+    // 删除（应用内确认弹窗 ConfirmModal，非原生 dialog）
     const row = page.locator("tr", { hasText: fileName }).first();
-    page.once("dialog", (d) => d.accept());
     await row.hover();
     await row.locator('button[title*="删除"]').first().click();
+    await page.locator(".modal .pm-primary").click();
     await expect
       .poll(
         async () => (await page.locator("tr", { hasText: fileName }).count()) === 0,

@@ -30,6 +30,7 @@ import type {
   HealthReport,
   IdentityProvider,
   PermissionGroup,
+  RoundtableReply,
   SessionCallEntry,
   SessionExecution,
   SessionLogDetail,
@@ -194,6 +195,22 @@ function turnDuration(t: SessionExecution): string {
 }
 function assistantName(d: SessionLogDetail | null): string {
   return d?.profile_name || d?.agent || "—";
+}
+// Roundtable reply display name: bound profile name > handle > agent id.
+function replyName(r: RoundtableReply): string {
+  if (r.profile_id) {
+    const p = profiles.value.find((x) => x.id === r.profile_id);
+    if (p) return p.name || p.handle || r.agent_id;
+  }
+  return r.agent_id;
+}
+// Per-reply thinking fold state (key = `${turnIndex}:${replyIndex}`).
+const replyThinkingOpen = ref<Record<string, boolean>>({});
+function toggleReplyThinking(key: string) {
+  replyThinkingOpen.value[key] = !replyThinkingOpen.value[key];
+}
+function isReplyThinkingOpen(key: string): boolean {
+  return !!replyThinkingOpen.value[key];
 }
 async function copyText(text: string) {
   try {
@@ -1910,7 +1927,7 @@ async function confirmImport() {
                     <div class="sl-info-item"><span class="sl-info-key">助手执行次数</span><span class="sl-info-val">{{ sessionExecutions().length }}</span></div>
                     <div class="sl-info-item"><span class="sl-info-key">结束时间</span><span class="sl-info-val">{{ fmtDate(sessionDetail.last_activity) }}</span></div>
                     <div class="sl-info-item"><span class="sl-info-key">用户输入次数</span><span class="sl-info-val">{{ sessionDetail.turn_count }}</span></div>
-                    <div class="sl-info-item"><span class="sl-info-key">用户</span><span class="sl-info-val">{{ sessionDetail.user_name || sessionDetail.user_email || "—" }}</span></div>
+                    <div class="sl-info-item"><span class="sl-info-key">{{ sessionDetail.source === 'group' ? '团队群' : '用户' }}</span><span class="sl-info-val">{{ sessionDetail.user_name || sessionDetail.user_email || "—" }}</span></div>
                     <div class="sl-info-item"><span class="sl-info-key">来源</span><span class="sl-info-val">{{ SESSION_SOURCE_LABEL[sessionDetail.source] || sessionDetail.source }}</span></div>
                     <div class="sl-info-item"><span class="sl-info-key">助手</span><span class="sl-info-val">{{ assistantName(sessionDetail) }}</span></div>
                     <div class="sl-info-item"><span class="sl-info-key">技能</span><span class="sl-info-val">{{ sessionDetail.profile_id || "—" }}</span></div>
@@ -1928,7 +1945,7 @@ async function confirmImport() {
                   </div>
 
                   <div :id="`sl-turn-${t.index}-input`" class="sl-turn-row">
-                    <div class="sl-turn-label"><Icon name="chat" :size="12" /> 用户输入</div>
+                    <div class="sl-turn-label"><Icon name="chat" :size="12" /> 用户输入<span v-if="t.user_name" class="sl-sender">· {{ t.user_name }}</span></div>
                     <div v-if="t.user_text" class="md-body sl-md" v-html="md(t.user_text)"></div>
                     <div v-else class="text-mute-sm">—</div>
                   </div>
@@ -1938,6 +1955,39 @@ async function confirmImport() {
                     <div v-if="t.agent_text" class="md-body sl-md" v-html="md(t.agent_text)"></div>
                     <div v-else class="text-mute-sm">—</div>
                   </div>
+
+                  <!-- Roundtable (group chat / MoA): per-AI reply cards with
+                       each AI's thinking + call overview. -->
+                  <template v-if="t.replies && t.replies.length">
+                    <div class="sl-turn-row" style="flex-direction:column;align-items:stretch;gap:8px">
+                      <div class="sl-turn-label"><Icon name="users" :size="12" /> 各 AI 作答（{{ t.replies.length }}）</div>
+                      <div v-for="(r, ri) in t.replies" :key="`${t.index}-${ri}`" class="sl-rt-card">
+                        <div class="sl-rt-head">
+                          <span class="sl-rt-name"><Icon name="bot" :size="12" /> {{ replyName(r) }}</span>
+                          <span class="au-result" :class="{ ok: r.status === 'complete', fail: r.status === 'error' || r.status === 'timeout', partial: r.status === 'streaming' }">{{ r.status === "complete" ? "完成" : r.status === "timeout" ? "超时" : r.status === "error" ? "失败" : r.status }}</span>
+                        </div>
+                        <div v-if="r.thinking" class="sl-think" style="margin:6px 0">
+                          <button class="sl-think-head" @click="toggleReplyThinking(`${t.index}:${ri}`)">
+                            <Icon name="sparkle" :size="11" /> 思考过程
+                            <Icon :name="isReplyThinkingOpen(`${t.index}:${ri}`) ? 'chevron_up' : 'chevron_down'" :size="11" />
+                            <span class="text-mute-sm">{{ isReplyThinkingOpen(`${t.index}:${ri}`) ? "收起" : "展开" }}</span>
+                          </button>
+                          <div v-show="isReplyThinkingOpen(`${t.index}:${ri}`)" class="md-body sl-md sl-think-body" v-html="md(r.thinking)"></div>
+                        </div>
+                        <div v-if="r.text" class="md-body sl-md" v-html="md(r.text)"></div>
+                        <div v-else class="text-mute-sm" style="font-size:12px">（{{ r.status === "complete" ? "无内容" : "该助手未作答" }}）</div>
+                        <div v-if="r.calls && r.calls.length" class="sl-call-list" style="margin-top:8px">
+                          <div v-for="(c, cj) in r.calls" :key="`${t.index}-${ri}-${cj}`" class="sl-call-row">
+                            <span class="sl-call-dot" :class="c.kind"></span>
+                            <span class="sl-call-name">{{ c.name || (c.kind === "model" ? "模型调用" : "工具调用") }}</span>
+                            <span class="sl-call-kind">{{ c.kind === "model" ? "模型调用" : `API · ${c.tool_kind || "tool"}` }}</span>
+                            <span v-if="c.kind === 'model'" class="sl-call-tokens">{{ c.tokens_in ?? 0 }} in / {{ c.tokens_out ?? 0 }} out</span>
+                            <span class="sl-call-dur">{{ sessionCallDuration(c) }}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </template>
 
                   <div v-if="t.thinking" :id="`sl-turn-${t.index}-thinking`" class="sl-think">
                     <button class="sl-think-head" @click="toggleThinking(t.index)">
@@ -3019,6 +3069,33 @@ async function confirmImport() {
 </template>
 
 <style scoped>
+/* Roundtable per-AI reply cards in session-log detail */
+.sl-rt-card {
+  border: 1px solid var(--rule-soft);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--bg-card, rgba(255, 255, 255, 0.015));
+}
+.sl-rt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.sl-rt-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 13px;
+}
+/* Sender name next to "用户输入" in session-log turns */
+.sl-sender {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--ink-mute);
+}
 .log-row {
   display: flex;
   gap: 8px;

@@ -779,6 +779,7 @@
   }
   body.dark .send-btn { color: var(--bg-canvas); }
   body.dark .msg.user .msg-bubble { background: var(--accent-tint); border-color: var(--accent-soft); }
+  body.dark .msg.user .msg-avatar { background: var(--ink); color: var(--bg-canvas); }
   body.dark .msg.agent .msg-bubble { background: rgba(255,255,255,0.06); }
 
   /* Theme: ink (mono) */
@@ -4252,3 +4253,29 @@ body[data-atmos="cinnabar"] {
   }
   .mcp-status-dot.ok { background: var(--ok, #3a8a5a); }
   .mcp-status-dot.unknown { background: var(--ink-faint, #999); }
+
+/* ── Narrow-screen adaptation (P1) ────────────────────────────────────
+   Previously only LoginView had breakpoints; the chat thread / landing
+   squeezed hard below ~1024px. Two tiers: 900px (compact paddings,
+   scrollable stage switcher) and 640px (single-column landing, tighter). */
+@media (max-width: 900px) {
+  .landing { padding: 24px 16px 80px; }
+  .hello { font-size: 34px; margin-top: 36px; }
+  .hello-sub { font-size: 14px; }
+  .thread { padding: 16px 16px 140px; }
+  .thread-head-wrap { padding: 16px 16px 0; }
+  .dock { padding: 0 16px; }
+  .stage-switcher { max-width: 100%; overflow-x: auto; }
+  .thread-action { font-size: 0; gap: 0; } /* keep icons only: text labels wrap badly at ~900px */
+  .thread-action .ico { margin: 0; }
+}
+
+@media (max-width: 640px) {
+  .landing { padding: 16px 12px 60px; }
+  .hello { font-size: 27px; margin-top: 24px; }
+  .thread { padding: 12px 12px 120px; }
+  .thread-head-wrap { padding: 12px 12px 0; }
+  .thread-title { font-size: 20px; }
+  .featured-card { width: 100%; max-width: 100%; }
+  .dock { padding: 0 12px; }
+}

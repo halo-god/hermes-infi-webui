@@ -81,6 +81,8 @@ test.describe("群聊成员与频道模式", () => {
 test.describe("群聊圆桌与成员管理", () => {
   // 成员/圆桌依赖真实后端，偶发抖动允许重试一次
   test.describe.configure({ retries: 1 });
+  // @real-agent: the roundtable needs the ACP runner to drive real agents —
+  // skipped in CI; run locally with the agent up.
   test("绑定多助手团队 → @圆桌 触发多 Agent 并行回复渲染", async ({ page }) => {
     // 前置：创建团队 + 绑定 3 个共享 profile（多 Agent 圆桌前提）
     const token = adminToken();
@@ -169,14 +171,15 @@ test.describe("群聊圆桌与成员管理", () => {
     // 修复：201 已断言，无需 200
     const convId = (await groupRes.json()).id as string;
 
-    // 读取成员列表；群聊刚创建可能短暂未就绪，空结果重试 3 次
+    // 读取成员列表；群聊刚创建可能短暂未就绪，空结果重试 6 次
     let before: { id: string; agent_id: string | null }[] = [];
-    for (let i = 0; i < 3 && before.length === 0; i++) {
+    for (let i = 0; i < 6 && before.length === 0; i++) {
       const memResp = await page.request.get(`/api/v1/conversations/${convId}/members`, {
         headers: { Authorization: `Bearer ${token}` },
       });
+      if (memResp.status() !== 200) continue;
       before = (await memResp.json()) as { id: string; agent_id: string | null }[];
-      if (before.length === 0) await page.waitForTimeout(1000);
+      if (before.length === 0) await page.waitForTimeout(2000);
     }
     expect(before.length).toBeGreaterThanOrEqual(1);
 
@@ -203,11 +206,9 @@ test.describe("群聊圆桌与成员管理", () => {
     })).json()) as unknown[];
     expect(after.length).toBeLessThanOrEqual(afterAdd.length);
 
-    // UI：切到群聊 tab → 打开群聊 → 成员面板显示成员
-    await page.goto("/");
-    await expect(page.locator(".side")).toBeVisible({ timeout: 20_000 });
-    await page.locator(".convo-tab-group button", { hasText: "群聊" }).first().click();
-    await page.locator(".convo-title", { hasText: "成员管理群聊" }).first().click();
+    // UI：直接按 convId 打开刚创建的群聊（侧栏同名会话堆积时按标题
+    // 定位会点到历史残留——?c= 精确导航）
+    await page.goto(`/?c=${convId}`);
     await expect(page.locator(".composer-input")).toBeVisible({ timeout: 20_000 });
     await page.locator('button.thread-action[title="群聊成员"]').click();
     await expect(page.locator(".mp-panel")).toBeVisible({ timeout: 15_000 });

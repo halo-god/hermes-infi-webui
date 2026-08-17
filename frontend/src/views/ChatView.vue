@@ -10,6 +10,7 @@ import Composer from "@/components/Composer.vue";
 import ConfirmModal from "@/components/ConfirmModal.vue";
 import ConvoSeal from "@/components/ConvoSeal.vue";
 import { storedProfileId } from "@/utils/profilePref";
+import { usePromptModal } from "@/composables/usePromptModal";
 import { useChatStore } from "@/stores/chat";
 import { useAuthStore } from "@/stores/auth";
 import { useBrandingStore } from "@/stores/branding";
@@ -34,6 +35,7 @@ const chat = useChatStore();
 const auth = useAuthStore();
 const branding = useBrandingStore();
 const ns = useNotificationStore();
+const { promptModal, confirmModal } = usePromptModal();
 const route = useRoute();
 const router = useRouter();
 
@@ -433,7 +435,11 @@ function reactionEntries(msg: Message): { emoji: string; count: number; mine: bo
 
 async function editMsg(msg: Message) {
   if (!chat.activeId) return;
-  const next = window.prompt("编辑消息", msg.content?.text || "");
+  const next = await promptModal({
+    title: "编辑消息",
+    initial: msg.content?.text || "",
+    placeholder: "输入新内容",
+  });
   if (next == null || next.trim() === "" || next === msg.content?.text) return;
   try {
     const updated = await conversationsApi.editMessage(chat.activeId, msg.id, next.trim());
@@ -442,7 +448,9 @@ async function editMsg(msg: Message) {
   } catch { ns.toast("编辑失败"); }
 }
 async function recallMsg(msg: Message) {
-  if (!chat.activeId || !window.confirm("撤回这条消息？")) return;
+  if (!chat.activeId) return;
+  const ok = await confirmModal({ title: "撤回消息", message: "撤回这条消息？" });
+  if (!ok) return;
   try {
     const updated = await conversationsApi.recallMessage(chat.activeId, msg.id);
     msg.content = { ...msg.content, text: "" };
@@ -463,7 +471,12 @@ async function consolidateOutput(msg: Message, target: "project_doc" | "team_kno
   const text = (msg.content?.text || "").trim();
   if (!text) { ns.toast("没有可沉淀的内容"); return; }
   const defaultName = text.slice(0, 24).replace(/\n/g, " ");
-  const name = window.prompt(target === "project_doc" ? "沉淀为项目文档，命名：" : "沉淀为团队知识，命名：", defaultName);
+  const name = await promptModal({
+    title: target === "project_doc" ? "沉淀为项目文档" : "沉淀为团队知识",
+    label: "命名：",
+    initial: defaultName,
+    placeholder: "输入名称",
+  });
   if (!name) return;
   try {
     await conversationsApi.consolidateMessage(chat.activeId, msg.id, {
@@ -685,11 +698,35 @@ function toggleChosen(msgId: string, slot: number) {
 function isChosen(msgId: string, slot: number): boolean {
   return !!chosenMap.value[`${msgId}:${slot}`];
 }
-function followUp(agentId: string, profileId?: string | null) {
-  // Find the exact profile that answered (falls back to agent-id lookup)
-  const profile = profileForEntity(agentId, profileId);
-  if (profile) landingProfileId.value = profile.id;
-  (document.querySelector(".dock .composer-input") as HTMLTextAreaElement)?.focus();
+// Roundtable "追问": prefill "@AI名" + quote that AI's answer (inheriting
+// this session's output as context), seed the mention, and focus the composer.
+// Sending routes to that AI alone (group: @mention single target; personal:
+// dispatch's mentions single-target resolution).
+const pendingMentions = ref<{ key: string; name: string }[]>([]);
+function followUp(agentId: string, profileId?: string | null, text?: string) {
+  const display = rtProfileDisplay(agentId, profileId);
+  const label = display.label || agentId;
+  const key = isGroup.value && profileId ? `profile:${profileId}` : agentId;
+
+  let prefill = `@${label} `;
+  if (text && text.trim()) {
+    const snippet = text.trim();
+    const clipped = snippet.length > 600 ? snippet.slice(0, 600) + "…" : snippet;
+    prefill += `> 你刚才的回答：\n> ${clipped.split("\n").join("\n> ")}\n\n`;
+  }
+  draft.value = prefill;
+  pendingMentions.value = [{ key, name: label }];
+  nextTick(() => {
+    const ta = document.querySelector(".dock .composer-input") as HTMLTextAreaElement | null;
+    if (ta) {
+      ta.focus();
+      const len = ta.value.length;
+      ta.setSelectionRange(len, len);
+    }
+  });
+  if (isGroup.value && activeConvo.value?.channel_mode === "off") {
+    ns.toast("频道已关闭：发送后仅记录，不会触发 AI 回复", "warn");
+  }
 }
 async function startWithProfile(profile: Profile) {
   landingProfileId.value = profile.id;
@@ -1155,12 +1192,18 @@ onUnmounted(() => {
                   <span v-if="r.status === 'streaming' && !r.text" class="typing"><span></span><span></span><span></span></span>
                   <div v-else class="md-body" v-html="md(r.text)" />
                 </div>
+                <!-- Files written by THIS AI land on its own card -->
+                <div v-if="r.files?.length" class="msg-files" style="margin-top:6px">
+                  <button v-for="f in r.files" :key="f.id" class="msg-file-chip" @click="openFile(f.id)">
+                    <Icon name="paperclip" :size="11" /> {{ f.name }}
+                  </button>
+                </div>
                 <!-- vote buttons -->
                 <div v-if="r.status !== 'streaming'" class="rt-vote">
                   <button :class="{ chosen: isChosen(chat.messages[row.index].id, idx) }" @click="toggleChosen(chat.messages[row.index].id, idx)">
                     <Icon name="check" :size="10" /> 采纳
                   </button>
-                  <button @click="followUp(r.agent_id, r.profile_id)">
+                  <button @click="followUp(r.agent_id, r.profile_id, r.text)">
                     <Icon name="chat" :size="10" /> 追问
                   </button>
                   <button @click="copyMessage(r.text)">
@@ -1381,6 +1424,7 @@ onUnmounted(() => {
           :group-agents="groupAgents"
           :group-members="groupMembers"
           :reply-to="replyTarget"
+          :initial-mentions="pendingMentions"
           @send="onSend"
           @typing="onComposerTyping"
           @cancel-reply="clearReply"
