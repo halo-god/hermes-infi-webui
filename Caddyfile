@@ -14,7 +14,12 @@ hermes.infiled.com:443 {
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
-		X-Frame-Options "DENY"
+		# SAMEORIGIN (not DENY): the WorkspacePanel renders PDF / office previews
+		# in a same-origin <iframe> (e.g. /api/v1/.../pdf). X-Frame-Options DENY
+		# made Chrome refuse to render them ("refused to connect") even though the
+		# request returns 200. SAMEORIGIN still blocks cross-origin clickjacking
+		# while letting our own preview iframes load.
+		X-Frame-Options "SAMEORIGIN"
 		X-XSS-Protection "1; mode=block"
 		Referrer-Policy "strict-origin-when-cross-origin"
 	}
