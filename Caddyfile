@@ -42,6 +42,21 @@ hermes.infiled.com:443 {
 	}
 }
 
+# OpenOcta 八爪鱼 Gateway (Control UI + WebSocket, 端口 18900)
+openocta.infiled.com:443 {
+	tls /home/hermes/openocta/CA/openocta.infiled.com.pem /home/hermes/openocta/CA/openocta.infiled.com.key
+
+	@websocket {
+		header Connection *Upgrade*
+		header Upgrade websocket
+	}
+	reverse_proxy @websocket 127.0.0.1:18900
+
+	handle {
+		reverse_proxy 127.0.0.1:18900
+	}
+}
+
 # LAN IP – plain HTTP only (certificate mismatch fix)
 192.168.30.31:80 {
 	# API backend
