@@ -50,7 +50,10 @@ def upgrade() -> None:
     )
     op.execute(
         "SELECT setval('messages_seq', "
-        "(SELECT COALESCE(MAX(seq), 0) FROM messages))"
+        # GREATEST(..., 1): setval rejects 0 (sequence minvalue is 1), which a
+        # fresh deployment hits on an empty messages table — without this
+        # guard `make migrate` fails on a brand-new database.
+        "GREATEST((SELECT COALESCE(MAX(seq), 0) FROM messages), 1), true)"
     )
     op.execute("CREATE INDEX ix_messages_conv_seq ON messages (conversation_id, seq)")
 
