@@ -4,12 +4,14 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, Sequence, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 from app.db.models.mixins import Timestamps, UUIDPrimaryKey
+
+_message_seq = Sequence("messages_seq", metadata=Base.metadata)
 
 
 class ConversationFolder(UUIDPrimaryKey, Timestamps, Base):
@@ -74,7 +76,7 @@ class Conversation(UUIDPrimaryKey, Timestamps, Base):
     messages: Mapped[list["Message"]] = relationship(
         back_populates="conversation",
         cascade="all, delete-orphan",
-        order_by="Message.created_at",
+        order_by="Message.seq",
     )
     group_members: Mapped[list["GroupMember"]] = relationship(
         back_populates="conversation",
@@ -90,12 +92,24 @@ class Message(UUIDPrimaryKey, Timestamps, Base):
         # declaring it here too makes create_all fail with "already exists".
         Index("ix_messages_owner_created", "owner_id", "created_at"),
         Index("ix_messages_mentions_gin", "mentions", postgresql_using="gin"),
+        Index("ix_messages_conv_seq", "conversation_id", "seq", postgresql_using="btree"),
     )
 
     conversation_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("conversations.id", ondelete="CASCADE"),
         index=True,
+    )
+    # Monotonic conversation ordering key (migration 0093). user/agent messages
+    # created in one transaction share created_at, so (created_at, id) ordering
+    # leaves the pair to random UUIDs — agent could sort before its user message.
+    # seq is assigned in insertion order (DB sequence), giving a stable total
+    # order and a cursor-safe pagination key for get_messages.
+    seq: Mapped[int] = mapped_column(
+        BigInteger,
+        _message_seq,
+        server_default=_message_seq.next_value(),
+        nullable=False,
     )
     owner_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True

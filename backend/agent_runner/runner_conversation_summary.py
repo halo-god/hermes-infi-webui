@@ -66,7 +66,7 @@ async def _load_transcript(
     res = await db.execute(
         select(Message)
         .where(Message.conversation_id == conversation_id)
-        .order_by(Message.created_at.asc())
+        .order_by(Message.seq.asc())
     )
     all_msgs = list(res.scalars().all())
     if not all_msgs:

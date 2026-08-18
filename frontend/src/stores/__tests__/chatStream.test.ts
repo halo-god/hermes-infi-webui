@@ -367,6 +367,17 @@ describe("stores/chatStream handlers", () => {
     expect(deps.messages.value[0].thinking).toBe("思考中");
   });
 
+  it("thought keeps accumulating after status leaves streaming (bug #2)", () => {
+    // The done/cancel event flips status the moment it lands; a thought delta
+    // that arrives after that (SSE ordering under cancellation) must still be
+    // accumulated — the old status===\"streaming\" guard dropped it, losing the
+    // reasoning trail mid-turn.
+    deps.messages.value = [baseMessage({ status: "complete", thinking: "已推理" })];
+    register();
+    stream.emit({ type: "thought", message_id: "m1", delta: "并继续" });
+    expect(deps.messages.value[0].thinking).toBe("已推理并继续");
+  });
+
   it("plan sets the plan entries", () => {
     deps.messages.value = [baseMessage({})];
     register();

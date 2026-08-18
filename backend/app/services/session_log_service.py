@@ -258,7 +258,7 @@ async def session_detail(db: AsyncSession, conversation_id: uuid.UUID) -> dict |
         await db.execute(
             select(Message)
             .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at)
+            .order_by(Message.seq)
         )
     ).scalars().all()
 

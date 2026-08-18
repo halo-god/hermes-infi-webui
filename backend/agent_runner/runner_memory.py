@@ -240,7 +240,7 @@ async def handle_memory_consolidate(task: dict, agents: dict) -> None:
                     await db.execute(
                         select(Message)
                         .where(Message.conversation_id.in_(list(convos_by_id.keys())))
-                        .order_by(Message.conversation_id, Message.created_at.asc())
+                        .order_by(Message.conversation_id, Message.seq.asc())
                     )
                 ).scalars().all()
             else:

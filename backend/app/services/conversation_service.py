@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from sqlalchemy import and_, delete, func, or_, select, tuple_
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -165,32 +165,24 @@ async def get_messages(
     When *limit* is given, returns only the most recent *limit* messages.
     *before_id* (cursor) fetches messages older than the given message id.
 
-    The cursor is a (created_at, id) tuple: user/agent message pairs share
-    the same server-side created_at timestamp (same transaction), so a
-    plain `created_at < ts` cursor would permanently skip the pair's other
-    half whenever the page boundary lands between them. The id tiebreak
-    keeps every message reachable exactly once.
+    The cursor is the monotonic ``seq`` column (migration 0093). user/agent
+    message pairs share the same server-side created_at (same transaction),
+    so a ``created_at`` cursor can't order them deterministically and mixing a
+    role tie-break into a (created_at, id) cursor splits a pair across a page
+    boundary (one half duplicated, the other permanently skipped). ``seq`` is
+    assigned in insertion order, giving a stable total order AND a cursor-safe
+    key — every message reachable exactly once, user always before agent.
     """
     stmt = (
         select(Message)
         .where(Message.conversation_id == conversation_id)
     )
     if before_id:
-        # Sub-select to get the cursor's (created_at, id) pair.
-        cursor = (
-            select(Message.created_at, Message.id)
-            .where(Message.id == before_id)
-            .subquery()
+        cursor_seq = (
+            select(Message.seq).where(Message.id == before_id).scalar_subquery()
         )
-        stmt = stmt.where(
-            tuple_(Message.created_at, Message.id)
-            < tuple_(cursor.c.created_at, cursor.c.id)
-        )
-    # Ordering must use the SAME key as the cursor: (created_at, id). Sorting
-    # by (created_at desc, role asc) with a (created_at, id) cursor made pages
-    # split inside a same-timestamp user/agent pair — one of the two messages
-    # was duplicated or permanently skipped on every other page turn.
-    stmt = stmt.order_by(Message.created_at.desc(), Message.id.desc())
+        stmt = stmt.where(Message.seq < cursor_seq)
+    stmt = stmt.order_by(Message.seq.desc())
     if limit:
         stmt = stmt.limit(limit)
     res = await db.execute(stmt)
@@ -2110,16 +2102,14 @@ async def fork_conversation(
     if cut_msg is None:
         raise ValueError("cut message not found in conversation")
     # Load in CONVERSATION order (created_at asc, user before agent) so the
-    # cut position is unambiguous: a user/agent pair shares one created_at and
-    # get_messages' desc order would place the pair by random id, silently
-    # dropping the user message when cutting at the agent reply.
-    from sqlalchemy import case as _case
-    _role_order = _case((Message.role == "user", 0), else_=1)
+    # cut position is unambiguous: user/agent pairs share one created_at, so the
+    # deterministic conversation order is the monotonic seq column (migration
+    # 0093) — user before agent, stable across get_messages pagination too.
     all_msgs = (
         await db.execute(
             select(Message)
             .where(Message.conversation_id == source_id)
-            .order_by(Message.created_at.asc(), _role_order, Message.id.asc())
+            .order_by(Message.seq.asc())
             .limit(500)  # cap to prevent OOM on long conversations
         )
     ).scalars().all()

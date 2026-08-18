@@ -271,7 +271,13 @@ export function registerStreamHandlers(
 
   stream.on("thought", scoped((ev) => {
     const m = find(ev.message_id);
-    if (m && m.status === "streaming") { m.thinking = (m.thinking || "") + ev.delta; triggerMessages(); }
+    // No status guard here: the done/cancel event flips status to complete /
+    // cancelled the moment it lands, and any thinking delta that arrives after
+    // that (SSE ordering under cancellation) must still be accumulated —
+    // otherwise the reasoning trail is silently dropped mid-turn. The runner
+    // also persists content.thinking on finalize (complete AND cancelled), so
+    // this is purely the live-streaming accumulator.
+    if (m) { m.thinking = (m.thinking || "") + ev.delta; triggerMessages(); }
   }, activeId));
 
   stream.on("plan", scoped((ev) => {

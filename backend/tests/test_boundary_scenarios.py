@@ -76,6 +76,36 @@ async def test_pagination_no_dup_or_skip_same_timestamp_pairs(db):
     assert len(ids1) + len(ids2) + len(ids3) == 12, "messages skipped across pages"
 
 
+@pytest.mark.asyncio
+async def test_get_messages_user_before_agent_same_timestamp(db):
+    """Regression (bug #1): a user/agent pair created in one transaction shares
+    created_at to the microsecond; ordering must come from the monotonic seq
+    column (migration 0093), NOT random UUID id — otherwise the agent reply can
+    sort before its triggering user message (observed live: agent 086add1c
+    before user a802e88d, identical .052286 timestamp)."""
+    owner = await _mk_user(db, "order@h.io")
+    convo = await _mk_convo(db, owner)
+    ts = datetime.now(timezone.utc)
+    db.add_all([
+        Message(
+            conversation_id=convo.id, owner_id=owner.id, role="user",
+            content={"text": "用户问题"}, status="complete", created_at=ts,
+        ),
+        Message(
+            conversation_id=convo.id, role="agent", agent_id="hermes",
+            content={"text": "助手回答"}, status="complete", created_at=ts,
+        ),
+    ])
+    await db.flush()
+
+    msgs = await svc.get_messages(db, convo.id)
+    assert [m.role for m in msgs] == ["user", "agent"], \
+        f"user must precede agent despite shared created_at, got {[m.role for m in msgs]}"
+    # And the pair's seq must be monotonic in the same direction.
+    assert msgs[0].seq < msgs[1].seq
+
+
+
 # ── Fork cut-point validation + tombstone propagation ───────────────────
 
 

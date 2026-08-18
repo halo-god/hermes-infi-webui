@@ -903,14 +903,41 @@ function displayHtml(text: string): string {
 }
 
 // ── Agent working phase display ──
+// Live elapsed-time ticker: long-running turns (a heavy doc generation can
+// take minutes with no text) show a static "推理中…" that users read as frozen
+// and cancel. Ticking nowTick once a second lets the phase bubble report how
+// long the agent has actually been working, so it reads as alive.
+const nowTick = ref(Date.now());
+let elapsedTimer: number | null = null;
+watch(chat.streaming, (isStreaming) => {
+  if (isStreaming && elapsedTimer == null) {
+    nowTick.value = Date.now();
+    elapsedTimer = window.setInterval(() => { nowTick.value = Date.now(); }, 1000);
+  } else if (!isStreaming && elapsedTimer != null) {
+    clearInterval(elapsedTimer);
+    elapsedTimer = null;
+  }
+});
+
+function formatElapsed(msg: Message): string {
+  const start = new Date(msg.created_at ?? "").getTime();
+  if (Number.isNaN(start)) return "";
+  const secs = Math.max(0, Math.floor((nowTick.value - start) / 1000));
+  if (secs < 60) return `${secs} 秒`;
+  return `${Math.floor(secs / 60)} 分 ${secs % 60} 秒`;
+}
+
 function getAgentPhase(msg: Message): string | null {
   if (msg.status !== "streaming") return null;
   const hasText = (msg.content.text?.length ?? 0) > 0;
   if (hasText) return null;
   const runningStep = (msg.steps || []).find(s => s.status === "running" || s.status === "started");
-  if (runningStep) return `🔧 ${runningStep.title}`;
-  if (msg.thinking && !hasText) return "💭 推理中…";
-  return "🔍 分析问题…";
+  let phase: string;
+  if (runningStep) phase = `🔧 ${runningStep.title}`;
+  else if (msg.thinking && !hasText) phase = "💭 推理中…";
+  else phase = "🔍 分析问题…";
+  const elapsed = formatElapsed(msg);
+  return elapsed ? `${phase} · 已运行 ${elapsed}` : phase;
 }
 
 // ── Regenerate ──
@@ -985,6 +1012,7 @@ function onGlobalKey(e: KeyboardEvent) {
 onMounted(() => window.addEventListener("keydown", onGlobalKey));
 onUnmounted(() => {
   window.removeEventListener("keydown", onGlobalKey);
+  if (elapsedTimer != null) { clearInterval(elapsedTimer); elapsedTimer = null; }
   // Clean up IntersectionObserver to prevent memory + callback leaks.
   observer?.disconnect();
   observer = null;
