@@ -43,14 +43,14 @@ async def test_create_conversation_no_auth(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_create_group_requires_team(client: AsyncClient, auth_headers):
-    """Test creating group chat requires team_id."""
+async def test_create_group_without_team_is_allowed(client: AsyncClient, auth_headers):
+    """team_id optional since bfca9b4 — personal (non-team) group chats are
+    valid; the old assertion (422 without team_id) tested the pre-fix schema."""
     resp = await client.post("/api/v1/conversations/group", json={
         "title": "Test Group",
         "member_agent_ids": ["hermes"],
     }, headers=auth_headers)
-    # Should fail without team_id (422 validation error)
-    assert resp.status_code == 422
+    assert resp.status_code == 201
 
 
 @pytest.mark.asyncio

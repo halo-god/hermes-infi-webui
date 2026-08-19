@@ -63,6 +63,15 @@ jobs:
         working-directory: backend
         run: ruff check .
 
+      - name: Verify config catalog freshness
+        # Regenerate docs/配置目录.md from app/config.py and diff — the doc
+        # can never drift from the settings schema (borrowed from the
+        # generated-docs loop popularized by agent frameworks like dsh).
+        working-directory: backend
+        run: |
+          python scripts/gen_config_catalog.py
+          git diff --exit-code -- ../docs/配置目录.md
+
       - name: Run migrations
         working-directory: backend
         env:

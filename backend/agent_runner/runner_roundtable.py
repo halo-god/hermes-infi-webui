@@ -21,6 +21,9 @@ from agent_runner.acp_persona import (
     wrap_persona_prompt,
 )
 from agent_runner.call_log import CallCollector
+from agent_runner.metrics import TOOL_GOVERNANCE
+from agent_runner.runner import is_tool_authorised, load_high_risk_server_names
+from agent_runner.tool_governance import ToolGovernancePipeline
 
 logger = logging.getLogger("hermes.runner")
 
@@ -74,6 +77,11 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
     cwd = os.path.join(settings.workspace_root, conversation_id)
     os.makedirs(cwd, exist_ok=True)
 
+    # Tool governance shared by every slot (risk guard active immediately;
+    # iteration cap arms once the payload carries max_iterations).
+    governance = ToolGovernancePipeline(await load_high_risk_server_names())
+    rt_max_iterations = int(task.get("max_iterations") or 0)
+
     slots = []
     for i, t in enumerate(targets):
         aid = t["agent_id"]
@@ -96,7 +104,11 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
         slot has produced a usable answer."""
         aid = target["agent_id"]
         agent = agents.get(aid) or agents.get("hermes")
-        buf = {"text": "", "thinking": ""}
+        buf = {"text": "", "thinking": "", "tool_calls": 0}
+        slot_authorised: set[str] = set()  # high-risk names authorised this slot
+        # Late-bound client ref so on_update (defined before `client` exists)
+        # can cancel the slot's prompt on a governance denial.
+        client_ref: dict = {"client": None}
         reply_status = "complete"
         # Per-slot call collector: every slot shares the roundtable message_id,
         # so calls are attributed per AI via agent_id when persisted.
@@ -164,6 +176,54 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
                     tool_kind=content.get("tool_kind") or update.get("tool_kind"),
                     tool_call_id=update.get("toolCallId") or update.get("tool_call_id"),
                 )
+                # Tool governance — roundtable slots previously ran tool
+                # calls with NO risk guard at all (the guard only existed in
+                # handle_single). Same pipeline, same authorisation cache.
+                buf["tool_calls"] = buf.get("tool_calls", 0) + 1
+                if not buf.get("gov_blocked"):
+                    decision = governance.check(
+                        title=update.get("title") or "",
+                        tool_calls=buf["tool_calls"],
+                        max_iterations=rt_max_iterations,
+                        iter_capped=buf.get("iter_capped", False),
+                    )
+                    if not decision.allowed and decision.reason == "iteration_cap":
+                        buf["iter_capped"] = True
+                        buf["gov_blocked"] = True
+                        TOOL_GOVERNANCE.labels(decision="denied", reason="iteration_cap").inc()
+                        c = client_ref["client"]
+                        if c is not None:
+                            try:
+                                await c.cancel()
+                            except Exception:  # noqa: BLE001
+                                logger.debug("slot cancel failed (cap)", exc_info=True)
+                        await R.publish_event(conversation_id, {
+                            "type": "iteration_warning", "message_id": message_id,
+                            "slot": slot,
+                            "tool_calls": decision.extra["tool_calls"],
+                            "limit": decision.extra["limit"],
+                            "reason": decision.reason,
+                        })
+                    elif decision.risk_hit and decision.risk_hit not in slot_authorised:
+                        if await is_tool_authorised(conversation_id, decision.risk_hit):
+                            slot_authorised.add(decision.risk_hit)
+                            TOOL_GOVERNANCE.labels(decision="allowed", reason="risk_authorised").inc()
+                        else:
+                            buf["gov_blocked"] = True
+                            TOOL_GOVERNANCE.labels(decision="denied", reason="high_risk_unauthorised").inc()
+                            c = client_ref["client"]
+                            if c is not None:
+                                try:
+                                    await c.cancel()
+                                except Exception:  # noqa: BLE001
+                                    logger.debug("slot cancel failed (risk)", exc_info=True)
+                            await R.publish_event(conversation_id, {
+                                "type": "tool_blocked", "message_id": message_id,
+                                "slot": slot,
+                                "tool": decision.risk_hit,
+                                "title": decision.title or "",
+                                "reason": "high_risk_unauthorised",
+                            })
 
         async def on_fs(path: str, content: str) -> None:
             f = await storage.save_file(uuid.UUID(conversation_id), path, content, aid, uuid.UUID(message_id))
@@ -188,6 +248,7 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
             agent.command, cwd, on_update=on_update, on_fs_write=on_fs,
             profile_dir=target.get("profile_dir"),
         )
+        client_ref["client"] = client
         try:
             session_id = await start_persona_session(client, cwd, target.get("mcp_servers"))
             # Nobody can answer an interactive clarify modal mid-roundtable —

@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core import redis as R
 from app.db.base import async_session_maker
 from app.db.models.conversation import Conversation, ConversationSummary, Message
 from app.services import summarizer
@@ -165,3 +166,15 @@ async def handle_conversation_summary(task: dict) -> None:
             "Summarised conv %s: +%s msgs, %s total covered, ~%s tokens",
             conversation_id_str[:8], count, covered_count, tokens,
         )
+        # Make the compaction auditable on the live stream (previously the
+        # summary was a pure DB side-effect invisible to the conversation).
+        try:
+            await R.publish_event(conversation_id_str, {
+                "type": "summary_generated",
+                "conversation_id": conversation_id_str,
+                "covered_count": covered_count,
+                "token_estimate": tokens,
+                "preview": merged[:80],
+            })
+        except Exception:  # noqa: BLE001 — the summary is already persisted
+            logger.debug("failed to publish summary_generated", exc_info=True)

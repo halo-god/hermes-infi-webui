@@ -547,6 +547,9 @@ export interface RtAgentMeta {
 // Event frames from the agent runner (SSE single-agent + WS roundtable).
 // `conversation_id` is injected centrally by the backend so handlers can drop
 // events that belong to another conversation (switch-while-streaming).
+// Envelope fields injected by the backend publish choke point:
+//   ts — ISO-8601 UTC timestamp; v — true for volatile/droppable deltas;
+//   _sid — the Redis stream entry id (WS frames only), usable as a resume cursor.
 export type StreamEvent = (
   | { type: "start"; message_id: string; agent_id?: string; profile_id?: string }
   | { type: "token"; message_id: string; delta: string }
@@ -556,6 +559,7 @@ export type StreamEvent = (
   | { type: "error"; message_id: string; detail: string }
   | { type: "rt_start"; message_id: string; agents: RtAgentMeta[] }
   | { type: "rt_token"; message_id: string; slot: number; delta: string }
+  | { type: "rt_thought"; message_id: string; slot: number; delta: string }
   | { type: "rt_reply_done"; message_id: string; slot: number; status?: RoundtableReply["status"] }
   | { type: "merge_start"; message_id: string }
   | { type: "merge_token"; message_id: string; delta: string }
@@ -565,6 +569,9 @@ export type StreamEvent = (
   | { type: "thought"; message_id: string; delta: string }
   | { type: "plan"; message_id: string; entries: PlanEntry[] }
   | { type: "usage"; message_id: string; input_tokens?: number; output_tokens?: number; context_size?: number; context_used?: number }
+  | { type: "compression_warning"; message_id: string; tokens: number; limit: number }
+  | { type: "summary_generated"; conversation_id: string; covered_count: number; token_estimate: number; preview?: string }
+  | { type: "elicitation_request"; message_id: string; request_id: string; question: string; schema?: unknown }
   | { type: "session_info"; title?: string }
   | { type: "message"; message: Message }
   | { type: "message_update"; message_id: string; patch: Partial<Message> }
@@ -579,7 +586,7 @@ export type StreamEvent = (
   | { type: "chain_start"; message_id: string; agents: { agent_id: string; profile_id: string | null; slot: number; label: string; color: string }[] }
   | { type: "chain_step_token"; message_id: string; slot: number; delta: string }
   | { type: "chain_step_done"; message_id: string; slot: number; status: string }
-) & { conversation_id?: string };
+) & { conversation_id?: string; ts?: string; v?: boolean; _sid?: string };
 
 // ── Teams / projects / tasks (P3 backend; frontend added here) ──
 export interface Team {

@@ -56,3 +56,10 @@ DLQ_MESSAGES = Counter(
     "Messages sent to dead letter queue",
     ["reason"],
 )
+
+# Tool governance (risk guard + iteration cap) decisions across executors.
+TOOL_GOVERNANCE = Counter(
+    "hermes_runner_tool_governance_total",
+    "Tool-governance pipeline decisions",
+    ["decision", "reason"],
+)

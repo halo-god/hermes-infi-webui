@@ -51,7 +51,9 @@ from agent_runner.metrics import (
     TASK_DURATION,
     DLQ_MESSAGES,
     REDIS_OPS_FAILED,
+    TOOL_GOVERNANCE,
 )
+from agent_runner.tool_governance import ToolGovernancePipeline
 
 logger = logging.getLogger("hermes.runner")
 
@@ -126,6 +128,41 @@ RETRY_BACKOFF_BASE = 2  # exponential backoff base: 2^attempt seconds, capped at
 CONV_LOCK_TTL = 900 + 300
 # Cap on the in-process per-conversation lock dict (LRU eviction).
 CONV_LOCK_MAX = 1024
+
+
+async def load_high_risk_server_names() -> set[str]:
+    """P2-3: names of MCP servers flagged write/destructive in the admin
+    catalog. Read once per turn (cheap single-row system_settings lookup).
+    Disabled servers are excluded — they aren't injected into the session,
+    so their names must not trigger the tool-risk guard either.
+
+    Module-level so non-Runner executors (roundtable/chain/subagent) share
+    the same risk map."""
+    try:
+        async with async_session_maker() as db:
+            from app.services import settings_service
+            row = await settings_service.get(db)
+            servers = (row.data or {}).get("mcp_servers", []) if row else []
+            return {
+                s["name"] for s in servers
+                if s.get("risk_level") in ("write", "destructive")
+                and s.get("name")
+                and s.get("enabled", True)
+            }
+    except Exception:  # noqa: BLE001 — never break a turn over the risk map
+        logger.debug("failed to load high-risk server names", exc_info=True)
+        return set()
+
+
+async def is_tool_authorised(conversation_id: str, tool_name: str) -> bool:
+    """P2-3: check the per-conversation authorisation cache. Set by the
+    authorise-tool API after the user confirms a high-risk tool once."""
+    try:
+        redis = R.get_redis()
+        val = await redis.get(f"tool_auth:{conversation_id}:{tool_name}")
+        return val is not None
+    except Exception:
+        return False
 
 
 class Runner:
@@ -979,6 +1016,7 @@ class Runner:
         # a one-time confirmation (cached per-conversation in Redis).
         high_risk_names = await self._load_high_risk_server_names()
         risk_checked: set[str] = set()  # names already authorised this turn
+        governance = ToolGovernancePipeline(high_risk_names)
 
         async def on_update(update: dict) -> None:
             kind = update.get("sessionUpdate")
@@ -1025,16 +1063,23 @@ class Runner:
                         "tool_kind": tool_kind,
                     },
                 )
+                # ── Tool governance (unified pipeline) ──
+                # Cap first, then risk guard — same ordering as before the
+                # pipeline extraction; both now live in tool_governance.py so
+                # roundtable/chain/subagent executors can share them.
+                decision = governance.check(
+                    title=step.get("title") or "",
+                    tool_calls=acc["tool_calls"],
+                    max_iterations=max_iterations,
+                    iter_capped=acc["iter_capped"],
+                )
                 # Circuit breaker: once a turn crosses the per-profile cap, mark
                 # the turn cancelled and fire session/cancel so the ACP loop
                 # unwinds instead of burning tokens until the 900s hard timeout.
-                if (
-                    max_iterations
-                    and not acc["iter_capped"]
-                    and acc["tool_calls"] >= max_iterations
-                ):
+                if not decision.allowed and decision.reason == "iteration_cap":
                     acc["iter_capped"] = True
                     acc["cancelled"] = True
+                    TOOL_GOVERNANCE.labels(decision="denied", reason="iteration_cap").inc()
                     logger.warning(
                         "Iteration cap hit: %s tool_calls >= %s for conv=%s — cancelling session",
                         acc["tool_calls"], max_iterations, conversation_id[:8],
@@ -1050,26 +1095,28 @@ class Runner:
                         {
                             "type": "iteration_warning",
                             "message_id": acc["current_msg_id"],
-                            "tool_calls": acc["tool_calls"],
-                            "limit": max_iterations,
+                            "tool_calls": decision.extra["tool_calls"],
+                            "limit": decision.extra["limit"],
+                            "reason": decision.reason,
                         },
                     )
-                # P2-3 tool risk guard: a tool_call whose title references a
-                # high-risk MCP server (write/destructive) and hasn't been
-                # authorised for this conversation yet blocks the turn. ACP
-                # can't intercept a single tool pre-execution, so we cancel the
-                # session to stop further actions and surface the block to the
-                # user — they can re-run after authorising via the UI.
-                if high_risk_names and not acc["cancelled"]:
-                    title = (step.get("title") or "")
-                    hit = next((n for n in high_risk_names if n and n in title), None)
-                    if hit and hit not in risk_checked:
+                elif decision.risk_hit and not acc["cancelled"]:
+                    # P2-3 tool risk guard: a tool_call whose title references a
+                    # high-risk MCP server (write/destructive) and hasn't been
+                    # authorised for this conversation yet blocks the turn. ACP
+                    # can't intercept a single tool pre-execution, so we cancel the
+                    # session to stop further actions and surface the block to the
+                    # user — they can re-run after authorising via the UI.
+                    hit = decision.risk_hit
+                    if hit not in risk_checked:
                         authorised = await self._is_tool_authorised(conversation_id, hit)
                         if authorised:
                             risk_checked.add(hit)
+                            TOOL_GOVERNANCE.labels(decision="allowed", reason="risk_authorised").inc()
                         else:
                             acc["cancelled"] = True
                             acc["risk_blocked"] = hit
+                            TOOL_GOVERNANCE.labels(decision="denied", reason="high_risk_unauthorised").inc()
                             c = client_ref["client"]
                             if c is not None:
                                 try:
@@ -1082,9 +1129,12 @@ class Runner:
                                     "type": "tool_blocked",
                                     "message_id": acc["current_msg_id"],
                                     "tool": hit,
-                                    "title": title,
+                                    "title": decision.title or "",
+                                    "reason": "high_risk_unauthorised",
                                 },
                             )
+                else:
+                    TOOL_GOVERNANCE.labels(decision="allowed", reason="none").inc()
             elif kind in ("agent_thought_chunk", "agent_thought"):
                 # ACP v1 spec uses "agent_thought_chunk"; keep "agent_thought" as
                 # a fallback for older hermes-agent versions that may emit it.
@@ -1935,34 +1985,12 @@ class Runner:
                 await db.commit()
 
     async def _load_high_risk_server_names(self) -> set[str]:
-        """P2-3: names of MCP servers flagged write/destructive in the admin
-        catalog. Read once per turn (cheap single-row system_settings lookup).
-        Disabled servers are excluded — they aren't injected into the session,
-        so their names must not trigger the tool-risk guard either."""
-        try:
-            async with async_session_maker() as db:
-                from app.services import settings_service
-                row = await settings_service.get(db)
-                servers = (row.data or {}).get("mcp_servers", []) if row else []
-                return {
-                    s["name"] for s in servers
-                    if s.get("risk_level") in ("write", "destructive")
-                    and s.get("name")
-                    and s.get("enabled", True)
-                }
-        except Exception:  # noqa: BLE001 — never break a turn over the risk map
-            logger.debug("failed to load high-risk server names", exc_info=True)
-            return set()
+        """Delegate to the module-level loader (shared with other executors)."""
+        return await load_high_risk_server_names()
 
     async def _is_tool_authorised(self, conversation_id: str, tool_name: str) -> bool:
-        """P2-3: check the per-conversation authorisation cache. Set by the
-        authorise-tool API after the user confirms a high-risk tool once."""
-        try:
-            redis = R.get_redis()
-            val = await redis.get(f"tool_auth:{conversation_id}:{tool_name}")
-            return val is not None
-        except Exception:
-            return False
+        """Delegate to the module-level authorisation check."""
+        return await is_tool_authorised(conversation_id, tool_name)
 
     async def _update_conv_title(self, conversation_id: str, title: str) -> None:
         from sqlalchemy import update as sa_upd

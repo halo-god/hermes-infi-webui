@@ -909,7 +909,9 @@ function displayHtml(text: string): string {
 // long the agent has actually been working, so it reads as alive.
 const nowTick = ref(Date.now());
 let elapsedTimer: number | null = null;
-watch(chat.streaming, (isStreaming) => {
+// Getter form: chat.streaming unwraps to a boolean on the store proxy, and
+// watch() overloads reject a raw boolean source.
+watch(() => chat.streaming, (isStreaming) => {
   if (isStreaming && elapsedTimer == null) {
     nowTick.value = Date.now();
     elapsedTimer = window.setInterval(() => { nowTick.value = Date.now(); }, 1000);

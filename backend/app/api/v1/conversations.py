@@ -767,6 +767,16 @@ async def conversation_ws(
             entries = await redis_core.read_events(cid, last_id, block_ms=2000)
             for entry_id, data in entries:
                 last_id = entry_id
+                # SSE frames carry the stream entry id; WS frames historically
+                # dropped it, leaving socket clients with no resume cursor.
+                # Inject it into the payload — consumers ignore unknown fields.
+                try:
+                    stamped = json.loads(data)
+                    if isinstance(stamped, dict):
+                        stamped["_sid"] = entry_id
+                        data = json.dumps(stamped)
+                except ValueError:
+                    pass
                 await websocket.send_text(data)
 
     out_task = asyncio.create_task(pump_out())

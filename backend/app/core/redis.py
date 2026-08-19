@@ -122,6 +122,34 @@ def conv_stream(conversation_id: str) -> str:
     return f"evt:conv:{conversation_id}"
 
 
+# Volatile event types: droppable deltas whose loss on replay is harmless —
+# `done` always carries the full final text, so a replayed stream can resync
+# from it. Non-volatile events (done/error/confirmation_*/file/…) must be
+# delivered to keep UI state consistent.
+VOLATILE_EVENT_TYPES = frozenset({
+    "token", "thought", "user_token",
+    "rt_token", "rt_thought", "merge_token", "chain_step_token",
+    "typing",
+})
+
+
+def _stamp_envelope(event: dict) -> dict:
+    """Inject the normalized envelope fields (single choke point for both the
+    conversation and user streams):
+
+    - ``ts``: ISO-8601 UTC timestamp — the Redis entry id's ms part never
+      propagates into the payload, and WS consumers get no entry id at all.
+    - ``v``: True for volatile/droppable deltas (VOLATILE_EVENT_TYPES) so
+      replay consumers can tell loss-tolerant increments from critical ones.
+    """
+    import datetime as _dt  # noqa: E402 — keep the module header unchanged
+
+    event.setdefault("ts", _dt.datetime.now(_dt.timezone.utc).isoformat())
+    if event.get("type") in VOLATILE_EVENT_TYPES:
+        event.setdefault("v", True)
+    return event
+
+
 def cancel_key(conversation_id: str) -> str:
     return f"acp:cancel:{conversation_id}"
 
@@ -137,6 +165,7 @@ async def publish_event(conversation_id: str, event: dict) -> None:
     Retries once: a transient Redis blip must not permanently drop tokens.
     """
     event.setdefault("conversation_id", conversation_id)
+    _stamp_envelope(event)
     payload = _json.dumps(event)
     key = conv_stream(conversation_id)
     for attempt in (1, 2):
@@ -190,6 +219,7 @@ def user_stream(user_id: str) -> str:
 async def publish_user_event(user_id: str, event: dict) -> None:
     """Append a notification event to a user's personal stream (best-effort)."""
     event.setdefault("user_id", str(user_id))
+    _stamp_envelope(event)
     payload = _json.dumps(event)
     key = user_stream(str(user_id))
     for attempt in (1, 2):
