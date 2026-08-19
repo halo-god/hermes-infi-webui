@@ -317,14 +317,14 @@ async def notify_project_members(
     r = redis_core.get_redis()
     pipe = r.pipeline()
     for uid in member_ids:
-        event = _json.dumps({
+        event = _json.dumps(redis_core.stamp_event_envelope({
             "type": "notify",
             "conversation_id": None,
             "project_id": str(project.id),
             "title": title,
             "snippet": snippet[:80],
             "mention": False,
-        })
+        }))
         pipe.xadd(
             redis_core.user_stream(uid), {"data": event},
             maxlen=redis_core.USER_STREAM_MAXLEN, approximate=True,

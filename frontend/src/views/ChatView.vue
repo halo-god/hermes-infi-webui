@@ -1208,12 +1208,25 @@ onUnmounted(() => {
                 <!-- roundtable -->
                 <div v-if="chat.messages[row.index].role === 'roundtable'" class="roundtable">
               <div class="roundtable-label">{{ chat.messages[row.index].content.moa ? "MoA 混合模型" : "圆桌" }} · {{ chat.messages[row.index].content.replies?.length || 0 }} 位助手并行作答</div>
+              <!-- Governance hits land on the RT message itself (tool_blocked
+                   events reference the roundtable message_id); surface the same
+                   inline authorise-and-retry affordance single-agent turns get. -->
+              <div v-if="chat.messages[row.index].risk_blocked || chat.messages[row.index].iter_capped" class="msg-cancelled-tag" :class="{ 'iter-capped': chat.messages[row.index].iter_capped, 'risk-blocked': chat.messages[row.index].risk_blocked }">
+                <Icon name="stop" :size="11" />
+                <template v-if="chat.messages[row.index].risk_blocked">
+                  已拦截高危工具「{{ chat.messages[row.index].risk_blocked?.tool }}」调用并停止该助手作答。
+                  <button class="inline-authorise-btn" @click="authoriseTool(chat.messages[row.index].risk_blocked!.tool); regenerate(chat.messages[row.index].id)">授权并重试</button>
+                </template>
+                <template v-else-if="chat.messages[row.index].iter_capped">
+                  某位助手已达迭代上限（{{ chat.messages[row.index].iter_capped?.tool_calls }}/{{ chat.messages[row.index].iter_capped?.limit }} 次工具调用），已停止其作答
+                </template>
+              </div>
               <div v-for="(r, idx) in chat.messages[row.index].content.replies" :key="idx" class="rt-card">
                 <div class="rt-card-head">
                   <span class="rt-avatar" :style="{ background: rtProfileDisplay(r.agent_id, r.profile_id).color }"><Icon :name="rtProfileDisplay(r.agent_id, r.profile_id).icon" :size="11" /></span>
                   <span class="rt-name">{{ rtProfileDisplay(r.agent_id, r.profile_id).label }}</span>
                   <span class="rt-stance">— {{ rtProfileDisplay(r.agent_id, r.profile_id).description }}</span>
-                  <span class="rt-status" :class="r.status">{{ r.status === 'streaming' ? '生成中' : r.status === 'error' ? '作答失败' : r.status === 'timeout' ? '超时' : '完成' }}</span>
+                  <span class="rt-status" :class="r.status">{{ r.status === 'streaming' ? '生成中' : r.status === 'error' ? '作答失败' : r.status === 'timeout' ? '超时' : r.status === 'blocked' ? '已拦截' : '完成' }}</span>
                 </div>
                 <div v-if="chat.messages[row.index].status === 'streaming'" class="rt-progress-wrap">
                   <div class="rt-progress-bar" :style="{ width: rtProgress(chat.messages[row.index].content.replies || [])[idx] + '%' }" :class="{ done: r.status === 'complete' }"></div>

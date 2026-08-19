@@ -85,6 +85,7 @@ export function useStream(onGiveUp?: () => void) {
     // Type-specific handlers
     const typed = handlers.get(ev.type);
     if (typed) typed.forEach((fn) => fn(ev));
+    else console.debug("[stream] unhandled event:", ev.type);
     // Wildcard handlers
     const wildcard = handlers.get("*");
     if (wildcard) wildcard.forEach((fn) => fn(ev));

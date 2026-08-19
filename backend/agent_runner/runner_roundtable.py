@@ -179,7 +179,11 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
                 # Tool governance — roundtable slots previously ran tool
                 # calls with NO risk guard at all (the guard only existed in
                 # handle_single). Same pipeline, same authorisation cache.
-                buf["tool_calls"] = buf.get("tool_calls", 0) + 1
+                # Count once per call: hermes emits either a single tool_call
+                # or a begin/end pair — counting end too would double-count and
+                # fire the cap at ~half threshold (handle_single counts the same way).
+                if kind in ("tool_call", "tool_call_begin"):
+                    buf["tool_calls"] = buf.get("tool_calls", 0) + 1
                 if not buf.get("gov_blocked"):
                     decision = governance.check(
                         title=update.get("title") or "",
@@ -268,6 +272,12 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
             buf["text"] = buf["text"] or "（该助手作答失败）"
         finally:
             await client.stop()
+        # Governance hit (risk guard / iteration cap): the cancel made prompt()
+        # return normally, but the slot must NOT be reported complete — its
+        # partial text would flow into the merge prompt and persist as a
+        # finished answer. Mark it blocked so ok_slots excludes it.
+        if buf.get("gov_blocked") and reply_status == "complete":
+            reply_status = "blocked"
         await R.publish_event(
             conversation_id,
             {"type": "rt_reply_done", "message_id": message_id, "slot": slot, "status": reply_status},

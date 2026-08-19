@@ -178,3 +178,51 @@ async def test_remove_group_member_directly(db):
     await svc.remove_group_member(db, group.id, user_id=member.id)
     members = await svc.get_group_members(db, group.id)
     assert all(m.user_id != member.id for m in members)
+
+
+async def test_send_roundtable_payload_carries_max_iterations(db, monkeypatch):
+    """The roundtable payload must carry max_iterations (highest per-profile
+    cap) or the runner-side iteration cap is dead code."""
+    from app.core import redis as redis_core
+    from app.db.models.agent import Profile
+    from app.services import conversation_service as svc2
+
+    owner = await _mk_user(db, "cs-rt@h.io")
+    convo = await _mk_convo(db, owner)
+    p1 = Profile(
+        id=uuid.uuid4(), name="P1", handle="rt-p1", default_agent_id="hermes",
+        is_active=True, max_iterations=10,
+    )
+    p2 = Profile(
+        id=uuid.uuid4(), name="P2", handle="rt-p2", default_agent_id="hermes",
+        is_active=True, max_iterations=30,
+    )
+    # NOTE: max_iterations is NOT NULL with column default 50 — passing
+    # None would just get 50 back, so "unlimited" isn't representable here.
+    p_none = Profile(
+        id=uuid.uuid4(), name="P3", handle="rt-p3", default_agent_id="hermes",
+        is_active=True,
+    )
+    db.add_all([p1, p2, p_none])
+    await db.commit()
+
+    calls = []
+    async def _enqueue(payload):
+        calls.append(payload)
+        return "1"
+    async def _noop(*a, **k):
+        return None
+    monkeypatch.setattr(redis_core, "enqueue_prompt", _enqueue)
+    monkeypatch.setattr(redis_core, "clear_cancel", _noop)
+
+    targets = [
+        {"agent_id": "hermes", "profile_id": str(p.id), "system_prompt": None,
+         "profile_dir": None, "mcp_servers": []}
+        for p in (p1, p2, p_none)
+    ]
+    await svc2.send_roundtable(db, convo, "圆桌测试", targets, owner_id=owner.id)
+
+    assert calls, "roundtable task must be enqueued"
+    payload = calls[0]
+    # Highest cap among participants (p_none got the column default 50).
+    assert payload["max_iterations"] == 50

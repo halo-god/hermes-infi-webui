@@ -50,7 +50,7 @@ interface DepsBag {
   activeId: Ref<string | null>;
   messages: Ref<Message[]>;
   conversations: Ref<{ id: string; title: string }[]>;
-  pendingConfirmations: Ref<{ id: string; question?: string }[]>;
+  pendingConfirmations: Ref<{ id: string; question?: string; questions?: { question: string; options?: string[]; allow_free_text?: boolean }[] }[]>;
   contextTokens: Ref<number>;
   contextSize: Ref<number>;
   files: Ref<{ id: string; processing_status?: string }[]>;
@@ -490,7 +490,33 @@ describe("stores/chatStream handlers", () => {
       expect(deps.pendingConfirmations.value).toHaveLength(0);
     });
 
-    it("clarify_auto pushes an info notification", () => {
+    it("elicitation_request surfaces a free-text confirmation modal", () => {
+    // Blocking event: the runner waits on confirm:{cid}:{request_id} —
+    // without a modal the turn stalls until the 240s timeout.
+    register();
+    stream.emit({
+      type: "elicitation_request",
+      message_id: "m1",
+      request_id: "el1",
+      question: "请填写您的邮箱",
+      schema: {},
+    });
+    expect(deps.pendingConfirmations.value).toHaveLength(1);
+    expect(deps.pendingConfirmations.value[0]).toMatchObject({
+      id: "el1",
+      question: "请填写您的邮箱",
+    });
+    expect(deps.pendingConfirmations.value[0].questions?.[0]?.allow_free_text).toBe(true);
+    expect(nsMock.push).toHaveBeenCalledWith(expect.objectContaining({ kind: "warn" }));
+    // Deduped on repeat delivery (replay).
+    stream.emit({
+      type: "elicitation_request", message_id: "m1", request_id: "el1",
+      question: "请填写您的邮箱",
+    });
+    expect(deps.pendingConfirmations.value).toHaveLength(1);
+  });
+
+  it("clarify_auto pushes an info notification", () => {
       register();
       stream.emit({ type: "clarify_auto", message_id: "m1", question: "Q?", choice: "A" });
       expect(nsMock.push).toHaveBeenCalledWith(expect.objectContaining({ kind: "info" }));

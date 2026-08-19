@@ -375,6 +375,25 @@ export function registerStreamHandlers(
     }
   }, activeId));
 
+  stream.on("elicitation_request", scoped((ev) => {
+    // Agent-side form elicitation. BLOCKING: the runner waits on the same
+    // confirm:{cid}:{request_id} key as confirmation_request (240s timeout),
+    // so without a modal the turn stalls until it auto-answers 超时. Reuse
+    // the confirmation modal — free-text input covers the form case; the
+    // schema is advisory here, not rendered as a dynamic form.
+    if (pendingConfirmations.value.find((r) => r.id === ev.request_id)) return;
+    pendingConfirmations.value.push({
+      id: ev.request_id,
+      conversation_id: activeId.value || "",
+      message_id: ev.message_id,
+      question: ev.question,
+      options: [],
+      questions: [{ question: ev.question, options: [], allow_free_text: true }],
+    });
+    const ns = useNotificationStore();
+    ns.push({ title: t("stream.needsConfirmation"), body: ev.question, kind: "warn" });
+  }, activeId));
+
   stream.on("confirmation_response", scoped((ev) => {
     pendingConfirmations.value = pendingConfirmations.value.filter(
       (r) => r.id !== ev.request_id,

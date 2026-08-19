@@ -166,8 +166,9 @@ async def handle_conversation_summary(task: dict) -> None:
             "Summarised conv %s: +%s msgs, %s total covered, ~%s tokens",
             conversation_id_str[:8], count, covered_count, tokens,
         )
-        # Make the compaction auditable on the live stream (previously the
-        # summary was a pure DB side-effect invisible to the conversation).
+        # Real-time visibility only — the stream lives 24h/2000 entries; the
+        # durable record is the ConversationSummary DB row (previously the
+        # compaction was completely invisible to the conversation).
         try:
             await R.publish_event(conversation_id_str, {
                 "type": "summary_generated",

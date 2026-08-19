@@ -159,6 +159,12 @@ async def enqueue_prompt(payload: dict) -> str:
     return await get_redis().xadd(settings.acp_stream, {"data": _json.dumps(payload)})
 
 
+# Public alias for callers that batch-publish via their own pipeline (e.g.
+# fan-out notify to many member streams) — stamp the envelope BEFORE xadd so
+# those events don't bypass ts/v injection.
+stamp_event_envelope = _stamp_envelope
+
+
 async def publish_event(conversation_id: str, event: dict) -> None:
     """Append a streaming event to the conversation's live stream (hot path).
 

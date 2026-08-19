@@ -94,8 +94,19 @@ def summarize_title_sync(user_text: str, reply_text: str) -> str | None:
     Returns None on any failure (not configured, API error, empty output) —
     the caller keeps the truncated-placeholder title in that case.
     """
-    if not settings.auxiliary_llm_model or not settings.auxiliary_llm_api_key:
-        logger.debug("Auxiliary LLM not configured — skipping title summary")
+    # Fallback chain for the cheap-channel credentials: auxiliary_llm_* is
+    # the designated slot, but most deployments only configured the
+    # skill-evolution LLM (same class of background, non-user-facing work) —
+    # without this fallback title generation silently no-ops.
+    model = settings.auxiliary_llm_model or settings.skill_evolution_llm_model
+    api_key = settings.auxiliary_llm_api_key or settings.skill_evolution_llm_api_key
+    api_base = (
+        settings.auxiliary_llm_api_base
+        or settings.skill_evolution_llm_api_base
+        or None
+    )
+    if not model or not api_key:
+        logger.debug("No auxiliary/evolution LLM configured — skipping title summary")
         return None
     try:
         import dspy
@@ -117,11 +128,7 @@ def summarize_title_sync(user_text: str, reply_text: str) -> str | None:
         title: str = dspy.OutputField(desc="不超过 16 字的简短中文标题")
 
     try:
-        lm = dspy.LM(
-            settings.auxiliary_llm_model,
-            api_key=settings.auxiliary_llm_api_key,
-            api_base=settings.auxiliary_llm_api_base or None,
-        )
+        lm = dspy.LM(model, api_key=api_key, api_base=api_base)
         predictor = dspy.Predict(TitleConversation)
         with dspy.context(lm=lm):
             result = predictor(

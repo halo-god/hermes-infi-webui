@@ -1118,6 +1118,18 @@ async def send_roundtable(
     # runner wraps each target's own persona text and re-attaches these.
     attachment_blocks = _build_attachment_content_blocks(convo, attached)
 
+    # Roundtable iteration cap: the HIGHEST per-profile cap among participants
+    # (None=unlimited counts as 0). Max, not min, so one profile's tight limit
+    # doesn't strangle the others; the cap is a runaway backstop, not a quota.
+    rt_max_iterations = 0
+    pids = [uuid.UUID(t["profile_id"]) for t in targets if t.get("profile_id")]
+    if pids:
+        rows = (await db.execute(
+            select(Profile.id, Profile.max_iterations).where(Profile.id.in_(pids))
+        )).all()
+        caps = [m or 0 for _, m in rows]
+        rt_max_iterations = max(caps) if caps else 0
+
     await redis_core.clear_cancel(str(convo.id))
     try:
         await redis_core.enqueue_prompt(
@@ -1130,6 +1142,7 @@ async def send_roundtable(
                 "content_blocks": attachment_blocks or None,
                 "moa": moa,
                 "research_mode": research_mode,
+                "max_iterations": rt_max_iterations,
             }
         )
     except Exception as exc:
@@ -2697,13 +2710,13 @@ async def _publish_user_message(
         if not m.user_id or m.user_id == user_msg.owner_id:
             continue
         mention = resolved.all_humans or (m.user_id in mentioned_ids)
-        event = _json.dumps({
+        event = _json.dumps(redis_core.stamp_event_envelope({
             "type": "notify",
             "conversation_id": str(convo.id),
             "title": convo.title,
             "snippet": snippet,
             "mention": bool(mention),
-        })
+        }))
         uid = str(m.user_id)
         pipe.xadd(redis_core.user_stream(uid), {"data": event}, maxlen=redis_core.USER_STREAM_MAXLEN, approximate=True)
         pipe.expire(redis_core.user_stream(uid), redis_core.USER_STREAM_TTL)

@@ -346,7 +346,7 @@ export interface RoundtableReply {
   agent_id: string;
   profile_id?: string | null;
   text: string;
-  status: "streaming" | "complete" | "error" | "timeout";
+  status: "streaming" | "complete" | "error" | "timeout" | "blocked";
   /** Present in persisted/session-log replies (admin 会话日志 detail). */
   thinking?: string | null;
   calls?: SessionCallEntry[];

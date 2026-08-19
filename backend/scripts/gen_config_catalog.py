@@ -150,7 +150,9 @@ def main() -> None:
         print(text)
         return
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT.write_text(text, encoding="utf-8")
+    # Pin LF: a Windows contributor would otherwise produce CRLF and
+    # trip the CI freshness diff.
+    OUTPUT.write_text(text, encoding="utf-8", newline="\n")
     print(f"wrote {OUTPUT} ({len(text)} bytes)")
 
 

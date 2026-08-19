@@ -1207,10 +1207,19 @@ class Runner:
             elif kind == "session_info" or kind == "session_info_update":
                 new_title = update.get("title")
                 if new_title:
-                    t = asyncio.create_task(self._update_conv_title(conversation_id, new_title))
-                    self._bg_tasks.add(t)
-                    t.add_done_callback(self._bg_tasks.discard)
-                    await R.publish_event(conversation_id, {"type": "session_info", "title": new_title})
+                    # IGNORED as a title source. The hermes-agent's own
+                    # title_generator is broken on DeepSeek (response_format
+                    # 400) and its failure fallback truncates the FULL prompt —
+                    # preamble like 【文件写入规范】… — producing garbage
+                    # titles that then beat our placeholder guard (observed
+                    # 2026-08-19). The platform-side first-turn summariser
+                    # (_spawn_title_summary, guarded) is the single title
+                    # writer; the event is only forwarded for informational
+                    # purposes and must not touch the DB.
+                    logger.debug(
+                        "ignoring agent-side session_info title %r (platform summariser owns titles)",
+                        new_title[:40],
+                    )
             elif kind == "available_commands_update":
                 # F2: agent advertises its slash commands. Cache per-conversation
                 # in Redis (7d) and forward to the frontend for the command palette.
@@ -1608,16 +1617,16 @@ class Runner:
         # First-turn title summary: replace the truncated-placeholder title
         # with a concise LLM title generated from the exchange. Async +
         # fail-silent — the placeholder stays if anything goes wrong.
-        if (
-            status == "complete"
-            and task.get("first_turn")
-            and settings.title_summary_enabled
-        ):
-            self._spawn_title_summary(
-                conversation_id,
-                user_excerpt=skill_firing_excerpt,
-                reply_text=acc.get("text") or "",
-            )
+        if status == "complete" and task.get("first_turn"):
+            if settings.title_summary_enabled:
+                logger.info("first-turn title summary spawning for conv=%s", conversation_id[:8])
+                self._spawn_title_summary(
+                    conversation_id,
+                    user_excerpt=skill_firing_excerpt,
+                    reply_text=acc.get("text") or "",
+                )
+            else:
+                logger.info("title summary disabled by settings")
         if status == "complete" and matched_skill_ids:
             await self._record_skill_firings(
                 conversation_id, acc["current_msg_id"], matched_skill_ids, skill_firing_excerpt,
@@ -2013,6 +2022,7 @@ class Runner:
                     summarize_title_sync, user_excerpt, reply_text,
                 )
                 if not title:
+                    logger.info("title summariser returned None (LLM config or output empty)")
                     return
                 # The placeholder dispatch wrote = first user message[:40].
                 placeholder = (user_excerpt or "")[:40]
