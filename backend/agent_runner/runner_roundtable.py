@@ -396,9 +396,39 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
         async def _noop(_p: str, _c: str) -> None:
             return None
 
+        # Merge-phase files (Hermes 综合各方观点 产出的报告等) must land in the
+        # workspace AND on the message — previously on_fs_write was a _noop, so
+        # merge files only survived via the workspace-watcher backstop and the
+        # message-level file chips never appeared.
+        merged_files: list[dict] = []
+
+        async def on_merge_fs(path: str, content: str) -> None:
+            try:
+                f = await storage.save_file(
+                    uuid.UUID(conversation_id), path, content, "hermes", uuid.UUID(message_id),
+                )
+                # Also write to disk so the agent can read its own output later.
+                from app.core.files import confine_to_dir, safe_relative_path
+                disk_path = confine_to_dir(cwd, safe_relative_path(path))
+                os.makedirs(os.path.dirname(disk_path), exist_ok=True)
+                with open(disk_path, "w", encoding="utf-8") as fh:
+                    fh.write(content)
+                entry = {
+                    "id": str(f.id), "name": f.name, "kind": f.kind,
+                    "version": f.current_version,
+                }
+                merged_files.append(entry)
+                await R.publish_event(conversation_id, {
+                    "type": "file", "message_id": message_id,
+                    "file_id": str(f.id), "name": f.name, "kind": f.kind,
+                    "version": f.current_version,
+                })
+            except Exception:  # noqa: BLE001 — a failed file save must not kill the merge
+                logger.debug("merge on_fs save failed for %s", path, exc_info=True)
+
         mclient = ACPClient(
             hermes.command, cwd, protocol_version=settings.acp_protocol_version,
-            on_update=on_merge, on_fs_write=_noop, env=profile_env(None),
+            on_update=on_merge, on_fs_write=on_merge_fs, env=profile_env(None),
             on_permission_request=auto_deny_permission,
         )
         try:
@@ -426,6 +456,7 @@ async def handle_roundtable(task: dict, agents: dict) -> None:
     await _finalize_roundtable(
         message_id, targets, texts, statuses, thinkings, file_lists, merged["text"], "complete", moa,
         merged_thinking=merged["thinking"],
+        message_files=merged_files,
     )
     await R.clear_cancel(conversation_id)
     await R.publish_event(
@@ -438,6 +469,7 @@ async def _finalize_roundtable(
     statuses: list[str], thinkings: list[str], file_lists: list[list[dict]],
     merged: str, status: str, moa: bool = False,
     merged_thinking: str = "",
+    message_files: list[dict] | None = None,
 ) -> None:
     async with async_session_maker() as db:
         msg = await db.get(Message, uuid.UUID(message_id))
@@ -460,6 +492,10 @@ async def _finalize_roundtable(
                     "status": status,
                 },
                 "moa": moa,
+                # Message-level files from the MERGE phase (the 综合各方观点
+                # report etc.) — rendered as file chips on the roundtable msg,
+                # same shape as single-agent message content.files.
+                "files": message_files or [],
             }
             msg.status = status
             convo = await db.get(Conversation, msg.conversation_id)
